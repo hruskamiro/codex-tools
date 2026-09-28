@@ -135,7 +135,7 @@ class ViewerCommandTests(unittest.TestCase):
             self.assertIn('id="statusbarToggle"', html)
             self.assertIn('aria-expanded="false"', html)
             self.assertIn('id="statusbarActions" class="statusbar-actions"', html)
-            self.assertIn('<a class="status-button" href="/">Choose</a>', html)
+            self.assertIn('>Choose <kbd>C</kbd></a>', html)
             self.assertNotIn('class="status-link"', html)
         self.assertIn(
             ".view-statusbar.is-expanded .statusbar-actions", viewer.APP_CSS
@@ -163,11 +163,31 @@ class ViewerCommandTests(unittest.TestCase):
         )[1].split("</div>", 1)[0]
 
         self.assertIn('id="typesetViewLink"', view_actions)
-        self.assertIn(">LaTeX</a>", view_actions)
+        self.assertIn(">LaTeX <kbd>T</kbd></a>", view_actions)
         self.assertIn('id="normalViewLink"', typeset_actions)
-        self.assertIn(">Markdown</a>", typeset_actions)
+        self.assertIn(">Markdown <kbd>T</kbd></a>", typeset_actions)
         self.assertIn("els.typesetViewLink.href", viewer.VIEW_JS)
         self.assertIn("els.normalViewLink.href", viewer.TYPESET_JS)
+
+    def test_statusbar_actions_show_and_handle_keyboard_shortcuts(self) -> None:
+        for html in (viewer.VIEW_HTML, viewer.TYPESET_HTML):
+            for key in ("U", "L", "E", "A", "R", "T", "C"):
+                self.assertIn(f"<kbd>{key}</kbd>", html)
+            self.assertIn("Left Arrow shortcut", html)
+            self.assertIn("Right Arrow shortcut", html)
+
+        for script in (viewer.VIEW_JS, viewer.TYPESET_JS):
+            self.assertIn('["u", "l", "e", "a", "t", "c"]', script)
+            self.assertIn('key === "u"', script)
+            self.assertIn('key === "l"', script)
+            self.assertIn('key === "e"', script)
+            self.assertIn('key === "a"', script)
+            self.assertIn('key === "t"', script)
+            self.assertIn('key === "c"', script)
+            self.assertIn('location.assign("/")', script)
+
+        self.assertIn("location.assign(els.typesetViewLink.href)", viewer.VIEW_JS)
+        self.assertIn("location.assign(els.normalViewLink.href)", viewer.TYPESET_JS)
 
     def test_bundled_web_assets_are_default_with_cdn_override(self) -> None:
         args = viewer.parse_args(["restart"])

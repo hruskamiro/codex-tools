@@ -1477,15 +1477,15 @@ VIEW_HTML = """<!doctype html>
     <nav id="viewStatusbar" class="view-statusbar" aria-label="Conversation navigation">
       <button id="statusbarToggle" class="statusbar-toggle" type="button" title="Show navigation" aria-label="Show navigation" aria-expanded="false" aria-controls="statusbarActions">/</button>
       <div id="statusbarActions" class="statusbar-actions">
-        <button id="jumpPrevious" class="status-button icon-status-button" type="button" title="Previous block" aria-label="Previous block">←</button>
-        <button id="jumpNext" class="status-button icon-status-button" type="button" title="Next block" aria-label="Next block">→</button>
-        <button id="jumpTop" class="status-button" type="button">Up</button>
-        <button id="jumpLatest" class="status-button" type="button">Latest</button>
-        <button id="loadEarlier" class="status-button" type="button">Earlier</button>
-        <button id="loadAll" class="status-button" type="button">All</button>
-        <button id="statusRefresh" class="status-button icon-status-button" type="button" title="Refresh conversation" aria-label="Refresh conversation">↻</button>
-        <a id="typesetViewLink" class="status-button" href="/typeset">LaTeX</a>
-        <a class="status-button" href="/">Choose</a>
+        <button id="jumpPrevious" class="status-button icon-status-button" type="button" title="Previous block (Left Arrow)" aria-label="Previous block, Left Arrow shortcut">←</button>
+        <button id="jumpNext" class="status-button icon-status-button" type="button" title="Next block (Right Arrow)" aria-label="Next block, Right Arrow shortcut">→</button>
+        <button id="jumpTop" class="status-button" type="button">Up <kbd>U</kbd></button>
+        <button id="jumpLatest" class="status-button" type="button">Latest <kbd>L</kbd></button>
+        <button id="loadEarlier" class="status-button" type="button">Earlier <kbd>E</kbd></button>
+        <button id="loadAll" class="status-button" type="button">All <kbd>A</kbd></button>
+        <button id="statusRefresh" class="status-button icon-status-button" type="button" title="Refresh conversation (R)" aria-label="Refresh conversation, R shortcut">↻<kbd>R</kbd></button>
+        <a id="typesetViewLink" class="status-button" href="/typeset">LaTeX <kbd>T</kbd></a>
+        <a class="status-button" href="/">Choose <kbd>C</kbd></a>
       </div>
     </nav>
   </main>
@@ -1529,15 +1529,15 @@ TYPESET_HTML = """<!doctype html>
     <nav id="viewStatusbar" class="view-statusbar" aria-label="Typeset conversation navigation">
       <button id="statusbarToggle" class="statusbar-toggle" type="button" title="Show navigation" aria-label="Show navigation" aria-expanded="false" aria-controls="statusbarActions">/</button>
       <div id="statusbarActions" class="statusbar-actions">
-        <button id="jumpPrevious" class="status-button icon-status-button" type="button" title="Previous block" aria-label="Previous block">←</button>
-        <button id="jumpNext" class="status-button icon-status-button" type="button" title="Next block" aria-label="Next block">→</button>
-        <button id="jumpTop" class="status-button" type="button">Up</button>
-        <button id="jumpLatest" class="status-button" type="button">Latest</button>
-        <button id="loadEarlier" class="status-button" type="button">Earlier</button>
-        <button id="loadAll" class="status-button" type="button">All</button>
-        <button id="statusRefresh" class="status-button icon-status-button" type="button" title="Refresh" aria-label="Refresh">↻</button>
-        <a id="normalViewLink" class="status-button" href="/view">Markdown</a>
-        <a class="status-button" href="/">Choose</a>
+        <button id="jumpPrevious" class="status-button icon-status-button" type="button" title="Previous block (Left Arrow)" aria-label="Previous block, Left Arrow shortcut">←</button>
+        <button id="jumpNext" class="status-button icon-status-button" type="button" title="Next block (Right Arrow)" aria-label="Next block, Right Arrow shortcut">→</button>
+        <button id="jumpTop" class="status-button" type="button">Up <kbd>U</kbd></button>
+        <button id="jumpLatest" class="status-button" type="button">Latest <kbd>L</kbd></button>
+        <button id="loadEarlier" class="status-button" type="button">Earlier <kbd>E</kbd></button>
+        <button id="loadAll" class="status-button" type="button">All <kbd>A</kbd></button>
+        <button id="statusRefresh" class="status-button icon-status-button" type="button" title="Refresh typeset view (R)" aria-label="Refresh typeset view, R shortcut">↻<kbd>R</kbd></button>
+        <a id="normalViewLink" class="status-button" href="/view">Markdown <kbd>T</kbd></a>
+        <a class="status-button" href="/">Choose <kbd>C</kbd></a>
       </div>
     </nav>
   </main>
@@ -2044,6 +2044,7 @@ h2 {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  gap: 4px;
   min-width: 40px;
   height: 30px;
   border: 0;
@@ -2054,6 +2055,19 @@ h2 {
   font-weight: 760;
   line-height: 1;
   text-decoration: none;
+}
+
+.status-button kbd {
+  min-width: 15px;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  padding: 1px 3px;
+  color: var(--muted);
+  background: var(--surface);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1.1;
 }
 
 .status-button:hover,
@@ -3417,11 +3431,13 @@ els.loadAll?.addEventListener("click", () => {
 window.addEventListener("keydown", (event) => {
   const target = event.target;
   const isEditable = target?.closest?.("input, textarea, select, [contenteditable='true']");
+  const key = event.key?.toLowerCase();
   const isRefreshKey = event.code === "KeyR" || event.key?.toLowerCase() === "r";
   const isPreviousKey = event.code === "ArrowLeft";
   const isNextKey = event.code === "ArrowRight";
   const isStatusbarKey = event.key === "/";
-  if ((!isRefreshKey && !isPreviousKey && !isNextKey && !isStatusbarKey) || event.metaKey || event.ctrlKey) return;
+  const isActionKey = ["u", "l", "e", "a", "t", "c"].includes(key);
+  if ((!isRefreshKey && !isPreviousKey && !isNextKey && !isStatusbarKey && !isActionKey) || event.metaKey || event.ctrlKey) return;
   if (isEditable && !event.altKey) return;
   event.preventDefault();
   if (isStatusbarKey) {
@@ -3434,6 +3450,18 @@ window.addEventListener("keydown", (event) => {
     jumpMessage(-1);
   } else if (isNextKey) {
     jumpMessage(1);
+  } else if (key === "u") {
+    scrollToConversationTop();
+  } else if (key === "l") {
+    scrollToLatestAssistant();
+  } else if (key === "e" && !els.loadEarlier?.disabled) {
+    loadEarlierConversation().catch((error) => setStatus(error.message, "error"));
+  } else if (key === "a" && !els.loadAll?.disabled) {
+    loadAllConversation().catch((error) => setStatus(error.message, "error"));
+  } else if (key === "t") {
+    location.assign(els.typesetViewLink.href);
+  } else if (key === "c") {
+    location.assign("/");
   }
 }, true);
 
@@ -4075,11 +4103,13 @@ els.loadAll?.addEventListener("click", () => {
 window.addEventListener("keydown", (event) => {
   const target = event.target;
   const isEditable = target?.closest?.("input, textarea, select, [contenteditable='true']");
+  const key = event.key?.toLowerCase();
   const isRefreshKey = event.code === "KeyR" || event.key?.toLowerCase() === "r";
   const isPreviousKey = event.code === "ArrowLeft";
   const isNextKey = event.code === "ArrowRight";
   const isStatusbarKey = event.key === "/";
-  if ((!isRefreshKey && !isPreviousKey && !isNextKey && !isStatusbarKey) || event.metaKey || event.ctrlKey) return;
+  const isActionKey = ["u", "l", "e", "a", "t", "c"].includes(key);
+  if ((!isRefreshKey && !isPreviousKey && !isNextKey && !isStatusbarKey && !isActionKey) || event.metaKey || event.ctrlKey) return;
   if (isEditable && !event.altKey) return;
   event.preventDefault();
   if (isStatusbarKey) {
@@ -4090,6 +4120,18 @@ window.addEventListener("keydown", (event) => {
     jumpMessage(-1);
   } else if (isNextKey) {
     jumpMessage(1);
+  } else if (key === "u") {
+    scrollToConversationTop();
+  } else if (key === "l") {
+    scrollToLatestAssistant();
+  } else if (key === "e" && !els.loadEarlier?.disabled) {
+    loadEarlierConversation().catch((error) => setStatus(error.message, "error"));
+  } else if (key === "a" && !els.loadAll?.disabled) {
+    loadAllConversation().catch((error) => setStatus(error.message, "error"));
+  } else if (key === "t") {
+    location.assign(els.normalViewLink.href);
+  } else if (key === "c") {
+    location.assign("/");
   }
 }, true);
 
