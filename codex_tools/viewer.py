@@ -2331,6 +2331,7 @@ h2 {
 }
 
 .message {
+  position: relative;
   max-width: 880px;
   margin: 0 auto 22px;
   border: 1px solid var(--line);
@@ -2338,6 +2339,19 @@ h2 {
   background: var(--assistant);
   overflow: hidden;
   scroll-margin-top: 18px;
+}
+
+.message.is-navigation-current::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 4;
+  width: 5px;
+  border-radius: 7px 0 0 7px;
+  background: var(--accent);
+  pointer-events: none;
 }
 
 .message.user {
@@ -2366,6 +2380,10 @@ h2 {
   background: transparent;
   border: 0;
   overflow: visible;
+}
+
+.typeset-message.is-navigation-current::before {
+  left: max(0px, calc((100% - 760px) / 2));
 }
 
 .typeset-message .message-header {
@@ -3575,17 +3593,30 @@ function renderRecord(record) {
   `;
 }
 
+function setNavigationCurrent(message) {
+  els.conversation.querySelectorAll(".message.is-navigation-current").forEach((current) => {
+    current.classList.remove("is-navigation-current");
+    current.removeAttribute("aria-current");
+  });
+  if (!message) return;
+  message.classList.add("is-navigation-current");
+  message.setAttribute("aria-current", "true");
+}
+
 function scrollToLatestAssistant() {
   const assistants = els.conversation.querySelectorAll(".message.assistant");
   const messages = els.conversation.querySelectorAll(".message");
   const target = assistants[assistants.length - 1] || messages[messages.length - 1];
   if (!target) return;
   messageNavigationIndex = Array.from(messages).indexOf(target);
+  setNavigationCurrent(target);
   target.scrollIntoView({ block: "start" });
 }
 
 function scrollToConversationTop() {
+  const target = els.conversation.querySelector(".message");
   messageNavigationIndex = 0;
+  setNavigationCurrent(target);
   els.conversation.scrollIntoView({ block: "start" });
 }
 
@@ -3654,6 +3685,7 @@ function jumpMessage(delta) {
   const baseIndex = cursorIsVisible ? messageNavigationIndex : activeMessageIndex();
   const nextIndex = Math.max(0, Math.min(messages.length - 1, baseIndex + delta));
   messageNavigationIndex = nextIndex;
+  setNavigationCurrent(messages[nextIndex]);
   messages[nextIndex].scrollIntoView({ block: "start" });
 }
 
@@ -4306,6 +4338,16 @@ function renderPdfPages(root) {
   );
 }
 
+function setNavigationCurrent(message) {
+  els.conversation.querySelectorAll(".message.is-navigation-current").forEach((current) => {
+    current.classList.remove("is-navigation-current");
+    current.removeAttribute("aria-current");
+  });
+  if (!message) return;
+  message.classList.add("is-navigation-current");
+  message.setAttribute("aria-current", "true");
+}
+
 function messageLineId(message) {
   if (message?.dataset?.lineNo) return message.dataset.lineNo;
   const text = message?.querySelector(".message-header span")?.textContent || "";
@@ -4374,6 +4416,7 @@ function jumpMessage(delta) {
   const baseIndex = cursorIsVisible ? messageNavigationIndex : activeMessageIndex();
   const nextIndex = Math.max(0, Math.min(messages.length - 1, baseIndex + delta));
   messageNavigationIndex = nextIndex;
+  setNavigationCurrent(messages[nextIndex]);
   messages[nextIndex].scrollIntoView({ block: "start" });
 }
 
@@ -4383,11 +4426,14 @@ function scrollToLatestAssistant() {
   const target = assistants[assistants.length - 1] || messages[messages.length - 1];
   if (!target) return;
   messageNavigationIndex = Array.from(messages).indexOf(target);
+  setNavigationCurrent(target);
   target.scrollIntoView({ block: "start" });
 }
 
 function scrollToConversationTop() {
+  const target = els.conversation.querySelector(".message");
   messageNavigationIndex = 0;
+  setNavigationCurrent(target);
   els.conversation.scrollIntoView({ block: "start" });
 }
 

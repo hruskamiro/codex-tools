@@ -299,6 +299,24 @@ class ViewerCommandTests(unittest.TestCase):
         self.assertIn("location.assign(els.typesetViewLink.href)", viewer.VIEW_JS)
         self.assertIn("location.assign(els.normalViewLink.href)", viewer.TYPESET_JS)
 
+    def test_message_navigation_marks_the_current_bubble(self) -> None:
+        for script in (viewer.VIEW_JS, viewer.TYPESET_JS):
+            self.assertIn("function setNavigationCurrent(message)", script)
+            self.assertIn('classList.add("is-navigation-current")', script)
+            self.assertIn('setAttribute("aria-current", "true")', script)
+            self.assertIn("setNavigationCurrent(messages[nextIndex])", script)
+            self.assertIn("setNavigationCurrent(target)", script)
+
+        self.assertIn(".message.is-navigation-current::before", viewer.APP_CSS)
+        self.assertIn(
+            ".typeset-message.is-navigation-current::before", viewer.APP_CSS
+        )
+        navigation_rule = viewer.APP_CSS.split(
+            ".message.is-navigation-current::before", 1
+        )[1].split("}", 1)[0]
+        self.assertIn("width: 5px", navigation_rule)
+        self.assertIn("background: var(--accent)", navigation_rule)
+
     def test_bundled_web_assets_are_default_with_cdn_override(self) -> None:
         args = viewer.parse_args(["restart"])
         self.assertEqual(args.web_assets, "bundled")
