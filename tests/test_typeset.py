@@ -76,6 +76,8 @@ class TypesetTests(unittest.TestCase):
         self.assertIn("xleftmargin=0.8em", document)
         self.assertIn("xrightmargin=0.8em", document)
         self.assertIn(r"vspace=\CodexCodeTopSep", document)
+        self.assertIn("https://codex-tools.invalid/code/0", document)
+        self.assertIn(r"\newcommand{\CodexCopyTarget}", document)
 
         indented = typeset.document_for("One.\n\nTwo.", paragraph_mode="indented")
         self.assertIn(r"\setlength{\parindent}{1.2em}", indented)
@@ -88,6 +90,22 @@ class TypesetTests(unittest.TestCase):
         self.assertIn("Visible title", embedded)
         self.assertIn(r"\hrule height 0.4pt", embedded)
         self.assertIn(r"\documentclass[10pt,border={0.75cm}]{standalone}", embedded)
+
+    def test_fenced_code_blocks_preserve_exact_contents_and_order(self) -> None:
+        markdown = (
+            "Before.\n\n"
+            "```bash\n  printf '%s\\n' hello  \n```\n\n"
+            "```text\n/tmp/example\nsecond line\n```"
+        )
+
+        self.assertEqual(
+            typeset.fenced_code_blocks(markdown),
+            ["  printf '%s\\n' hello  ", "/tmp/example\nsecond line"],
+        )
+        latex = typeset.markdown_to_latex(markdown)
+        self.assertIn("https://codex-tools.invalid/code/0", latex)
+        self.assertIn("https://codex-tools.invalid/code/1", latex)
+        self.assertNotIn("https://codex-tools.invalid/code/2", latex)
 
     def test_unknown_paragraph_mode_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "unknown paragraph mode"):

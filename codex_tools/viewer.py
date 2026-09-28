@@ -623,6 +623,7 @@ def handle_typeset(
             "key": result.key,
             "cached": result.cached,
             "pdfUrl": pdf_url,
+            "codeBlocks": typeset.fenced_code_blocks(payload_records[index]["text"]),
             "error": result.error or "",
         }
 
@@ -2531,6 +2532,44 @@ h2 {
   z-index: 1;
 }
 
+.typeset-pdf-page .code-copy-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.typeset-code-copy {
+  position: absolute;
+  display: grid;
+  min-width: 22px;
+  min-height: 22px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--paper) 94%, transparent);
+  box-shadow: 0 1px 3px rgb(30 32 28 / 16%);
+  color: var(--muted);
+  font-family: var(--font-ui);
+  font-size: 15px;
+  line-height: 1;
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.typeset-code-copy:hover,
+.typeset-code-copy:focus-visible,
+.typeset-code-copy.is-copied {
+  border-color: var(--accent);
+  color: var(--accent-dark);
+}
+
+.typeset-code-copy.is-error {
+  border-color: #9b352d;
+  color: #9b352d;
+}
+
 .typeset-pdf-page .textLayer :is(span, br) {
   position: absolute;
   color: transparent;
@@ -3759,6 +3798,7 @@ loadConversation().catch((error) => {
 TYPESET_JS = r"""
 const params = new URLSearchParams(location.search);
 const TYPESET_PDF_RENDER_SCALE = 1.6;
+const CODE_COPY_ORIGIN = "https://codex-tools.invalid";
 const WEB_ASSETS = document.body.dataset.webAssets || "bundled";
 const PDFJS_MODULE_URL = WEB_ASSETS === "cdn"
   ? "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.min.mjs"
@@ -3978,7 +4018,8 @@ function typesetDebugBar(record) {
 function pdfPage(record) {
   const url = record.typeset?.pdfUrl || "";
   return `
-    <div class="typeset-pdf-page is-loading" data-pdf-url="${escapeHtml(url)}">
+    <div class="typeset-pdf-page is-loading" data-pdf-url="${escapeHtml(url)}"
+      data-copy-line="${escapeHtml(record.line_no)}">
       <span>Rendering PDF...</span>
     </div>
   `;
@@ -4072,6 +4113,60 @@ async function pdfjs() {
   return module;
 }
 
+function codeCopyIndex(annotation) {
+  const rawUrl = annotation?.unsafeUrl || annotation?.url || "";
+  try {
+    const url = new URL(rawUrl);
+    if (url.origin !== CODE_COPY_ORIGIN) return null;
+    const match = url.pathname.match(/^\/code\/(\d+)\/?$/);
+    return match ? Number.parseInt(match[1], 10) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function addCodeCopyButtons(page, container, viewport) {
+  let annotations;
+  try {
+    annotations = await page.getAnnotations({ intent: "display" });
+  } catch {
+    return;
+  }
+  const lineNo = String(container.dataset.copyLine || "");
+  const record = lastConversationData?.records?.find(
+    (candidate) => String(candidate.line_no) === lineNo,
+  );
+  const codeBlocks = record?.typeset?.codeBlocks || [];
+  const layer = document.createElement("div");
+  layer.className = "code-copy-layer";
+  for (const annotation of annotations) {
+    const copyIndex = codeCopyIndex(annotation);
+    if (copyIndex === null || copyIndex >= codeBlocks.length || !annotation.rect) continue;
+    const rectangle = viewport.convertToViewportRectangle(annotation.rect);
+    const left = Math.min(rectangle[0], rectangle[2]);
+    const right = Math.max(rectangle[0], rectangle[2]);
+    const top = Math.min(rectangle[1], rectangle[3]);
+    const bottom = Math.max(rectangle[1], rectangle[3]);
+    const width = Math.max(22, right - left);
+    const height = Math.max(22, bottom - top);
+    const button = document.createElement("button");
+    button.className = "typeset-code-copy";
+    button.type = "button";
+    button.dataset.copyLine = lineNo;
+    button.dataset.copyIndex = String(copyIndex);
+    button.dataset.copyLabel = "Copy code";
+    button.title = "Copy code";
+    button.setAttribute("aria-label", "Copy code");
+    button.innerHTML = '<span aria-hidden="true">&#x29C9;</span>';
+    button.style.left = `${right - width}px`;
+    button.style.top = `${top - Math.max(0, (height - (bottom - top)) / 2)}px`;
+    button.style.width = `${width}px`;
+    button.style.height = `${height}px`;
+    layer.appendChild(button);
+  }
+  if (layer.childElementCount) container.appendChild(layer);
+}
+
 async function renderPdfPage(container) {
   const url = container.dataset.pdfUrl;
   if (!url || container.dataset.rendering === "1") return;
@@ -4115,6 +4210,7 @@ async function renderPdfPage(container) {
       viewport,
     });
     await textLayer.render();
+    await addCodeCopyButtons(page, container, viewport);
     container.dataset.renderedWidth = String(width);
     pdfPageResizeObserver?.observe(container);
   } catch (error) {
@@ -4260,8 +4356,9 @@ async function copyText(text) {
 
 function resetCopyButton(button) {
   button.classList.remove("is-copied", "is-error");
-  button.title = "Copy Markdown";
-  button.setAttribute("aria-label", "Copy Markdown");
+  const label = button.dataset.copyLabel || "Copy Markdown";
+  button.title = label;
+  button.setAttribute("aria-label", label);
   button.querySelector("span").textContent = "⧉";
 }
 
@@ -4282,6 +4379,32 @@ async function copyRecordMarkdown(button) {
     button.classList.add("is-error");
     button.title = "Could not copy Markdown";
     button.setAttribute("aria-label", "Could not copy Markdown");
+    button.querySelector("span").textContent = "!";
+  } finally {
+    button.disabled = false;
+    window.setTimeout(() => resetCopyButton(button), 1600);
+  }
+}
+
+async function copyRecordCode(button) {
+  const lineNo = String(button.dataset.copyLine || "");
+  const copyIndex = Number.parseInt(button.dataset.copyIndex || "", 10);
+  const record = lastConversationData?.records?.find(
+    (candidate) => String(candidate.line_no) === lineNo,
+  );
+  const code = record?.typeset?.codeBlocks?.[copyIndex];
+  if (typeof code !== "string") return;
+  button.disabled = true;
+  try {
+    await copyText(code);
+    button.classList.add("is-copied");
+    button.title = "Code copied";
+    button.setAttribute("aria-label", "Code copied");
+    button.querySelector("span").textContent = "✓";
+  } catch {
+    button.classList.add("is-error");
+    button.title = "Could not copy code";
+    button.setAttribute("aria-label", "Could not copy code");
     button.querySelector("span").textContent = "!";
   } finally {
     button.disabled = false;
@@ -4419,9 +4542,13 @@ els.statusRefresh?.addEventListener("click", () => {
   refreshConversation().catch((error) => setStatus(error.message, "error"));
 });
 els.conversation?.addEventListener("click", (event) => {
-  const button = event.target.closest?.(".typeset-copy-markdown");
-  if (!button) return;
-  copyRecordMarkdown(button);
+  const markdownButton = event.target.closest?.(".typeset-copy-markdown");
+  if (markdownButton) {
+    copyRecordMarkdown(markdownButton);
+    return;
+  }
+  const codeButton = event.target.closest?.(".typeset-code-copy");
+  if (codeButton) copyRecordCode(codeButton);
 });
 els.jumpTop?.addEventListener("click", scrollToConversationTop);
 els.statusbarToggle?.addEventListener("click", toggleStatusbar);

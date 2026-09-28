@@ -25,7 +25,7 @@ except ImportError:  # Pygments is optional when running directly from a checkou
     ClassNotFound = LookupError
 
 
-RENDERER_VERSION = "typeset-v37"
+RENDERER_VERSION = "typeset-v38"
 DEFAULT_PARAGRAPH_MODE = "spaced"
 DEFAULT_HEADER_MODE = "external"
 BODY_LINE_STRETCH = "1.08"
@@ -243,9 +243,21 @@ def resolved_code_mode(code_mode: str) -> str:
 
 
 def render_code_block(
-    lines: list[str], language: str = "", code_mode: str = DEFAULT_CODE_MODE
+    lines: list[str],
+    language: str = "",
+    code_mode: str = DEFAULT_CODE_MODE,
+    copy_index: int | None = None,
 ) -> str:
-    body = "\n".join(lines).replace(r"\end{Verbatim}", r"\textbackslash{}end{Verbatim}")
+    body = "\n".join(lines).replace(
+        r"\end{Verbatim}", r"\textbackslash{}end{Verbatim}"
+    )
+    copy_target = ""
+    if copy_index is not None:
+        copy_target = (
+            r"\noindent\makebox[\linewidth][r]{%" + "\n"
+            + rf"\href{{https://codex-tools.invalid/code/{copy_index}}}{{\CodexCopyTarget}}%"
+            + "\n" + r"}\par\vspace{-\baselineskip}" + "\n"
+        )
     effective_mode = resolved_code_mode(code_mode)
     normalized_language = language.strip().lower().removeprefix("language-")
     if (
@@ -261,13 +273,37 @@ def render_code_block(
             highlighted = highlight(
                 "\n".join(lines), lexer, PYGMENTS_FORMATTER
             ).rstrip("\n")
-            return (
+            return copy_target + (
                 "\\begin{Verbatim}[breaklines=true,breakanywhere=true,"
                 "fontsize=\\small,commandchars=\\\\\\{\\}]\n"
                 + highlighted
                 + "\n\\end{Verbatim}\n"
             )
-    return "\\begin{Verbatim}[breaklines=true,breakanywhere=true,fontsize=\\small]\n" + body + "\n\\end{Verbatim}\n"
+    return (
+        copy_target
+        + "\\begin{Verbatim}[breaklines=true,breakanywhere=true,fontsize=\\small]\n"
+        + body
+        + "\n\\end{Verbatim}\n"
+    )
+
+
+def fenced_code_blocks(markdown: str) -> list[str]:
+    lines = markdown.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    blocks: list[str] = []
+    index = 0
+    while index < len(lines):
+        if not lines[index].strip().startswith("```"):
+            index += 1
+            continue
+        index += 1
+        code_lines: list[str] = []
+        while index < len(lines) and not lines[index].strip().startswith("```"):
+            code_lines.append(lines[index])
+            index += 1
+        blocks.append("\n".join(code_lines))
+        if index < len(lines):
+            index += 1
+    return blocks
 
 
 def parse_list_item(line: str) -> ListItem | None:
@@ -438,6 +474,7 @@ def markdown_to_latex(
     resolved_code_mode(code_mode)
     lines = markdown.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     blocks: list[str] = []
+    code_index = 0
     noindent_next = True
     index = 0
     while index < len(lines):
@@ -456,7 +493,15 @@ def markdown_to_latex(
                 index += 1
             if index < len(lines):
                 index += 1
-            blocks.append(render_code_block(code_lines, language, code_mode))
+            blocks.append(
+                render_code_block(
+                    code_lines,
+                    language,
+                    code_mode,
+                    copy_index=code_index,
+                )
+            )
+            code_index += 1
             noindent_next = True
             continue
 
@@ -594,6 +639,7 @@ def document_for(
 \renewcommand{{\familydefault}}{{\rmdefault}}
 \newsavebox{{\CodexTableBox}}
 \newsavebox{{\CodexInlineCodeBox}}
+\newcommand{{\CodexCopyTarget}}{{{{\color{{white}}\sffamily\scriptsize COPY}}}}
 \newcommand{{\CodexNumber}}[1]{{{{\color{{CodexNumberColor}}#1}}}}
 \newcommand{{\CodexString}}[1]{{{{\color{{CodexStringColor}}#1}}}}
 \newenvironment{{CodexQuote}}{{%

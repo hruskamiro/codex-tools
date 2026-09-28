@@ -203,6 +203,17 @@ class ViewerCommandTests(unittest.TestCase):
         self.assertIn('copyRecordMarkdown(button)', viewer.TYPESET_JS)
         self.assertIn(".typeset-copy-markdown", viewer.APP_CSS)
 
+    def test_typeset_pdf_annotations_copy_exact_fenced_code(self) -> None:
+        self.assertIn(
+            'const CODE_COPY_ORIGIN = "https://codex-tools.invalid"',
+            viewer.TYPESET_JS,
+        )
+        self.assertIn("page.getAnnotations", viewer.TYPESET_JS)
+        self.assertIn('button.className = "typeset-code-copy"', viewer.TYPESET_JS)
+        self.assertIn("record?.typeset?.codeBlocks?.[copyIndex]", viewer.TYPESET_JS)
+        self.assertIn("copyRecordCode(codeButton)", viewer.TYPESET_JS)
+        self.assertIn(".typeset-code-copy", viewer.APP_CSS)
+
     def test_restart_command_stops_then_starts_viewer(self) -> None:
         args = viewer.parse_args(["restart"])
 
@@ -315,7 +326,9 @@ class ViewerCommandTests(unittest.TestCase):
             records=[
                 search.TextRecord("", "user", "question", 10, "message"),
                 search.TextRecord("", "assistant", "first", 11, "message"),
-                search.TextRecord("", "assistant", "target", 12, "message"),
+                search.TextRecord(
+                    "", "assistant", "```text\n/tmp/example\n```", 12, "message"
+                ),
             ],
         )
         state = SimpleNamespace(typeset_debug=True, titles={})
@@ -332,8 +345,11 @@ class ViewerCommandTests(unittest.TestCase):
         self.assertEqual([record["line_no"] for record in payload["records"]], [12])
         self.assertEqual(payload["debugLine"], 12)
         self.assertIn("?fresh=", payload["records"][0]["typeset"]["pdfUrl"])
+        self.assertEqual(
+            payload["records"][0]["typeset"]["codeBlocks"], ["/tmp/example"]
+        )
         render.assert_called_once_with(
-            "target",
+            "```text\n/tmp/example\n```",
             title="Assistant answer",
             force=True,
             header_mode="external",

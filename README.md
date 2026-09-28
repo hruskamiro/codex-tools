@@ -160,7 +160,8 @@ or compare one typeset page with `?code=pygments` and `?code=verbatim`. The
 default `auto` mode highlights recognized fence languages and falls back to
 plain verbatim rendering for unknown languages or installations without
 Pygments. Highlighting is generated in Python; XeLaTeX remains in
-`-no-shell-escape` mode.
+`-no-shell-escape` mode. In the LaTeX view, each fenced code block has a copy
+button that copies its exact original contents rather than PDF-extracted text.
 
 Assistant bubbles in the normal conversation view then show a `Typeset debug`
 link. It opens a dedicated `/debug/typeset/...` page; refreshing that page
