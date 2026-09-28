@@ -2,12 +2,23 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 from codex_tools import manager
 
 
 class ManagerCommandTests(unittest.TestCase):
+    def test_unified_manager_help_uses_the_unified_command_name(self) -> None:
+        with patch("sys.stdout", new_callable=StringIO) as stdout:
+            parser = manager.build_parser("codex-tools manager")
+            with self.assertRaises(SystemExit) as raised:
+                parser.parse_args(["--help"])
+
+        self.assertEqual(raised.exception.code, 0)
+        self.assertIn("usage: codex-tools manager", stdout.getvalue())
+
     def test_command_name_must_be_a_plain_filename(self) -> None:
         parser = manager.build_parser()
 

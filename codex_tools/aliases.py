@@ -19,9 +19,9 @@ _ct_completion() {
   local cur prev words cword
   _init_completion -n : || return
 
-  local commands="search summary viewer manager diagnose alias"
+  local commands="search summary viewer manager alias structured diagnose"
   local summary_commands="today yesterday day week site clean"
-  local viewer_commands="serve start stop status open pick"
+  local viewer_commands="serve start restart stop status open pick doctor"
   local manager_commands="new list run install uninstall remove rm delete path doctor repair"
   local alias_commands="install remove list"
 

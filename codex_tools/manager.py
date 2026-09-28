@@ -568,9 +568,9 @@ def command_remove(args: argparse.Namespace) -> int:
     return 0
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser(prog: str = "codex-manager") -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="codex-manager",
+        prog=prog,
         description="Manage isolated Codex profiles with shared conversation stores.",
     )
     parser.add_argument(
@@ -666,8 +666,8 @@ def normalize_remainder(args: argparse.Namespace) -> None:
         args.command_name = args.name
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
+def main(argv: list[str] | None = None, *, prog: str = "codex-manager") -> int:
+    parser = build_parser(prog)
     args = parser.parse_args(argv)
     if not hasattr(args, "func"):
         parser.print_help()

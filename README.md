@@ -6,6 +6,9 @@ context, plus reproducible structured Codex execution. The primary
 `codex-manager` launches Codex with separate profile homes and optionally shared
 conversation stores.
 
+Codex Tools is an independent project and is not affiliated with or endorsed by
+OpenAI.
+
 The viewer, search, and summary tools read Codex state without modifying it.
 The manager writes only its own profile homes, conversation stores, and wrapper
 commands.
@@ -16,15 +19,27 @@ to the run directory supplied by the caller.
 
 ## Install
 
-Codex Tools requires Python 3.10 or newer and is currently intended for POSIX
-systems such as Linux and macOS. Model-backed commands also require the `codex`
-CLI to be installed and authenticated.
+Codex Tools requires Python 3.10 or newer and currently supports Linux.
+Model-backed commands also require the `codex` CLI to be installed and
+authenticated.
 
 The optional LaTeX conversation view requires `xelatex`, the `standalone`,
 `fontspec`, `xcolor`, `hyperref`, `fvextra`, `enumitem`, `tabularx`, `colortbl`,
 and `tikz` packages, plus the TeX Gyre Pagella, TeX Gyre Heros, and PT Mono
 fonts. Without them, the viewer remains usable and shows Markdown whenever a
 PDF cannot be generated. Run `xelatex --version` to check the main executable.
+
+On Ubuntu or Debian, install the optional typesetting dependencies with:
+
+```bash
+sudo apt install texlive-xetex texlive-latex-extra texlive-pictures fonts-texgyre fonts-paratype
+codex-tools viewer doctor
+codex-tools viewer --set-default-latex
+```
+
+Package names vary on other Linux distributions. `viewer doctor` reports each
+missing executable, TeX file, or font. Markdown remains the portable default;
+the final command above persistently opts the current user into LaTeX.
 
 Install directly from GitHub with `pipx`:
 
@@ -126,10 +141,12 @@ codex-viewer restart
 codex-viewer status
 codex-viewer open
 codex-viewer stop
+codex-viewer doctor
 ```
 
-`ct viewer` starts the daemon when it is not running; once it is running, the
-same command opens the terminal picker.
+`ct viewer`, `codex-tools viewer`, and `codex-viewer` open the terminal picker.
+After a conversation is selected, they start the daemon when needed and open
+that conversation in the browser.
 
 For typesetter development, enable per-bubble isolated previews:
 

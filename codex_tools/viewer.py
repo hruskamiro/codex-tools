@@ -9,6 +9,7 @@ import ipaddress
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -45,6 +46,18 @@ DEFAULT_PORT = 8765
 DEFAULT_VIEW_MODE = "markdown"
 VIEW_MODES = {"markdown", "latex"}
 WEB_ASSET_MODES = {"bundled", "cdn"}
+LATEX_FILES = (
+    "standalone.cls",
+    "fontspec.sty",
+    "xcolor.sty",
+    "hyperref.sty",
+    "fvextra.sty",
+    "enumitem.sty",
+    "tabularx.sty",
+    "colortbl.sty",
+    "tikz.sty",
+)
+LATEX_FONTS = ("TeX Gyre Pagella", "TeX Gyre Heros", "PT Mono")
 VENDOR_DIR = Path(__file__).with_name("vendor")
 SUMMARY_HEAD_LINES = 80
 SUMMARY_TAIL_LINES = 80
@@ -153,11 +166,13 @@ def add_server_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+def parse_args(
+    argv: list[str] | None = None, *, prog: str = "codex-viewer"
+) -> argparse.Namespace:
     raw_args = list(sys.argv[1:] if argv is None else argv)
     if not raw_args:
         return argparse.Namespace(command="default", func=command_default)
-    commands = {"serve", "start", "restart", "stop", "status", "open", "pick"}
+    commands = {"serve", "start", "restart", "stop", "status", "open", "pick", "doctor"}
     preference_flags = {"--set-default-latex", "--set-default-markdown"}
     if (
         raw_args[0] not in commands
@@ -167,7 +182,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         raw_args = ["serve", *raw_args]
 
     parser = argparse.ArgumentParser(
-        prog="codex-viewer",
+        prog=prog,
         description="Run and navigate the local read-only Codex conversation viewer.",
     )
     preference = parser.add_mutually_exclusive_group()
@@ -216,6 +231,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     pick.add_argument("--tools", action="store_true", help="Include tool records in the view.")
     pick.add_argument("--query", "-q", default="", help="Initial search query.")
     pick.set_defaults(func=command_pick)
+
+    doctor = sub.add_parser(
+        "doctor", help="Check optional LaTeX viewer requirements."
+    )
+    doctor.set_defaults(func=command_doctor)
     args = parser.parse_args(raw_args)
     if args.default_view:
         if args.command:
@@ -1077,6 +1097,67 @@ def command_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def probe_command(command: list[str]) -> tuple[bool, str]:
+    try:
+        completed = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, str(exc)
+    output = completed.stdout.strip()
+    return completed.returncode == 0 and bool(output), output
+
+
+def latex_requirement_checks() -> list[tuple[str, bool, str]]:
+    checks: list[tuple[str, bool, str]] = []
+    xelatex = shutil.which("xelatex")
+    checks.append(("xelatex", bool(xelatex), xelatex or "not found on PATH"))
+
+    kpsewhich = shutil.which("kpsewhich")
+    checks.append(("kpsewhich", bool(kpsewhich), kpsewhich or "not found on PATH"))
+    for filename in LATEX_FILES:
+        if not kpsewhich:
+            checks.append((filename, False, "cannot check without kpsewhich"))
+            continue
+        ok, output = probe_command([kpsewhich, filename])
+        checks.append((filename, ok, output or "not found"))
+
+    fc_match = shutil.which("fc-match")
+    checks.append(("fc-match", bool(fc_match), fc_match or "not found on PATH"))
+    for font in LATEX_FONTS:
+        if not fc_match:
+            checks.append((font, False, "cannot check without fc-match"))
+            continue
+        ok, output = probe_command([fc_match, "--format=%{family}", font])
+        matched = ok and font.casefold() in output.casefold()
+        checks.append((font, matched, output or "not found"))
+    return checks
+
+
+def command_doctor(args: argparse.Namespace) -> int:
+    checks = latex_requirement_checks()
+    print("LaTeX viewer requirements:")
+    for name, ok, detail in checks:
+        print(f"  [{'ok' if ok else 'missing'}] {name}: {detail}")
+    print(f"Default viewer mode: {read_default_view()}")
+    if all(ok for _, ok, _ in checks):
+        print("LaTeX viewer is ready.")
+        print("Set it as the default with: codex-tools viewer --set-default-latex")
+        return 0
+    print()
+    print("Ubuntu/Debian install hint:")
+    print(
+        "  sudo apt install texlive-xetex texlive-latex-extra "
+        "texlive-pictures fonts-texgyre fonts-paratype"
+    )
+    return 1
+
+
 def default_server_args() -> argparse.Namespace:
     return argparse.Namespace(
         sessions_root=DEFAULT_SESSIONS_ROOT,
@@ -1106,9 +1187,7 @@ def default_pick_args() -> argparse.Namespace:
 
 
 def command_default(args: argparse.Namespace) -> int:
-    if running_daemon_state():
-        return command_pick(default_pick_args())
-    return command_start(default_server_args())
+    return command_pick(default_pick_args())
 
 
 def command_open(args: argparse.Namespace) -> int:
@@ -4397,8 +4476,8 @@ loadConversation().catch((error) => {
 """
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
+def main(argv: list[str] | None = None, *, prog: str = "codex-viewer") -> int:
+    args = parse_args(argv, prog=prog)
     return int(args.func(args))
 
 

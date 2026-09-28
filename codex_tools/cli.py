@@ -51,9 +51,9 @@ def main(argv: list[str] | None = None) -> int:
     if command == "summary":
         return summary.main(rest)
     if command == "viewer":
-        return viewer.main(rest)
+        return viewer.main(rest, prog="codex-tools viewer")
     if command == "manager":
-        return manager.main(rest)
+        return manager.main(rest, prog="codex-tools manager")
     if command == "alias":
         return aliases.main(rest)
     if command == "structured":

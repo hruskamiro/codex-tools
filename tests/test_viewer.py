@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -10,6 +11,31 @@ from codex_tools import search, typeset, viewer
 
 
 class ViewerCommandTests(unittest.TestCase):
+    def test_unified_viewer_help_uses_the_unified_command_name(self) -> None:
+        with patch("sys.stdout", new_callable=StringIO) as stdout:
+            with self.assertRaises(SystemExit) as raised:
+                viewer.parse_args(["--help"], prog="codex-tools viewer")
+
+        self.assertEqual(raised.exception.code, 0)
+        self.assertIn("usage: codex-tools viewer", stdout.getvalue())
+
+    def test_default_viewer_command_opens_the_picker(self) -> None:
+        with patch.object(viewer, "command_pick", return_value=0) as pick:
+            result = viewer.command_default(SimpleNamespace())
+
+        self.assertEqual(result, 0)
+        pick.assert_called_once()
+
+    def test_viewer_doctor_reports_ready_and_missing_requirements(self) -> None:
+        args = viewer.parse_args(["doctor"])
+        ready = [("xelatex", True, "/usr/bin/xelatex")]
+        missing = [("xelatex", False, "not found on PATH")]
+
+        with patch.object(viewer, "latex_requirement_checks", return_value=ready):
+            self.assertEqual(args.func(args), 0)
+        with patch.object(viewer, "latex_requirement_checks", return_value=missing):
+            self.assertEqual(args.func(args), 1)
+
     def test_default_view_preference_is_private_and_round_trips(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             config = Path(temporary) / "config" / "viewer.json"
