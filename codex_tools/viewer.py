@@ -42,6 +42,8 @@ from codex_tools.search import (
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
+DEFAULT_VIEW_MODE = "markdown"
+VIEW_MODES = {"markdown", "latex"}
 WEB_ASSET_MODES = {"bundled", "cdn"}
 VENDOR_DIR = Path(__file__).with_name("vendor")
 SUMMARY_HEAD_LINES = 80
@@ -49,6 +51,38 @@ SUMMARY_TAIL_LINES = 80
 TAIL_READ_BLOCK_SIZE = 64 * 1024
 VIEWER_PID_FILE = paths.VIEWER_STATE_DIR / "viewer.json"
 VIEWER_LOG_FILE = paths.VIEWER_STATE_DIR / "viewer.log"
+
+
+def read_default_view(config_path: Path | None = None) -> str:
+    path = config_path or paths.VIEWER_CONFIG_FILE
+    try:
+        value = json.loads(path.read_text(encoding="utf-8")).get("default_view")
+    except (FileNotFoundError, OSError, json.JSONDecodeError, AttributeError):
+        return DEFAULT_VIEW_MODE
+    return value if value in VIEW_MODES else DEFAULT_VIEW_MODE
+
+
+def write_default_view(mode: str, config_path: Path | None = None) -> None:
+    if mode not in VIEW_MODES:
+        raise ValueError(f"unsupported viewer mode: {mode}")
+    path = config_path or paths.VIEWER_CONFIG_FILE
+    paths.ensure_private_dir(path.parent)
+    try:
+        config = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(config, dict):
+            config = {}
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        config = {}
+    config["default_view"] = mode
+    paths.write_private_text(path, json.dumps(config, indent=2, sort_keys=True) + "\n")
+
+
+def command_set_default_view(args: argparse.Namespace) -> int:
+    write_default_view(args.default_view)
+    print(f"Default viewer mode: {args.default_view}")
+    return 0
+
+
 def add_server_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--sessions-root",
@@ -124,14 +158,34 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if not raw_args:
         return argparse.Namespace(command="default", func=command_default)
     commands = {"serve", "start", "restart", "stop", "status", "open", "pick"}
-    if raw_args[0] not in commands and raw_args[0] not in {"-h", "--help"}:
+    preference_flags = {"--set-default-latex", "--set-default-markdown"}
+    if (
+        raw_args[0] not in commands
+        and raw_args[0] not in {"-h", "--help"}
+        and raw_args[0] not in preference_flags
+    ):
         raw_args = ["serve", *raw_args]
 
     parser = argparse.ArgumentParser(
         prog="codex-viewer",
         description="Run and navigate the local read-only Codex conversation viewer.",
     )
-    sub = parser.add_subparsers(dest="command", required=True)
+    preference = parser.add_mutually_exclusive_group()
+    preference.add_argument(
+        "--set-default-latex",
+        action="store_const",
+        const="latex",
+        dest="default_view",
+        help="Open selected conversations in the LaTeX view by default.",
+    )
+    preference.add_argument(
+        "--set-default-markdown",
+        action="store_const",
+        const="markdown",
+        dest="default_view",
+        help="Open selected conversations in the Markdown view by default.",
+    )
+    sub = parser.add_subparsers(dest="command")
 
     serve = sub.add_parser("serve", help="Run the viewer server in the foreground.")
     add_server_args(serve)
@@ -162,7 +216,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     pick.add_argument("--tools", action="store_true", help="Include tool records in the view.")
     pick.add_argument("--query", "-q", default="", help="Initial search query.")
     pick.set_defaults(func=command_pick)
-    return parser.parse_args(raw_args)
+    args = parser.parse_args(raw_args)
+    if args.default_view:
+        if args.command:
+            parser.error("default-view options cannot be combined with a command")
+        args.func = command_set_default_view
+    elif not hasattr(args, "func"):
+        parser.error("a command or default-view option is required")
+    return args
 
 
 def compact_space(text: str) -> str:
@@ -657,6 +718,13 @@ def viewer_document(template: str, web_assets: str) -> str:
     )
 
 
+def chooser_document(default_view: str) -> str:
+    mode = default_view if default_view in VIEW_MODES else DEFAULT_VIEW_MODE
+    return INDEX_HTML.replace(
+        'data-default-view="markdown"', f'data-default-view="{mode}"', 1
+    )
+
+
 def make_handler(state: ViewerState) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt: str, *args: Any) -> None:
@@ -667,7 +735,11 @@ def make_handler(state: ViewerState) -> type[BaseHTTPRequestHandler]:
             query = parse_qs(parsed.query)
             try:
                 if parsed.path == "/":
-                    text_response(self, INDEX_HTML, "text/html; charset=utf-8")
+                    text_response(
+                        self,
+                        chooser_document(read_default_view()),
+                        "text/html; charset=utf-8",
+                    )
                 elif parsed.path == "/view" or parsed.path.startswith("/v/"):
                     text_response(
                         self,
@@ -769,14 +841,24 @@ def validate_bind_host(args: argparse.Namespace) -> bool:
     return False
 
 
-def view_url(base_url: str, path: str, tail: int, tools: bool, session_id: str = "") -> str:
+def view_url(
+    base_url: str,
+    path: str,
+    tail: int,
+    tools: bool,
+    session_id: str = "",
+    mode: str = DEFAULT_VIEW_MODE,
+) -> str:
     params = {"tail": str(tail)}
     if tools:
         params["tools"] = "1"
+    typeset = mode == "latex"
     if session_id:
-        return f"{base_url.rstrip('/')}/v/{session_id}?{urlencode(params)}"
+        route = "t" if typeset else "v"
+        return f"{base_url.rstrip('/')}/{route}/{session_id}?{urlencode(params)}"
     params["path"] = path
-    return f"{base_url.rstrip('/')}/view?{urlencode(params)}"
+    route = "typeset" if typeset else "view"
+    return f"{base_url.rstrip('/')}/{route}?{urlencode(params)}"
 
 
 def server_state_from_args(args: argparse.Namespace) -> ViewerState:
@@ -1378,6 +1460,7 @@ def command_pick(args: argparse.Namespace) -> int:
         args.tail,
         args.tools,
         preferred_session_id(item),
+        read_default_view(),
     )
     open_browser(url, args)
     print(f"Opened {url}")
@@ -1405,7 +1488,7 @@ INDEX_HTML = """<!doctype html>
   <title>Codex Conversation Viewer</title>
   <link rel="stylesheet" href="/app.css">
 </head>
-<body class="theme-mist">
+<body class="theme-mist" data-default-view="markdown">
   <main class="app-shell chooser-shell">
     <section class="session-pane chooser-pane">
       <header class="brand">
@@ -2753,6 +2836,7 @@ h2 {
 APP_JS = r"""
 const state = {
   sessions: [],
+  defaultView: document.body.dataset.defaultView === "latex" ? "latex" : "markdown",
 };
 
 const els = {
@@ -2792,9 +2876,13 @@ function viewHref(item) {
     tail: els.tailCount.value,
   });
   if (els.includeTools.checked) params.set("tools", "1");
-  if (id) return `/v/${encodeURIComponent(id)}?${params}`;
+  if (id) {
+    const route = state.defaultView === "latex" ? "t" : "v";
+    return `/${route}/${encodeURIComponent(id)}?${params}`;
+  }
   params.set("path", item.path);
-  return `/view?${params}`;
+  const route = state.defaultView === "latex" ? "typeset" : "view";
+  return `/${route}?${params}`;
 }
 
 function renderSessions() {

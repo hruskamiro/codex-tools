@@ -159,9 +159,23 @@ Pick a recent conversation from a terminal list and open it directly:
 codex-viewer pick
 ```
 
-`codex-tools viewer ...` is an alias for the same viewer commands. Running
-`codex-tools viewer` with no subcommand still starts the foreground server, for
-compatibility with the original workflow.
+`codex-tools viewer ...` is an alias for the same viewer commands. With no
+subcommand, `codex-tools viewer` and `codex-viewer` start the background viewer
+when needed, then open the terminal picker on later runs.
+
+Markdown is the initial view for conversations selected in the browser or
+terminal picker. Set a persistent per-user default with either command:
+
+```bash
+codex-tools viewer --set-default-latex
+codex-tools viewer --set-default-markdown
+```
+
+The equivalent `codex-viewer` commands work as well. The preference is stored
+at `$XDG_CONFIG_HOME/codex-tools/viewer.json`, or
+`~/.config/codex-tools/viewer.json` when `XDG_CONFIG_HOME` is unset, and takes
+effect without restarting the viewer. Press `T` in an open conversation to
+switch its view without changing the saved default.
 
 Viewer URLs open in a new browser window by default for Brave, Chrome, Chromium,
 and Firefox. Override the browser with `--browser` or `CODEX_TOOLS_BROWSER`

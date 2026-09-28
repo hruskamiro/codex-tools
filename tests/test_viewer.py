@@ -10,6 +10,43 @@ from codex_tools import search, typeset, viewer
 
 
 class ViewerCommandTests(unittest.TestCase):
+    def test_default_view_preference_is_private_and_round_trips(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Path(temporary) / "config" / "viewer.json"
+
+            self.assertEqual(viewer.read_default_view(config), "markdown")
+            viewer.write_default_view("latex", config)
+
+            self.assertEqual(viewer.read_default_view(config), "latex")
+            self.assertEqual(config.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(config.parent.stat().st_mode & 0o777, 0o700)
+
+    def test_default_view_flags_select_the_preference_command(self) -> None:
+        latex = viewer.parse_args(["--set-default-latex"])
+        markdown = viewer.parse_args(["--set-default-markdown"])
+
+        self.assertEqual(latex.default_view, "latex")
+        self.assertEqual(markdown.default_view, "markdown")
+        self.assertIs(latex.func, viewer.command_set_default_view)
+        self.assertIs(markdown.func, viewer.command_set_default_view)
+
+        with self.assertRaises(SystemExit):
+            viewer.parse_args(["--set-default-latex", "start"])
+
+    def test_chooser_and_terminal_urls_honor_default_view(self) -> None:
+        chooser = viewer.chooser_document("latex")
+
+        self.assertIn('data-default-view="latex"', chooser)
+        self.assertIn('state.defaultView === "latex" ? "t" : "v"', viewer.APP_JS)
+        self.assertEqual(
+            viewer.view_url("http://localhost:8765", "/tmp/a.jsonl", 8, False, "abc", "latex"),
+            "http://localhost:8765/t/abc?tail=8",
+        )
+        self.assertEqual(
+            viewer.view_url("http://localhost:8765", "/tmp/a.jsonl", 8, False, mode="latex"),
+            "http://localhost:8765/typeset?tail=8&path=%2Ftmp%2Fa.jsonl",
+        )
+
     def test_remote_bind_requires_explicit_acknowledgement(self) -> None:
         self.assertTrue(
             viewer.validate_bind_host(

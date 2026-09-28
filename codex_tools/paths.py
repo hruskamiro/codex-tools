@@ -13,6 +13,13 @@ def user_data_dir() -> Path:
     return Path("~/.local/share/codex-tools").expanduser()
 
 
+def user_config_dir() -> Path:
+    xdg_config_home = os.environ.get("XDG_CONFIG_HOME")
+    if xdg_config_home:
+        return Path(xdg_config_home).expanduser() / "codex-tools"
+    return Path("~/.config/codex-tools").expanduser()
+
+
 def user_state_dir() -> Path:
     xdg_state_home = os.environ.get("XDG_STATE_HOME")
     if xdg_state_home:
@@ -38,4 +45,5 @@ SUMMARY_DATA_DIR = user_data_dir() / "summaries"
 DAILY_SUMMARIES_DIR = SUMMARY_DATA_DIR / "daily"
 WEEKLY_SUMMARIES_DIR = SUMMARY_DATA_DIR / "weekly"
 SUMMARY_SITE_DIR = SUMMARY_DATA_DIR / "site"
+VIEWER_CONFIG_FILE = user_config_dir() / "viewer.json"
 VIEWER_STATE_DIR = user_state_dir() / "viewer"
