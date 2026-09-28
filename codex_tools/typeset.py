@@ -25,7 +25,7 @@ except ImportError:  # Pygments is optional when running directly from a checkou
     ClassNotFound = LookupError
 
 
-RENDERER_VERSION = "typeset-v38"
+RENDERER_VERSION = "typeset-v39"
 DEFAULT_PARAGRAPH_MODE = "spaced"
 DEFAULT_HEADER_MODE = "external"
 BODY_LINE_STRETCH = "1.08"
@@ -615,6 +615,7 @@ def document_for(
 \definecolor{{CodexRule}}{{HTML}}{{D7D7CA}}
 \definecolor{{CodexTableRule}}{{HTML}}{{E8E8E2}}
 \definecolor{{CodexCode}}{{HTML}}{{E8E7E1}}
+\definecolor{{CodexCodeRule}}{{HTML}}{{DDDED6}}
 \definecolor{{CodexNumberColor}}{{HTML}}{{267F8D}}
 \definecolor{{CodexStringColor}}{{HTML}}{{AD4A76}}
 \definecolor{{CodexQuoteText}}{{HTML}}{{5E625B}}
@@ -679,7 +680,10 @@ def document_for(
   \usebox{{\CodexInlineCodeBox}}%
 }}
 \RecustomVerbatimEnvironment{{Verbatim}}{{Verbatim}}{{%
-  frame=none,
+  frame=lines,
+  framerule=0.25pt,
+  framesep=0.45em,
+  rulecolor=\color{{CodexCodeRule}},
   xleftmargin=0.8em,
   xrightmargin=0.8em,
   vspace=\CodexCodeTopSep,

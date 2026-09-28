@@ -22,6 +22,7 @@ class TypesetTests(unittest.TestCase):
         self.assertIn(r"\begin{minipage}{150mm}", document)
         self.assertNotIn(r"\begin{varwidth}", document)
         self.assertIn(r"\definecolor{CodexCode}{HTML}{E8E7E1}", document)
+        self.assertIn(r"\definecolor{CodexCodeRule}{HTML}{DDDED6}", document)
         self.assertIn(r"\definecolor{CodexNumberColor}{HTML}{267F8D}", document)
         self.assertIn(r"\definecolor{CodexStringColor}{HTML}{AD4A76}", document)
         self.assertIn(r"\definecolor{CodexQuoteText}{HTML}{5E625B}", document)
@@ -70,9 +71,10 @@ class TypesetTests(unittest.TestCase):
             r"\begin{Verbatim}[breaklines=true,breakanywhere=true,fontsize=\small]",
             document,
         )
-        self.assertIn("frame=none", document)
-        self.assertNotIn("framerule=", document)
-        self.assertNotIn("framesep=", document)
+        self.assertIn("frame=lines", document)
+        self.assertIn("framerule=0.25pt", document)
+        self.assertIn("framesep=0.45em", document)
+        self.assertIn(r"rulecolor=\color{CodexCodeRule}", document)
         self.assertIn("xleftmargin=0.8em", document)
         self.assertIn("xrightmargin=0.8em", document)
         self.assertIn(r"vspace=\CodexCodeTopSep", document)
