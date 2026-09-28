@@ -136,6 +136,13 @@ class ViewerCommandTests(unittest.TestCase):
         for script in (viewer.VIEW_JS, viewer.TYPESET_JS):
             self.assertIn('els.refreshStatus.textContent = "Refreshing..."', script)
             self.assertIn('"Up to date"', script)
+            self.assertIn('bubble.className = "refresh-bubble"', script)
+            self.assertIn("els.conversation.appendChild(bubble)", script)
+            self.assertIn("if (refreshing) showRefreshBubble()", script)
+            self.assertIn("else removeRefreshBubble()", script)
+            self.assertIn(
+                'els.conversation.hasAttribute("aria-busy")', script
+            )
             self.assertIn("await loadConversation({ preserveScroll: true })", script)
             self.assertIn("restoreScrollAnchor(options.scrollAnchor)", script)
             self.assertIn('toggleAttribute("aria-busy", refreshing)', script)
@@ -144,6 +151,11 @@ class ViewerCommandTests(unittest.TestCase):
         self.assertIn("const scrollAnchor = options.preserveScroll", viewer.VIEW_JS)
         self.assertNotIn("els.conversation.scrollTop = previousScrollTop", viewer.VIEW_JS)
         self.assertIn("@keyframes refresh-spin", viewer.APP_CSS)
+        self.assertIn(".refresh-bubble", viewer.APP_CSS)
+        self.assertIn(".refresh-bubble-spinner", viewer.APP_CSS)
+        self.assertIn(
+            "if (debugRoute.active && !lastConversationData)", viewer.TYPESET_JS
+        )
 
     def test_refresh_anchor_keeps_the_visible_record_ahead_of_the_tail(self) -> None:
         records = [SimpleNamespace(line_no=line) for line in range(1, 31)]

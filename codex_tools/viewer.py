@@ -2118,6 +2118,34 @@ h2 {
   font-weight: 700;
 }
 
+.refresh-bubble {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  width: min(760px, 100%);
+  min-height: 58px;
+  margin: 0 auto 22px;
+  padding: 13px 16px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  background: var(--assistant);
+  color: var(--muted);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.refresh-bubble-spinner {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  border: 2px solid var(--line-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: refresh-spin 800ms linear infinite;
+}
+
 .is-refreshing .refresh-icon {
   display: inline-block;
   animation: refresh-spin 800ms linear infinite;
@@ -3154,6 +3182,24 @@ const els = {
   typesetViewLink: document.getElementById("typesetViewLink"),
 };
 
+function showRefreshBubble() {
+  if (!els.conversation || els.conversation.querySelector("[data-refresh-bubble]")) return;
+  const bubble = document.createElement("section");
+  bubble.className = "refresh-bubble";
+  bubble.dataset.refreshBubble = "";
+  bubble.setAttribute("role", "status");
+  bubble.setAttribute("aria-live", "polite");
+  bubble.innerHTML = `
+    <span class="refresh-bubble-spinner" aria-hidden="true"></span>
+    <span>Refreshing conversation...</span>
+  `;
+  els.conversation.appendChild(bubble);
+}
+
+function removeRefreshBubble() {
+  els.conversation?.querySelector("[data-refresh-bubble]")?.remove();
+}
+
 function setRefreshState(refreshing) {
   for (const button of [els.refreshConversation, els.statusRefresh]) {
     if (!button) continue;
@@ -3168,6 +3214,8 @@ function setRefreshState(refreshing) {
     );
   }
   els.conversation?.toggleAttribute("aria-busy", refreshing);
+  if (refreshing) showRefreshBubble();
+  else removeRefreshBubble();
   if (refreshing && els.refreshStatus) {
     window.clearTimeout(refreshStatusTimer);
     els.refreshStatus.textContent = "Refreshing...";
@@ -3651,6 +3699,7 @@ function renderConversation(data, options = {}) {
   els.conversation.innerHTML = data.records.map(renderRecord).join("");
   applyMathAndCode(els.conversation);
   applySemanticHighlights(document);
+  if (els.conversation.hasAttribute("aria-busy")) showRefreshBubble();
   if (anchorLine) {
     requestAnimationFrame(() => {
       if (!scrollToMessageLine(anchorLine)) restoreScrollAnchor(options.scrollAnchor);
@@ -3833,6 +3882,24 @@ const els = {
   sessionMeta: document.getElementById("sessionMeta"),
 };
 
+function showRefreshBubble() {
+  if (!els.conversation || els.conversation.querySelector("[data-refresh-bubble]")) return;
+  const bubble = document.createElement("section");
+  bubble.className = "refresh-bubble";
+  bubble.dataset.refreshBubble = "";
+  bubble.setAttribute("role", "status");
+  bubble.setAttribute("aria-live", "polite");
+  bubble.innerHTML = `
+    <span class="refresh-bubble-spinner" aria-hidden="true"></span>
+    <span>Refreshing typeset conversation...</span>
+  `;
+  els.conversation.appendChild(bubble);
+}
+
+function removeRefreshBubble() {
+  els.conversation?.querySelector("[data-refresh-bubble]")?.remove();
+}
+
 function setRefreshState(refreshing) {
   for (const button of [els.refreshConversation, els.statusRefresh]) {
     if (!button) continue;
@@ -3847,6 +3914,8 @@ function setRefreshState(refreshing) {
     );
   }
   els.conversation?.toggleAttribute("aria-busy", refreshing);
+  if (refreshing) showRefreshBubble();
+  else removeRefreshBubble();
   if (refreshing && els.refreshStatus) {
     window.clearTimeout(refreshStatusTimer);
     els.refreshStatus.textContent = "Refreshing...";
@@ -4460,6 +4529,7 @@ async function renderConversation(data, options = {}) {
   els.conversation.className = "conversation view-conversation typeset-conversation";
   els.conversation.innerHTML = data.records.map(renderRecord).join("");
   applyMathAndCode(els.conversation);
+  if (els.conversation.hasAttribute("aria-busy")) showRefreshBubble();
   await renderPdfPages(els.conversation);
   await nextAnimationFrame();
   if (anchorLine) {
@@ -4483,7 +4553,7 @@ async function loadConversation(options = {}) {
   const renderOptions = { ...options, scrollAnchor };
   loadingConversation = true;
   updateLoadButtons({ shownCount: 0, totalCount: 1, all: false });
-  if (debugRoute.active) showTypesetDebugLoader(debugRoute.line);
+  if (debugRoute.active && !lastConversationData) showTypesetDebugLoader(debugRoute.line);
   const apiParams = new URLSearchParams(identity);
   apiParams.set("tail", String(currentTail));
   if (renderOptions.scrollAnchor?.lineNo) {
