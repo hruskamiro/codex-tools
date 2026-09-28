@@ -3,13 +3,69 @@
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import tempfile
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from codex_tools import manager
 
 
 TRUNCATION_MARKER = "\n\n_Context truncated by --max-context-chars._\n\n"
+
+
+def _zoneinfo_name_from_path(path: Path) -> str | None:
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return None
+    parts = resolved.parts
+    try:
+        marker = parts.index("zoneinfo")
+    except ValueError:
+        return None
+    name = "/".join(parts[marker + 1 :])
+    return name or None
+
+
+def _system_timezone_candidates() -> list[str]:
+    candidates = []
+    configured = os.environ.get("TZ", "").strip().removeprefix(":")
+    if configured:
+        if configured.startswith("/"):
+            configured = _zoneinfo_name_from_path(Path(configured)) or ""
+        if configured:
+            candidates.append(configured)
+
+    try:
+        configured = Path("/etc/timezone").read_text(encoding="utf-8").strip()
+    except OSError:
+        configured = ""
+    if configured:
+        candidates.append(configured)
+
+    localtime_name = _zoneinfo_name_from_path(Path("/etc/localtime"))
+    if localtime_name:
+        candidates.append(localtime_name)
+
+    local = datetime.now().astimezone().tzinfo
+    local_key = getattr(local, "key", "")
+    if local_key:
+        candidates.append(str(local_key))
+    return candidates
+
+
+def detect_local_timezone() -> str:
+    """Return the best available IANA timezone name, falling back to UTC."""
+    for candidate in _system_timezone_candidates():
+        try:
+            ZoneInfo(candidate)
+        except (ValueError, ZoneInfoNotFoundError):
+            continue
+        return candidate
+    return "UTC"
 
 
 def truncate_context(value: str, limit: int) -> str:

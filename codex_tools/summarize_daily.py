@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo
 from codex_tools import manager, paths, search, summary_common, summary_prompts
 
 
-DEFAULT_TIMEZONE = "Europe/Prague"
+DEFAULT_TIMEZONE = summary_common.detect_local_timezone()
 DEFAULT_OUTPUT_DIR = paths.DAILY_SUMMARIES_DIR
 
 

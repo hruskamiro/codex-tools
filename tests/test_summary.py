@@ -23,6 +23,37 @@ from codex_tools import (
 
 
 class SummaryCommandTests(unittest.TestCase):
+    def test_local_timezone_detection_uses_first_valid_candidate(self) -> None:
+        with patch.object(
+            summary_common,
+            "_system_timezone_candidates",
+            return_value=["Not/A-Timezone", "Europe/Bratislava", "UTC"],
+        ):
+            detected = summary_common.detect_local_timezone()
+
+        self.assertEqual(detected, "Europe/Bratislava")
+
+    def test_local_timezone_detection_falls_back_to_utc(self) -> None:
+        with patch.object(
+            summary_common,
+            "_system_timezone_candidates",
+            return_value=["Not/A-Timezone"],
+        ):
+            detected = summary_common.detect_local_timezone()
+
+        self.assertEqual(detected, "UTC")
+
+    def test_daily_and_weekly_defaults_share_detected_timezone(self) -> None:
+        self.assertEqual(
+            summarize_daily.DEFAULT_TIMEZONE,
+            summary_common.detect_local_timezone(),
+        )
+        self.assertEqual(
+            summarize_weekly.DEFAULT_TIMEZONE,
+            summarize_daily.DEFAULT_TIMEZONE,
+        )
+        self.assertIsInstance(ZoneInfo(summarize_daily.DEFAULT_TIMEZONE), ZoneInfo)
+
     def test_summary_site_refuses_unmarked_nonempty_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             site = Path(temporary) / "site"

@@ -281,6 +281,10 @@ Weekly templates receive `$start`, `$end`, and `$context`. Override either for
 one run with `--prompt-template PATH`; the template is rendered before any
 model invocation.
 
+Daily and weekly commands detect the local IANA timezone from `TZ` and the
+system timezone configuration. Pass `--timezone AREA/CITY` to override it;
+systems without a recognizable local zone fall back to `UTC`.
+
 A weekly run first refreshes missing or stale daily summaries for dates that
 contain Codex activity, then summarizes the saved daily notes. Freshness is
 determined from a small `.md.json` sidecar containing hashes of the extracted

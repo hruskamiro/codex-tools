@@ -21,7 +21,7 @@ from codex_tools import (
     summary_prompts,
 )
 
-DEFAULT_TIMEZONE = "Europe/Prague"
+DEFAULT_TIMEZONE = summary_common.detect_local_timezone()
 DEFAULT_DAILY_SUMMARIES_DIR = paths.DAILY_SUMMARIES_DIR
 DEFAULT_OUTPUT_DIR = paths.WEEKLY_SUMMARIES_DIR
 DAILY_SUMMARY_RE = re.compile(
