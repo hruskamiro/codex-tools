@@ -328,8 +328,8 @@ class ViewerCommandTests(unittest.TestCase):
         navigation_rule = viewer.APP_CSS.split(
             ".message.is-navigation-current::before", 1
         )[1].split("}", 1)[0]
-        self.assertIn("width: 5px", navigation_rule)
-        self.assertIn("background: var(--accent)", navigation_rule)
+        self.assertIn("width: 3px", navigation_rule)
+        self.assertIn("background: var(--faint)", navigation_rule)
 
     def test_bundled_web_assets_are_default_with_cdn_override(self) -> None:
         args = viewer.parse_args(["restart"])

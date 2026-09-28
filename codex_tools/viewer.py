@@ -2349,9 +2349,9 @@ h2 {
   bottom: 0;
   left: 0;
   z-index: 4;
-  width: 5px;
+  width: 3px;
   border-radius: 7px 0 0 7px;
-  background: var(--accent);
+  background: var(--faint);
   pointer-events: none;
 }
 
@@ -2395,9 +2395,9 @@ h2 {
   bottom: 0;
   left: 0;
   z-index: 4;
-  width: 5px;
+  width: 3px;
   border-radius: 0 0 0 7px;
-  background: var(--accent);
+  background: var(--faint);
   pointer-events: none;
 }
 
