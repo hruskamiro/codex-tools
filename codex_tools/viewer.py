@@ -2134,6 +2134,7 @@ h2 {
   font-family: var(--font-ui);
   font-size: 13px;
   font-weight: 700;
+  overflow-anchor: none;
 }
 
 .refresh-bubble-spinner {
@@ -2383,7 +2384,21 @@ h2 {
 }
 
 .typeset-message.is-navigation-current::before {
-  left: max(0px, calc((100% - 760px) / 2));
+  content: none;
+}
+
+.typeset-message.is-navigation-current .typeset-pdf-page::before,
+.typeset-message.is-navigation-current .typeset-fallback::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 4;
+  width: 5px;
+  border-radius: 0 0 0 7px;
+  background: var(--accent);
+  pointer-events: none;
 }
 
 .typeset-message .message-header {
@@ -2678,6 +2693,7 @@ h2 {
 }
 
 .typeset-fallback {
+  position: relative;
   max-width: 760px;
   margin: 0 auto;
   border: 1px solid var(--line);
@@ -3254,6 +3270,18 @@ function showRefreshResult(previousTotal, failed = false) {
   }, 1800);
 }
 
+function sameConversationContent(previous, next) {
+  if (!previous || previous.totalCount !== next.totalCount) return false;
+  if (previous.records.length !== next.records.length) return false;
+  return previous.records.every((record, index) => {
+    const candidate = next.records[index];
+    return record.line_no === candidate?.line_no
+      && record.role === candidate?.role
+      && record.timestamp === candidate?.timestamp
+      && record.text === candidate?.text;
+  });
+}
+
 function setStatusbarExpanded(expanded) {
   if (!els.statusbar || !els.statusbarToggle) return;
   els.statusbar.classList.toggle("is-expanded", expanded);
@@ -3769,6 +3797,10 @@ async function loadConversation(options = {}) {
     const response = await fetch(`/api/session?${apiParams}`);
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "Could not load conversation");
+    if (renderOptions.avoidUnchangedRender && sameConversationContent(lastConversationData, data)) {
+      lastConversationData = data;
+      return;
+    }
     renderConversation(data, renderOptions);
   } finally {
     loadingConversation = false;
@@ -3781,7 +3813,7 @@ async function refreshConversation() {
   const previousTotal = Number(lastConversationData?.totalCount || 0);
   setRefreshState(true);
   try {
-    await loadConversation({ preserveScroll: true });
+    await loadConversation({ preserveScroll: true, avoidUnchangedRender: true });
     showRefreshResult(previousTotal);
   } catch (error) {
     showRefreshResult(previousTotal, true);
@@ -3966,6 +3998,18 @@ function showRefreshResult(previousTotal, failed = false) {
   refreshStatusTimer = window.setTimeout(() => {
     els.refreshStatus.textContent = "";
   }, 1800);
+}
+
+function sameConversationContent(previous, next) {
+  if (!previous || previous.totalCount !== next.totalCount) return false;
+  if (previous.records.length !== next.records.length) return false;
+  return previous.records.every((record, index) => {
+    const candidate = next.records[index];
+    return record.line_no === candidate?.line_no
+      && record.role === candidate?.role
+      && record.timestamp === candidate?.timestamp
+      && record.text === candidate?.text;
+  });
 }
 
 function setStatusbarExpanded(expanded) {
@@ -4615,6 +4659,14 @@ async function loadConversation(options = {}) {
     const response = await fetch(`${apiPath}?${apiParams}`);
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "Could not load typeset conversation");
+    if (
+      renderOptions.avoidUnchangedRender
+      && !debugRoute.active
+      && sameConversationContent(lastConversationData, data)
+    ) {
+      lastConversationData = data;
+      return;
+    }
     await renderConversation(data, renderOptions);
   } finally {
     loadingConversation = false;
@@ -4627,7 +4679,7 @@ async function refreshConversation() {
   const previousTotal = Number(lastConversationData?.totalCount || 0);
   setRefreshState(true);
   try {
-    await loadConversation({ preserveScroll: true });
+    await loadConversation({ preserveScroll: true, avoidUnchangedRender: true });
     showRefreshResult(previousTotal);
   } catch (error) {
     showRefreshResult(previousTotal, true);

@@ -143,7 +143,12 @@ class ViewerCommandTests(unittest.TestCase):
             self.assertIn(
                 'els.conversation.hasAttribute("aria-busy")', script
             )
-            self.assertIn("await loadConversation({ preserveScroll: true })", script)
+            self.assertIn("function sameConversationContent(previous, next)", script)
+            self.assertIn("renderOptions.avoidUnchangedRender", script)
+            self.assertIn(
+                "await loadConversation({ preserveScroll: true, avoidUnchangedRender: true })",
+                script,
+            )
             self.assertIn("restoreScrollAnchor(options.scrollAnchor)", script)
             self.assertIn('toggleAttribute("aria-busy", refreshing)', script)
             self.assertIn('apiParams.set("anchor", renderOptions.scrollAnchor.lineNo)', script)
@@ -153,6 +158,7 @@ class ViewerCommandTests(unittest.TestCase):
         self.assertIn("@keyframes refresh-spin", viewer.APP_CSS)
         self.assertIn(".refresh-bubble", viewer.APP_CSS)
         self.assertIn(".refresh-bubble-spinner", viewer.APP_CSS)
+        self.assertIn("overflow-anchor: none", viewer.APP_CSS)
         self.assertIn(
             "if (debugRoute.active && !lastConversationData)", viewer.TYPESET_JS
         )
@@ -311,6 +317,14 @@ class ViewerCommandTests(unittest.TestCase):
         self.assertIn(
             ".typeset-message.is-navigation-current::before", viewer.APP_CSS
         )
+        self.assertIn(
+            ".typeset-message.is-navigation-current .typeset-pdf-page::before",
+            viewer.APP_CSS,
+        )
+        typeset_container_rule = viewer.APP_CSS.split(
+            ".typeset-message.is-navigation-current::before", 1
+        )[1].split("}", 1)[0]
+        self.assertIn("content: none", typeset_container_rule)
         navigation_rule = viewer.APP_CSS.split(
             ".message.is-navigation-current::before", 1
         )[1].split("}", 1)[0]
