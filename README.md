@@ -20,6 +20,12 @@ Codex Tools requires Python 3.10 or newer and is currently intended for POSIX
 systems such as Linux and macOS. Model-backed commands also require the `codex`
 CLI to be installed and authenticated.
 
+The optional LaTeX conversation view requires `xelatex`, the `standalone`,
+`fontspec`, `xcolor`, `hyperref`, `fvextra`, `enumitem`, `tabularx`, `colortbl`,
+and `tikz` packages, plus the TeX Gyre Pagella, TeX Gyre Heros, and PT Mono
+fonts. Without them, the viewer remains usable and shows Markdown whenever a
+PDF cannot be generated. Run `xelatex --version` to check the main executable.
+
 Install directly from GitHub with `pipx`:
 
 ```bash
@@ -106,9 +112,10 @@ The viewer intentionally binds only to loopback by default because its API can
 read private transcripts and has no authentication. A non-loopback `--host`
 requires the explicit `--allow-remote` acknowledgment.
 
-The browser UI currently downloads pinned rendering dependencies from jsDelivr,
-so the viewer is not fully offline. Transcript data stays in the local API, but
-third-party JavaScript executes in the viewer origin; see `SECURITY.md`.
+Pinned Markdown, syntax-highlighting, equation, and PDF rendering assets ship
+with the package and are served locally by default. To use the matching jsDelivr
+copies instead, start or restart with `--web-assets cdn`. Use
+`--web-assets bundled` to switch back to the offline default.
 
 Or run it like a small daemon:
 
@@ -165,6 +172,10 @@ The viewer renders recent JSONL conversations with Markdown, code highlighting,
 language detection for unlabeled code blocks, equation support, semantic
 highlighting, a browser conversation picker, and a terminal picker. It is
 read-only.
+
+Press `/` to expand the navigation bar. Its `LaTeX` action opens the
+XeLaTeX-rendered conversation, while `Markdown` switches back without losing
+the conversation identity.
 
 Equations may use `\(...\)` or `$...$` for inline math and `\[...\]` or
 `$$...$$` for display math. LaTeX delimiters inside code spans and fenced code

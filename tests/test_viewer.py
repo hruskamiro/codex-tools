@@ -141,6 +141,8 @@ class ViewerCommandTests(unittest.TestCase):
             ".view-statusbar.is-expanded .statusbar-actions", viewer.APP_CSS
         )
         self.assertIn(".conversation.statusbar-expanded", viewer.APP_CSS)
+        self.assertIn(".view-statusbar.is-expanded .statusbar-actions", viewer.APP_CSS)
+        self.assertIn("max-width: calc(100vw - 76px)", viewer.APP_CSS)
         self.assertIn(
             "padding: 30px clamp(20px, 4vw, 56px) 24px", viewer.APP_CSS
         )
@@ -151,6 +153,47 @@ class ViewerCommandTests(unittest.TestCase):
                 'classList.toggle("statusbar-expanded", expanded)', script
             )
             self.assertIn('setAttribute("aria-expanded"', script)
+
+    def test_statusbar_switches_between_markdown_and_latex(self) -> None:
+        view_actions = viewer.VIEW_HTML.split(
+            'id="statusbarActions" class="statusbar-actions"', 1
+        )[1].split("</div>", 1)[0]
+        typeset_actions = viewer.TYPESET_HTML.split(
+            'id="statusbarActions" class="statusbar-actions"', 1
+        )[1].split("</div>", 1)[0]
+
+        self.assertIn('id="typesetViewLink"', view_actions)
+        self.assertIn(">LaTeX</a>", view_actions)
+        self.assertIn('id="normalViewLink"', typeset_actions)
+        self.assertIn(">Markdown</a>", typeset_actions)
+        self.assertIn("els.typesetViewLink.href", viewer.VIEW_JS)
+        self.assertIn("els.normalViewLink.href", viewer.TYPESET_JS)
+
+    def test_bundled_web_assets_are_default_with_cdn_override(self) -> None:
+        args = viewer.parse_args(["restart"])
+        self.assertEqual(args.web_assets, "bundled")
+        self.assertIn("--web-assets", viewer.daemon_command(args))
+        self.assertIn("bundled", viewer.daemon_command(args))
+
+        bundled = viewer.viewer_document(viewer.VIEW_HTML, "bundled")
+        cdn = viewer.viewer_document(viewer.VIEW_HTML, "cdn")
+        self.assertIn('src="/vendor/marked.min.js"', bundled)
+        self.assertNotIn("cdn.jsdelivr.net", bundled)
+        self.assertIn('data-web-assets="cdn"', cdn)
+        self.assertIn("cdn.jsdelivr.net/npm/marked@15.0.12", cdn)
+
+    def test_bundled_pdf_and_katex_assets_are_present(self) -> None:
+        expected = [
+            "pdf.min.mjs",
+            "pdf.worker.min.mjs",
+            "katex/katex.min.css",
+            "katex/fonts/KaTeX_Main-Regular.woff2",
+            "licenses/LICENSE-PDF.js",
+        ]
+        for relative in expected:
+            self.assertTrue((viewer.VENDOR_DIR / relative).is_file(), relative)
+        self.assertIn(': "/vendor/pdf.min.mjs"', viewer.TYPESET_JS)
+        self.assertIn(': "/vendor/pdf.worker.min.mjs"', viewer.TYPESET_JS)
 
     def test_restart_can_enable_typeset_debug(self) -> None:
         args = viewer.parse_args(["restart", "--typeset-debug"])

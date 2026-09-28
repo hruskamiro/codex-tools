@@ -21,7 +21,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, unquote, urlencode, urlparse
 from urllib.request import urlopen
 
 from codex_tools import paths, typeset
@@ -42,6 +42,8 @@ from codex_tools.search import (
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
+WEB_ASSET_MODES = {"bundled", "cdn"}
+VENDOR_DIR = Path(__file__).with_name("vendor")
 SUMMARY_HEAD_LINES = 80
 SUMMARY_TAIL_LINES = 80
 TAIL_READ_BLOCK_SIZE = 64 * 1024
@@ -108,6 +110,12 @@ def add_server_args(parser: argparse.ArgumentParser) -> None:
         choices=sorted(typeset.CODE_MODES),
         default=typeset.DEFAULT_CODE_MODE,
         help="Code-block renderer: auto, pygments, or verbatim. Default: auto.",
+    )
+    parser.add_argument(
+        "--web-assets",
+        choices=sorted(WEB_ASSET_MODES),
+        default="bundled",
+        help="Browser dependency source. Default: bundled.",
     )
 
 
@@ -291,12 +299,14 @@ class ViewerState:
         session_index: Path,
         typeset_debug: bool = False,
         typeset_code_mode: str = typeset.DEFAULT_CODE_MODE,
+        web_assets: str = "bundled",
     ) -> None:
         self.sessions_root = sessions_root.expanduser().resolve()
         self.archive_root = archive_root.expanduser().resolve()
         self.include_archive = include_archive
         self.typeset_debug = typeset_debug
         self.typeset_code_mode = typeset_code_mode
+        self.web_assets = web_assets
         self.titles = load_session_index_titles(session_index)
 
     def allowed_roots(self) -> list[Path]:
@@ -608,6 +618,45 @@ def handle_typeset_pdf(handler: BaseHTTPRequestHandler, key_with_suffix: str) ->
     )
 
 
+def handle_vendor_asset(handler: BaseHTTPRequestHandler, raw_name: str) -> None:
+    relative = unquote(raw_name).lstrip("/")
+    if not relative or "\x00" in relative:
+        raise FileNotFoundError("vendor asset not found")
+    candidate = (VENDOR_DIR / relative).resolve()
+    if not candidate.is_relative_to(VENDOR_DIR.resolve()) or not candidate.is_file():
+        raise FileNotFoundError("vendor asset not found")
+    content_types = {
+        ".css": "text/css; charset=utf-8",
+        ".js": "application/javascript; charset=utf-8",
+        ".mjs": "application/javascript; charset=utf-8",
+        ".ttf": "font/ttf",
+        ".woff": "font/woff",
+        ".woff2": "font/woff2",
+    }
+    content_type = content_types.get(candidate.suffix.lower())
+    if content_type is None:
+        raise FileNotFoundError("vendor asset not found")
+    bytes_response(
+        handler,
+        candidate.read_bytes(),
+        content_type,
+        cache="public, max-age=31536000, immutable",
+    )
+
+
+def viewer_document(template: str, web_assets: str) -> str:
+    rendered = template.replace('data-web-assets="bundled"', f'data-web-assets="{web_assets}"')
+    if web_assets == "bundled":
+        return rendered
+    for bundled, cdn in WEB_ASSET_CDN_URLS.items():
+        rendered = rendered.replace(bundled, cdn)
+    return rendered.replace(
+        "</head>",
+        '  <link rel="preconnect" href="https://cdn.jsdelivr.net">\n</head>',
+        1,
+    )
+
+
 def make_handler(state: ViewerState) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt: str, *args: Any) -> None:
@@ -620,14 +669,22 @@ def make_handler(state: ViewerState) -> type[BaseHTTPRequestHandler]:
                 if parsed.path == "/":
                     text_response(self, INDEX_HTML, "text/html; charset=utf-8")
                 elif parsed.path == "/view" or parsed.path.startswith("/v/"):
-                    text_response(self, VIEW_HTML, "text/html; charset=utf-8")
+                    text_response(
+                        self,
+                        viewer_document(VIEW_HTML, state.web_assets),
+                        "text/html; charset=utf-8",
+                    )
                 elif (
                     parsed.path == "/typeset"
                     or parsed.path.startswith("/t/")
                     or parsed.path == "/debug/typeset"
                     or parsed.path.startswith("/debug/typeset/")
                 ):
-                    text_response(self, TYPESET_HTML, "text/html; charset=utf-8")
+                    text_response(
+                        self,
+                        viewer_document(TYPESET_HTML, state.web_assets),
+                        "text/html; charset=utf-8",
+                    )
                 elif parsed.path == "/app.css":
                     text_response(self, APP_CSS, "text/css; charset=utf-8")
                 elif parsed.path == "/app.js":
@@ -636,6 +693,8 @@ def make_handler(state: ViewerState) -> type[BaseHTTPRequestHandler]:
                     text_response(self, VIEW_JS, "application/javascript; charset=utf-8")
                 elif parsed.path == "/typeset.js":
                     text_response(self, TYPESET_JS, "application/javascript; charset=utf-8")
+                elif parsed.path.startswith("/vendor/"):
+                    handle_vendor_asset(self, parsed.path.removeprefix("/vendor/"))
                 elif parsed.path == "/api/sessions":
                     json_response(self, handle_sessions(state, query))
                 elif parsed.path == "/api/session":
@@ -728,6 +787,7 @@ def server_state_from_args(args: argparse.Namespace) -> ViewerState:
         args.session_index,
         args.typeset_debug,
         args.typeset_code_mode,
+        args.web_assets,
     )
 
 
@@ -835,6 +895,7 @@ def daemon_command(args: argparse.Namespace) -> list[str]:
     if args.typeset_debug:
         command.append("--typeset-debug")
     command.extend(["--typeset-code-mode", args.typeset_code_mode])
+    command.extend(["--web-assets", args.web_assets])
     return command
 
 
@@ -867,6 +928,7 @@ def command_start(args: argparse.Namespace) -> int:
             "log": str(VIEWER_LOG_FILE),
             "startedAt": datetime.now().isoformat(),
             "typesetDebug": args.typeset_debug,
+            "webAssets": args.web_assets,
         }
     )
     if not wait_for_url(url):
@@ -927,6 +989,7 @@ def default_server_args() -> argparse.Namespace:
         no_self_reload=True,
         typeset_debug=False,
         typeset_code_mode=typeset.DEFAULT_CODE_MODE,
+        web_assets="bundled",
     )
 
 
@@ -1321,6 +1384,19 @@ def command_pick(args: argparse.Namespace) -> int:
     return 0
 
 
+WEB_ASSET_CDN_URLS = {
+    "/vendor/purify.min.js": "https://cdn.jsdelivr.net/npm/dompurify@3.2.7/dist/purify.min.js",
+    "/vendor/marked.min.js": "https://cdn.jsdelivr.net/npm/marked@15.0.12/marked.min.js",
+    "/vendor/highlight.min.js": "https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.11.1/highlight.min.js",
+    "/vendor/highlight-github.min.css": "https://cdn.jsdelivr.net/npm/highlight.js@11.11.1/styles/github.min.css",
+    "/vendor/katex/katex.min.css": "https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css",
+    "/vendor/katex/katex.min.js": "https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.js",
+    "/vendor/katex/auto-render.min.js": "https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/contrib/auto-render.min.js",
+    "/vendor/pdf.min.mjs": "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.min.mjs",
+    "/vendor/pdf.worker.min.mjs": "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.worker.min.mjs",
+}
+
+
 INDEX_HTML = """<!doctype html>
 <html lang="en">
 <head>
@@ -1378,12 +1454,11 @@ VIEW_HTML = """<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Codex Conversation</title>
-  <link rel="preconnect" href="https://cdn.jsdelivr.net">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.11.1/styles/github.min.css">
+  <link rel="stylesheet" href="/vendor/katex/katex.min.css">
+  <link rel="stylesheet" href="/vendor/highlight-github.min.css">
   <link rel="stylesheet" href="/app.css">
 </head>
-<body class="view-body theme-mist">
+<body class="view-body theme-mist" data-web-assets="bundled">
   <main class="view-shell">
     <header class="view-header">
       <div>
@@ -1392,7 +1467,6 @@ VIEW_HTML = """<!doctype html>
       </div>
       <div class="view-actions">
         <button id="refreshConversation" class="icon-button" type="button" title="Refresh conversation" aria-label="Refresh conversation">↻</button>
-        <a id="typesetViewLink" class="back-link" href="/typeset">Typeset</a>
         <a class="back-link" href="/">Choose another</a>
       </div>
     </header>
@@ -1410,15 +1484,16 @@ VIEW_HTML = """<!doctype html>
         <button id="loadEarlier" class="status-button" type="button">Earlier</button>
         <button id="loadAll" class="status-button" type="button">All</button>
         <button id="statusRefresh" class="status-button icon-status-button" type="button" title="Refresh conversation" aria-label="Refresh conversation">↻</button>
+        <a id="typesetViewLink" class="status-button" href="/typeset">LaTeX</a>
         <a class="status-button" href="/">Choose</a>
       </div>
     </nav>
   </main>
-  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.7/dist/purify.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/marked@15.0.12/marked.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.11.1/lib/common.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/contrib/auto-render.min.js"></script>
+  <script src="/vendor/purify.min.js"></script>
+  <script src="/vendor/marked.min.js"></script>
+  <script src="/vendor/highlight.min.js"></script>
+  <script src="/vendor/katex/katex.min.js"></script>
+  <script src="/vendor/katex/auto-render.min.js"></script>
   <script src="/view.js"></script>
 </body>
 </html>
@@ -1431,12 +1506,11 @@ TYPESET_HTML = """<!doctype html>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Codex Typeset Conversation</title>
-  <link rel="preconnect" href="https://cdn.jsdelivr.net">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.11.1/styles/github.min.css">
+  <link rel="stylesheet" href="/vendor/katex/katex.min.css">
+  <link rel="stylesheet" href="/vendor/highlight-github.min.css">
   <link rel="stylesheet" href="/app.css">
 </head>
-<body class="view-body theme-mist typeset-body">
+<body class="view-body theme-mist typeset-body" data-web-assets="bundled">
   <main class="view-shell typeset-shell">
     <header class="view-header">
       <div>
@@ -1445,7 +1519,6 @@ TYPESET_HTML = """<!doctype html>
       </div>
       <div class="view-actions">
         <button id="refreshConversation" class="icon-button" type="button" title="Refresh typeset view" aria-label="Refresh typeset view">↻</button>
-        <a id="normalViewLink" class="back-link" href="/view">Normal</a>
         <a class="back-link" href="/">Choose another</a>
       </div>
     </header>
@@ -1463,16 +1536,16 @@ TYPESET_HTML = """<!doctype html>
         <button id="loadEarlier" class="status-button" type="button">Earlier</button>
         <button id="loadAll" class="status-button" type="button">All</button>
         <button id="statusRefresh" class="status-button icon-status-button" type="button" title="Refresh" aria-label="Refresh">↻</button>
+        <a id="normalViewLink" class="status-button" href="/view">Markdown</a>
         <a class="status-button" href="/">Choose</a>
       </div>
     </nav>
   </main>
-  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.7/dist/purify.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/marked@15.0.12/marked.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.11.1/lib/common.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/contrib/auto-render.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.min.mjs" type="module"></script>
+  <script src="/vendor/purify.min.js"></script>
+  <script src="/vendor/marked.min.js"></script>
+  <script src="/vendor/highlight.min.js"></script>
+  <script src="/vendor/katex/katex.min.js"></script>
+  <script src="/vendor/katex/auto-render.min.js"></script>
   <script src="/typeset.js"></script>
 </body>
 </html>
@@ -2630,6 +2703,36 @@ h2 {
     font-size: 17px;
   }
 }
+
+@media (max-width: 600px) {
+  .view-header {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .view-actions {
+    justify-content: space-between;
+  }
+
+  .view-header h1 {
+    font-size: 28px;
+  }
+
+  .view-statusbar.is-expanded {
+    left: 14px;
+  }
+
+  .view-statusbar.is-expanded .statusbar-actions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    max-width: calc(100vw - 76px);
+  }
+
+  .conversation.statusbar-expanded {
+    padding-bottom: 110px;
+  }
+}
 """
 
 
@@ -3343,6 +3446,13 @@ loadConversation().catch((error) => {
 TYPESET_JS = r"""
 const params = new URLSearchParams(location.search);
 const TYPESET_PDF_RENDER_SCALE = 1.6;
+const WEB_ASSETS = document.body.dataset.webAssets || "bundled";
+const PDFJS_MODULE_URL = WEB_ASSETS === "cdn"
+  ? "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.min.mjs"
+  : "/vendor/pdf.min.mjs";
+const PDFJS_WORKER_URL = WEB_ASSETS === "cdn"
+  ? "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.worker.min.mjs"
+  : "/vendor/pdf.worker.min.mjs";
 let loadingConversation = false;
 let currentTail = Number.parseInt(params.get("tail") || "8", 10) || 8;
 let showAllRecords = params.get("all") === "1";
@@ -3608,7 +3718,7 @@ function renderRecord(record, index, records) {
 
 async function pdfjs() {
   if (window.pdfjsLib) return window.pdfjsLib;
-  const module = await import("https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.min.mjs");
+  const module = await import(PDFJS_MODULE_URL);
   window.pdfjsLib = module;
   return module;
 }
@@ -3619,7 +3729,7 @@ async function renderPdfPage(container) {
   container.dataset.rendering = "1";
   try {
     const pdf = await pdfjs();
-    pdf.GlobalWorkerOptions.workerSrc = "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/build/pdf.worker.min.mjs";
+    pdf.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_URL;
     if (!container._pdfPage) {
       const documentTask = pdf.getDocument({ url });
       const pdfDocument = await documentTask.promise;

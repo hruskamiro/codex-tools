@@ -10,10 +10,10 @@ The viewer has no authentication. It binds to `127.0.0.1` by default and
 refuses non-loopback hosts unless `--allow-remote` is supplied. Do not expose it
 to an untrusted network.
 
-The browser viewer currently loads pinned versions of several rendering
-libraries from jsDelivr. Those scripts execute in the viewer origin and can
-access its local transcript API. Bundling these assets locally is planned; do
-not use the viewer where third-party CDN execution is unacceptable.
+The browser viewer uses bundled, pinned rendering libraries by default. The
+optional `--web-assets cdn` mode loads matching copies from jsDelivr. Those
+third-party scripts execute in the viewer origin and can access its local
+transcript API, so use CDN mode only when that trust is acceptable.
 
 ## Reporting a vulnerability
 

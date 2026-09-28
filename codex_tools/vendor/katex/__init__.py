@@ -1,0 +1,1 @@
+"""Bundled KaTeX browser assets."""
