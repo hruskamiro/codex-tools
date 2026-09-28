@@ -1,0 +1,8 @@
+#!/usr/bin/env python3
+"""Run the Codex conversation viewer from a source checkout."""
+
+from codex_tools.viewer import main
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
