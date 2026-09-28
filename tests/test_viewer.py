@@ -102,6 +102,30 @@ class ViewerCommandTests(unittest.TestCase):
             self.assertIn("cursorIsVisible", script)
             self.assertIn("messageNavigationIndex = nextIndex", script)
 
+    def test_refresh_reports_progress_and_preserves_the_visible_message(self) -> None:
+        for html in (viewer.VIEW_HTML, viewer.TYPESET_HTML):
+            self.assertIn('id="refreshStatus"', html)
+            self.assertIn('class="refresh-icon"', html)
+
+        for script in (viewer.VIEW_JS, viewer.TYPESET_JS):
+            self.assertIn('els.refreshStatus.textContent = "Refreshing..."', script)
+            self.assertIn('"Up to date"', script)
+            self.assertIn("await loadConversation({ preserveScroll: true })", script)
+            self.assertIn("restoreScrollAnchor(options.scrollAnchor)", script)
+            self.assertIn('toggleAttribute("aria-busy", refreshing)', script)
+            self.assertIn('apiParams.set("anchor", renderOptions.scrollAnchor.lineNo)', script)
+
+        self.assertIn("const scrollAnchor = options.preserveScroll", viewer.VIEW_JS)
+        self.assertNotIn("els.conversation.scrollTop = previousScrollTop", viewer.VIEW_JS)
+        self.assertIn("@keyframes refresh-spin", viewer.APP_CSS)
+
+    def test_refresh_anchor_keeps_the_visible_record_ahead_of_the_tail(self) -> None:
+        records = [SimpleNamespace(line_no=line) for line in range(1, 31)]
+
+        selected = viewer.records_for_view(records, tail=4, all_records=False, anchor_line=24)
+
+        self.assertEqual([record.line_no for record in selected], list(range(24, 31)))
+
     def test_typeset_view_builds_selectable_pdf_text_layer(self) -> None:
         self.assertIn("new pdf.TextLayer", viewer.TYPESET_JS)
 

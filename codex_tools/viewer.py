@@ -495,14 +495,34 @@ def handle_sessions(state: ViewerState, query: dict[str, list[str]]) -> dict[str
     return {"sessions": deduped[:limit], "total": len(deduped), "fileTotal": len(sessions)}
 
 
+def records_for_view(
+    records: list[Any], tail: int, all_records: bool, anchor_line: int = 0
+) -> list[Any]:
+    if all_records:
+        return records
+    start = max(0, len(records) - tail)
+    if anchor_line:
+        anchor_index = next(
+            (
+                index
+                for index, record in enumerate(records)
+                if record.line_no == anchor_line
+            ),
+            start,
+        )
+        start = min(start, anchor_index)
+    return records[start:]
+
+
 def handle_session(state: ViewerState, query: dict[str, list[str]]) -> dict[str, Any]:
     path = resolve_session_path(state, query)
     include_tools = query.get("tools", ["0"])[0] == "1"
     all_records = query.get("all", ["0"])[0] == "1"
     tail = safe_int(query.get("tail", [None])[0], 24, 1, 500)
+    anchor_line = safe_int(query.get("anchor", [None])[0], 0, 0, 2**31 - 1)
     session = read_session(path, include_tools=include_tools, include_system=False)
     resolve_session_title(session, state.titles)
-    records = session.records if all_records else session.records[-tail:]
+    records = records_for_view(session.records, tail, all_records, anchor_line)
     return {
         "session": session_summary(path, state.titles),
         "tail": tail,
@@ -531,6 +551,7 @@ def handle_typeset(
     include_tools = query.get("tools", ["0"])[0] == "1"
     all_records = query.get("all", ["0"])[0] == "1"
     tail = safe_int(query.get("tail", [None])[0], 8, 1, 100)
+    anchor_line = safe_int(query.get("anchor", [None])[0], 0, 0, 2**31 - 1)
     workers = safe_int(query.get("workers", [None])[0], 8, 1, 16)
     header_mode = query.get("header", [typeset.DEFAULT_HEADER_MODE])[0]
     if header_mode not in {"embedded", "external"}:
@@ -559,7 +580,7 @@ def handle_typeset(
             raise FileNotFoundError(f"assistant bubble not found at line {debug_line}")
         records = [matching[-1]]
     else:
-        records = session.records if all_records else session.records[-tail:]
+        records = records_for_view(session.records, tail, all_records, anchor_line)
     payload_records = []
     assistant_jobs: list[tuple[int, str, str]] = []
     for index, record in enumerate(records):
@@ -1549,11 +1570,11 @@ VIEW_HTML = """<!doctype html>
         <h1 id="sessionTitle">Loading conversation</h1>
       </div>
       <div class="view-actions">
-        <button id="refreshConversation" class="icon-button" type="button" title="Refresh conversation" aria-label="Refresh conversation">↻</button>
+        <button id="refreshConversation" class="icon-button" type="button" title="Refresh conversation" aria-label="Refresh conversation"><span class="refresh-icon" aria-hidden="true">↻</span></button>
         <a class="back-link" href="/">Choose another</a>
       </div>
     </header>
-    <div id="conversationInfo" class="conversation-info view-info"></div>
+    <div class="conversation-info view-info"><span id="conversationInfo"></span><span id="refreshStatus" class="refresh-status" role="status" aria-live="polite"></span></div>
     <article id="conversation" class="conversation view-conversation">
       <p class="loading">Loading conversation...</p>
     </article>
@@ -1566,7 +1587,7 @@ VIEW_HTML = """<!doctype html>
         <button id="jumpLatest" class="status-button" type="button">Latest <kbd>L</kbd></button>
         <button id="loadEarlier" class="status-button" type="button">Earlier <kbd>E</kbd></button>
         <button id="loadAll" class="status-button" type="button">All <kbd>A</kbd></button>
-        <button id="statusRefresh" class="status-button icon-status-button" type="button" title="Refresh conversation (R)" aria-label="Refresh conversation, R shortcut">↻<kbd>R</kbd></button>
+        <button id="statusRefresh" class="status-button icon-status-button" type="button" title="Refresh conversation (R)" aria-label="Refresh conversation, R shortcut"><span class="refresh-icon" aria-hidden="true">↻</span><kbd>R</kbd></button>
         <a id="typesetViewLink" class="status-button" href="/typeset">LaTeX <kbd>T</kbd></a>
         <a class="status-button" href="/">Choose <kbd>C</kbd></a>
       </div>
@@ -1601,11 +1622,11 @@ TYPESET_HTML = """<!doctype html>
         <h1 id="sessionTitle">Loading typeset view</h1>
       </div>
       <div class="view-actions">
-        <button id="refreshConversation" class="icon-button" type="button" title="Refresh typeset view" aria-label="Refresh typeset view">↻</button>
+        <button id="refreshConversation" class="icon-button" type="button" title="Refresh typeset view" aria-label="Refresh typeset view"><span class="refresh-icon" aria-hidden="true">↻</span></button>
         <a class="back-link" href="/">Choose another</a>
       </div>
     </header>
-    <div id="conversationInfo" class="conversation-info view-info"></div>
+    <div class="conversation-info view-info"><span id="conversationInfo"></span><span id="refreshStatus" class="refresh-status" role="status" aria-live="polite"></span></div>
     <article id="conversation" class="conversation view-conversation typeset-conversation">
       <p class="loading">Typesetting conversation...</p>
     </article>
@@ -1618,7 +1639,7 @@ TYPESET_HTML = """<!doctype html>
         <button id="jumpLatest" class="status-button" type="button">Latest <kbd>L</kbd></button>
         <button id="loadEarlier" class="status-button" type="button">Earlier <kbd>E</kbd></button>
         <button id="loadAll" class="status-button" type="button">All <kbd>A</kbd></button>
-        <button id="statusRefresh" class="status-button icon-status-button" type="button" title="Refresh typeset view (R)" aria-label="Refresh typeset view, R shortcut">↻<kbd>R</kbd></button>
+        <button id="statusRefresh" class="status-button icon-status-button" type="button" title="Refresh typeset view (R)" aria-label="Refresh typeset view, R shortcut"><span class="refresh-icon" aria-hidden="true">↻</span><kbd>R</kbd></button>
         <a id="normalViewLink" class="status-button" href="/view">Markdown <kbd>T</kbd></a>
         <a class="status-button" href="/">Choose <kbd>C</kbd></a>
       </div>
@@ -2006,6 +2027,26 @@ h2 {
   border-bottom: 1px solid var(--line);
   color: var(--muted);
   font-size: 13px;
+}
+
+.refresh-status:not(:empty)::before {
+  content: " · ";
+}
+
+.refresh-status {
+  color: var(--accent-dark);
+  font-weight: 700;
+}
+
+.is-refreshing .refresh-icon {
+  display: inline-block;
+  animation: refresh-spin 800ms linear infinite;
+}
+
+@keyframes refresh-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .view-body {
@@ -2975,6 +3016,7 @@ let showAllRecords = params.get("all") === "1";
 let lastConversationData = null;
 let typesetDebugEnabled = false;
 let messageNavigationIndex = -1;
+let refreshStatusTimer = 0;
 const els = {
   conversation: document.getElementById("conversation"),
   conversationInfo: document.getElementById("conversationInfo"),
@@ -2985,6 +3027,7 @@ const els = {
   loadAll: document.getElementById("loadAll"),
   loadEarlier: document.getElementById("loadEarlier"),
   refreshConversation: document.getElementById("refreshConversation"),
+  refreshStatus: document.getElementById("refreshStatus"),
   statusRefresh: document.getElementById("statusRefresh"),
   statusbar: document.getElementById("viewStatusbar"),
   statusbarToggle: document.getElementById("statusbarToggle"),
@@ -2992,6 +3035,40 @@ const els = {
   sessionMeta: document.getElementById("sessionMeta"),
   typesetViewLink: document.getElementById("typesetViewLink"),
 };
+
+function setRefreshState(refreshing) {
+  for (const button of [els.refreshConversation, els.statusRefresh]) {
+    if (!button) continue;
+    if (!button.dataset.idleTitle) button.dataset.idleTitle = button.title;
+    if (!button.dataset.idleLabel) button.dataset.idleLabel = button.getAttribute("aria-label") || button.title;
+    button.disabled = refreshing;
+    button.classList.toggle("is-refreshing", refreshing);
+    button.title = refreshing ? "Refreshing conversation..." : button.dataset.idleTitle;
+    button.setAttribute(
+      "aria-label",
+      refreshing ? "Refreshing conversation" : button.dataset.idleLabel,
+    );
+  }
+  els.conversation?.toggleAttribute("aria-busy", refreshing);
+  if (refreshing && els.refreshStatus) {
+    window.clearTimeout(refreshStatusTimer);
+    els.refreshStatus.textContent = "Refreshing...";
+  }
+}
+
+function showRefreshResult(previousTotal, failed = false) {
+  if (!els.refreshStatus) return;
+  const added = Math.max(0, Number(lastConversationData?.totalCount || 0) - previousTotal);
+  els.refreshStatus.textContent = failed
+    ? "Refresh failed"
+    : added
+      ? `${added} new message${added === 1 ? "" : "s"}`
+      : "Up to date";
+  window.clearTimeout(refreshStatusTimer);
+  refreshStatusTimer = window.setTimeout(() => {
+    els.refreshStatus.textContent = "";
+  }, 1800);
+}
 
 function setStatusbarExpanded(expanded) {
   if (!els.statusbar || !els.statusbarToggle) return;
@@ -3359,6 +3436,30 @@ function firstVisibleMessage() {
   return messages.find((message) => message.getBoundingClientRect().bottom > viewportTop + 8) || null;
 }
 
+function captureScrollAnchor() {
+  const message = firstVisibleMessage();
+  if (!message) return { lineNo: "", top: 0, pageY: window.scrollY };
+  return {
+    lineNo: messageLineId(message),
+    top: message.getBoundingClientRect().top,
+    pageY: window.scrollY,
+  };
+}
+
+function restoreScrollAnchor(anchor) {
+  if (!anchor?.lineNo) {
+    window.scrollTo(0, anchor?.pageY || 0);
+    return;
+  }
+  const target = Array.from(els.conversation.querySelectorAll(".message"))
+    .find((message) => messageLineId(message) === String(anchor.lineNo));
+  if (!target) {
+    window.scrollTo(0, anchor.pageY || 0);
+    return;
+  }
+  window.scrollBy(0, target.getBoundingClientRect().top - anchor.top);
+}
+
 function scrollToMessageLine(lineNo) {
   if (!lineNo) return false;
   const target = Array.from(els.conversation.querySelectorAll(".message"))
@@ -3400,7 +3501,6 @@ function renderConversation(data, options = {}) {
   lastConversationData = data;
   typesetDebugEnabled = Boolean(data.typesetDebug);
   messageNavigationIndex = -1;
-  const previousScrollTop = els.conversation.scrollTop;
   const anchorLine = options.anchorLine || "";
   const session = data.session;
   document.title = session.title || "Codex Conversation";
@@ -3435,11 +3535,11 @@ function renderConversation(data, options = {}) {
   applySemanticHighlights(document);
   if (anchorLine) {
     requestAnimationFrame(() => {
-      if (!scrollToMessageLine(anchorLine)) els.conversation.scrollTop = previousScrollTop;
+      if (!scrollToMessageLine(anchorLine)) restoreScrollAnchor(options.scrollAnchor);
     });
   } else if (options.preserveScroll) {
     requestAnimationFrame(() => {
-      els.conversation.scrollTop = previousScrollTop;
+      restoreScrollAnchor(options.scrollAnchor);
     });
   } else {
     requestAnimationFrame(scrollToLatestAssistant);
@@ -3453,25 +3553,43 @@ async function loadConversation(options = {}) {
     setStatus("No conversation path or id was provided.", "error");
     return;
   }
+  const scrollAnchor = options.preserveScroll || options.anchorLine
+    ? captureScrollAnchor()
+    : null;
+  const renderOptions = { ...options, scrollAnchor };
   loadingConversation = true;
   updateLoadButtons({ shownCount: 0, totalCount: 1, all: false });
   const apiParams = new URLSearchParams(identity);
   apiParams.set("tail", String(currentTail));
+  if (renderOptions.scrollAnchor?.lineNo) {
+    apiParams.set("anchor", renderOptions.scrollAnchor.lineNo);
+  }
   try {
     if (showAllRecords) apiParams.set("all", "1");
     if (params.get("tools") === "1") apiParams.set("tools", "1");
     const response = await fetch(`/api/session?${apiParams}`);
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "Could not load conversation");
-    renderConversation(data, options);
+    renderConversation(data, renderOptions);
   } finally {
     loadingConversation = false;
     if (lastConversationData) updateLoadButtons(lastConversationData);
   }
 }
 
-function refreshConversation() {
-  return loadConversation({ preserveScroll: true });
+async function refreshConversation() {
+  if (loadingConversation) return;
+  const previousTotal = Number(lastConversationData?.totalCount || 0);
+  setRefreshState(true);
+  try {
+    await loadConversation({ preserveScroll: true });
+    showRefreshResult(previousTotal);
+  } catch (error) {
+    showRefreshResult(previousTotal, true);
+    throw error;
+  } finally {
+    setRefreshState(false);
+  }
 }
 
 function loadEarlierConversation() {
@@ -3576,6 +3694,7 @@ let lastConversationData = null;
 let typesetDebugEnabled = false;
 let typesetHeaderMode = "external";
 let messageNavigationIndex = -1;
+let refreshStatusTimer = 0;
 const els = {
   conversation: document.getElementById("conversation"),
   conversationInfo: document.getElementById("conversationInfo"),
@@ -3587,12 +3706,47 @@ const els = {
   loadEarlier: document.getElementById("loadEarlier"),
   normalViewLink: document.getElementById("normalViewLink"),
   refreshConversation: document.getElementById("refreshConversation"),
+  refreshStatus: document.getElementById("refreshStatus"),
   statusRefresh: document.getElementById("statusRefresh"),
   statusbar: document.getElementById("viewStatusbar"),
   statusbarToggle: document.getElementById("statusbarToggle"),
   sessionTitle: document.getElementById("sessionTitle"),
   sessionMeta: document.getElementById("sessionMeta"),
 };
+
+function setRefreshState(refreshing) {
+  for (const button of [els.refreshConversation, els.statusRefresh]) {
+    if (!button) continue;
+    if (!button.dataset.idleTitle) button.dataset.idleTitle = button.title;
+    if (!button.dataset.idleLabel) button.dataset.idleLabel = button.getAttribute("aria-label") || button.title;
+    button.disabled = refreshing;
+    button.classList.toggle("is-refreshing", refreshing);
+    button.title = refreshing ? "Refreshing typeset view..." : button.dataset.idleTitle;
+    button.setAttribute(
+      "aria-label",
+      refreshing ? "Refreshing typeset view" : button.dataset.idleLabel,
+    );
+  }
+  els.conversation?.toggleAttribute("aria-busy", refreshing);
+  if (refreshing && els.refreshStatus) {
+    window.clearTimeout(refreshStatusTimer);
+    els.refreshStatus.textContent = "Refreshing...";
+  }
+}
+
+function showRefreshResult(previousTotal, failed = false) {
+  if (!els.refreshStatus) return;
+  const added = Math.max(0, Number(lastConversationData?.totalCount || 0) - previousTotal);
+  els.refreshStatus.textContent = failed
+    ? "Refresh failed"
+    : added
+      ? `${added} new message${added === 1 ? "" : "s"}`
+      : "Up to date";
+  window.clearTimeout(refreshStatusTimer);
+  refreshStatusTimer = window.setTimeout(() => {
+    els.refreshStatus.textContent = "";
+  }, 1800);
+}
 
 function setStatusbarExpanded(expanded) {
   if (!els.statusbar || !els.statusbarToggle) return;
@@ -4130,6 +4284,9 @@ async function loadConversation(options = {}) {
   if (debugRoute.active) showTypesetDebugLoader(debugRoute.line);
   const apiParams = new URLSearchParams(identity);
   apiParams.set("tail", String(currentTail));
+  if (renderOptions.scrollAnchor?.lineNo) {
+    apiParams.set("anchor", renderOptions.scrollAnchor.lineNo);
+  }
   try {
     if (showAllRecords) apiParams.set("all", "1");
     if (params.get("tools") === "1") apiParams.set("tools", "1");
@@ -4147,8 +4304,19 @@ async function loadConversation(options = {}) {
   }
 }
 
-function refreshConversation() {
-  return loadConversation({ preserveScroll: true });
+async function refreshConversation() {
+  if (loadingConversation) return;
+  const previousTotal = Number(lastConversationData?.totalCount || 0);
+  setRefreshState(true);
+  try {
+    await loadConversation({ preserveScroll: true });
+    showRefreshResult(previousTotal);
+  } catch (error) {
+    showRefreshResult(previousTotal, true);
+    throw error;
+  } finally {
+    setRefreshState(false);
+  }
 }
 
 function loadEarlierConversation() {

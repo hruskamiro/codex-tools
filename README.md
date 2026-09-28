@@ -202,9 +202,10 @@ paths such as `/home/user/projects/codex-tools` and file-like names such as
 first-pass theme lives in CSS variables in `codex_tools/viewer.py` so future
 themes can replace the palette without changing the tokenizer.
 
-The live conversation view does not auto-refresh. Press `r` in the browser to
-reload the current session while preserving the current scroll position, so new
-messages can appear below the spot you are reading.
+The live conversation view does not auto-refresh. Press `R` or use either
+refresh button to fetch new messages while keeping the currently visible
+message at the same screen position. The viewer shows refresh progress and does
+not move to the latest message unless you choose `Latest` or press `L`.
 
 ### Manage Codex Profiles
 
