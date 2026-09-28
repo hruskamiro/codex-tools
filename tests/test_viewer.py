@@ -321,6 +321,11 @@ class ViewerCommandTests(unittest.TestCase):
             ".typeset-message.is-navigation-current .typeset-pdf-page::before",
             viewer.APP_CSS,
         )
+        self.assertIn("border-left-color: var(--faint)", viewer.APP_CSS)
+        typeset_body_rule = viewer.APP_CSS.split(
+            ".typeset-message.is-navigation-current .typeset-pdf-page::before", 1
+        )[1].split("}", 1)[0]
+        self.assertIn("width: 2px", typeset_body_rule)
         typeset_container_rule = viewer.APP_CSS.split(
             ".typeset-message.is-navigation-current::before", 1
         )[1].split("}", 1)[0]

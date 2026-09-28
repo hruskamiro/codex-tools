@@ -2387,6 +2387,11 @@ h2 {
   content: none;
 }
 
+.typeset-message.is-navigation-current .typeset-pdf-page,
+.typeset-message.is-navigation-current .typeset-fallback {
+  border-left-color: var(--faint);
+}
+
 .typeset-message.is-navigation-current .typeset-pdf-page::before,
 .typeset-message.is-navigation-current .typeset-fallback::before {
   content: "";
@@ -2395,7 +2400,7 @@ h2 {
   bottom: 0;
   left: 0;
   z-index: 4;
-  width: 3px;
+  width: 2px;
   border-radius: 0 0 0 7px;
   background: var(--faint);
   pointer-events: none;
