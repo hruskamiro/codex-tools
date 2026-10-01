@@ -136,18 +136,26 @@ class ViewerCommandTests(unittest.TestCase):
         for script in (viewer.VIEW_JS, viewer.TYPESET_JS):
             self.assertIn('els.refreshStatus.textContent = "Refreshing..."', script)
             self.assertIn('"Up to date"', script)
-            self.assertIn('bubble.className = "refresh-bubble"', script)
-            self.assertIn("els.conversation.appendChild(bubble)", script)
-            self.assertIn("if (refreshing) showRefreshBubble()", script)
-            self.assertIn("else removeRefreshBubble()", script)
+            self.assertIn("function setStatusbarRefreshState(refreshing)", script)
+            self.assertIn("els.statusbarToggle.disabled = refreshing", script)
             self.assertIn(
-                'els.conversation.hasAttribute("aria-busy")', script
+                "els.statusbarToggle.classList.toggle(\"is-refreshing\", refreshing)",
+                script,
             )
+            self.assertIn(
+                "els.statusbarToggle.innerHTML = '<span class=\"refresh-icon\"",
+                script,
+            )
+            self.assertIn('els.statusbarToggle.textContent = "/"', script)
+            self.assertIn("setStatusbarRefreshState(refreshing)", script)
+            self.assertNotIn("showRefreshBubble", script)
+            self.assertNotIn("data-refresh-bubble", script)
             self.assertIn("function sameConversationContent(previous, next)", script)
             self.assertIn("renderOptions.avoidUnchangedRender", script)
+            self.assertIn("preserveScroll: !jumpToLatest", script)
+            self.assertIn("if (jumpToLatest) scrollToLatestAssistant()", script)
             self.assertIn(
-                "await loadConversation({ preserveScroll: true, avoidUnchangedRender: true })",
-                script,
+                "refreshConversation({ jumpToLatest: event.shiftKey })", script
             )
             self.assertIn("restoreScrollAnchor(options.scrollAnchor)", script)
             self.assertIn('toggleAttribute("aria-busy", refreshing)', script)
@@ -156,11 +164,11 @@ class ViewerCommandTests(unittest.TestCase):
         self.assertIn("const scrollAnchor = options.preserveScroll", viewer.VIEW_JS)
         self.assertNotIn("els.conversation.scrollTop = previousScrollTop", viewer.VIEW_JS)
         self.assertIn("@keyframes refresh-spin", viewer.APP_CSS)
-        self.assertIn(".refresh-bubble", viewer.APP_CSS)
-        self.assertIn(".refresh-bubble-spinner", viewer.APP_CSS)
-        self.assertIn("overflow-anchor: none", viewer.APP_CSS)
+        self.assertIn(".statusbar-toggle.is-refreshing", viewer.APP_CSS)
+        self.assertNotIn(".refresh-bubble", viewer.APP_CSS)
+        self.assertNotIn(".refresh-bubble-spinner", viewer.APP_CSS)
         self.assertIn(
-            "if (debugRoute.active && !lastConversationData)", viewer.TYPESET_JS
+            "if (route.active && !lastConversationData)", viewer.TYPESET_JS
         )
 
     def test_refresh_anchor_keeps_the_visible_record_ahead_of_the_tail(self) -> None:
@@ -189,7 +197,7 @@ class ViewerCommandTests(unittest.TestCase):
         self.assertIn(".typeset-external-header + .typeset-pdf-page", viewer.APP_CSS)
         self.assertIn("border-radius: 0 0 8px 8px", viewer.APP_CSS)
         self.assertIn("typeset-external-header-actions", viewer.TYPESET_JS)
-        self.assertIn('>Open isolated ↗</a>', viewer.TYPESET_JS)
+        self.assertIn('>Open answer ↗</a>', viewer.TYPESET_JS)
         self.assertIn(
             'typesetHeaderMode === "embedded" ? typesetDebugBar(record) : ""',
             viewer.TYPESET_JS,
@@ -213,6 +221,17 @@ class ViewerCommandTests(unittest.TestCase):
         )[1].split("}", 1)[0]
         self.assertIn("border-bottom: 0", continuing_rule)
 
+    def test_open_answer_is_available_without_typeset_debug(self) -> None:
+        self.assertIn('class="typeset-answer-link"', viewer.VIEW_JS)
+        self.assertIn(">Open answer ↗</a>", viewer.VIEW_JS)
+        self.assertIn(">Open answer ↗</a>", viewer.TYPESET_JS)
+        self.assertIn(
+            "return `/t/${encodeURIComponent(identity.get(\"id\"))}/${encodeURIComponent(record.line_no)}`",
+            viewer.VIEW_JS,
+        )
+        self.assertIn('"/api/typeset/answer"', viewer.TYPESET_JS)
+        self.assertIn(">Fresh render ↗</a>", viewer.TYPESET_JS)
+
     def test_typeset_header_can_copy_original_markdown(self) -> None:
         self.assertIn('title="Copy Markdown"', viewer.TYPESET_JS)
         self.assertIn("${copyMarkdownButton(record)}", viewer.TYPESET_JS)
@@ -231,6 +250,83 @@ class ViewerCommandTests(unittest.TestCase):
         self.assertIn("record?.typeset?.codeBlocks?.[copyIndex]", viewer.TYPESET_JS)
         self.assertIn("copyRecordCode(codeButton)", viewer.TYPESET_JS)
         self.assertIn(".typeset-code-copy", viewer.APP_CSS)
+
+    def test_typeset_attachments_open_in_a_new_tab(self) -> None:
+        self.assertIn('target="_blank" rel="noopener"', viewer.TYPESET_JS)
+        self.assertIn("attachmentLinks(record)", viewer.TYPESET_JS)
+        self.assertIn('links.length === 1 ? "Attachment" : "Attachments"', viewer.TYPESET_JS)
+        self.assertIn(".typeset-attachments", viewer.APP_CSS)
+
+    def test_local_attachments_are_derived_from_the_assistant_markdown(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pdf = root / "plot.pdf"
+            pdf.write_bytes(b"%PDF-1.4\n")
+            png = root / "plot.png"
+            png.write_bytes(b"\x89PNG\r\n\x1a\nimage")
+            csv = root / "results.csv"
+            csv.write_text("name,value\na,1\n", encoding="utf-8")
+            record = search.TextRecord(
+                "",
+                "assistant",
+                f"[PDF plot]({pdf}), [PNG plot]({png}), [Results]({csv}), "
+                f"and [ignore]({root / 'page.html'}).",
+                42,
+                "message",
+            )
+
+            payload = viewer.attachment_link_payload(root / "session.jsonl", record)
+
+        self.assertEqual(len(payload), 3)
+        self.assertEqual(
+            [(item["label"], item["kind"]) for item in payload],
+            [("PDF plot", "PDF"), ("PNG plot", "PNG"), ("Results", "CSV")],
+        )
+        self.assertIn("/open?", payload[0]["url"])
+        self.assertIn("line=42", payload[0]["url"])
+        self.assertIn("link=0", payload[0]["url"])
+
+    def test_open_route_resolves_only_an_attachment_from_the_selected_record(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            session_path = root / "session.jsonl"
+            pdf = root / "plot.pdf"
+            pdf.write_bytes(b"%PDF-1.4\n")
+            session = search.Session(
+                path=session_path,
+                records=[
+                    search.TextRecord(
+                        "", "assistant", f"[Open plot]({pdf})", 42, "message"
+                    )
+                ],
+            )
+            state = SimpleNamespace()
+            query = {"path": [str(session_path)], "line": ["42"], "link": ["0"]}
+            with (
+                patch.object(viewer, "resolve_session_path", return_value=session_path),
+                patch.object(viewer, "read_session", return_value=session),
+            ):
+                self.assertEqual(
+                    viewer.resolve_linked_attachment(state, query),
+                    (pdf.resolve(), "application/pdf"),
+                )
+                with self.assertRaises(FileNotFoundError):
+                    viewer.resolve_linked_attachment(
+                        state,
+                        {**query, "link": ["1"], "target": ["/etc/passwd"]},
+                    )
+
+    def test_attachment_validation_rejects_mismatched_or_active_content(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fake_png = root / "fake.png"
+            fake_png.write_text("not an image", encoding="utf-8")
+            svg = root / "active.svg"
+            svg.write_text("<svg><script/></svg>", encoding="utf-8")
+
+            with self.assertRaises(FileNotFoundError):
+                viewer.validated_attachment(fake_png)
+            self.assertEqual(viewer.local_attachment_links(f"[SVG]({svg})"), [])
 
     def test_restart_command_stops_then_starts_viewer(self) -> None:
         args = viewer.parse_args(["restart"])
@@ -389,10 +485,14 @@ class ViewerCommandTests(unittest.TestCase):
             patch.object(viewer, "session_summary", return_value={"title": "Test"}),
             patch.object(viewer.typeset, "render_pdf", return_value=result) as render,
         ):
-            payload = viewer.handle_typeset(state, {"line": ["12"]}, isolated=True)
+            payload = viewer.handle_typeset(
+                state, {"line": ["12"]}, isolated=True, force=True
+            )
 
         self.assertEqual([record["line_no"] for record in payload["records"]], [12])
+        self.assertEqual(payload["isolatedLine"], 12)
         self.assertEqual(payload["debugLine"], 12)
+        self.assertTrue(payload["typesetFresh"])
         self.assertIn("?fresh=", payload["records"][0]["typeset"]["pdfUrl"])
         self.assertEqual(
             payload["records"][0]["typeset"]["codeBlocks"], ["/tmp/example"]
@@ -417,7 +517,41 @@ class ViewerCommandTests(unittest.TestCase):
             patch.object(viewer, "read_session", return_value=session),
         ):
             with self.assertRaises(PermissionError):
-                viewer.handle_typeset(state, {"line": ["12"]}, isolated=True)
+                viewer.handle_typeset(
+                    state, {"line": ["12"]}, isolated=True, force=True
+                )
+
+    def test_focused_answer_uses_cached_typesetting_without_debug_mode(self) -> None:
+        path = Path("/tmp/session.jsonl")
+        session = search.Session(
+            path=path,
+            records=[search.TextRecord("", "assistant", "answer", 12, "message")],
+        )
+        state = SimpleNamespace(typeset_debug=False, titles={})
+        result = typeset.TypesetResult(True, "a" * 64, Path("bubble.pdf"), cached=True)
+
+        with (
+            patch.object(viewer, "resolve_session_path", return_value=path),
+            patch.object(viewer, "read_session", return_value=session),
+            patch.object(viewer, "session_summary", return_value={"title": "Test"}),
+            patch.object(viewer.typeset, "render_pdf", return_value=result) as render,
+        ):
+            payload = viewer.handle_typeset(
+                state, {"line": ["12"]}, isolated=True
+            )
+
+        self.assertEqual([record["line_no"] for record in payload["records"]], [12])
+        self.assertEqual(payload["isolatedLine"], 12)
+        self.assertIsNone(payload["debugLine"])
+        self.assertFalse(payload["typesetFresh"])
+        self.assertNotIn("?fresh=", payload["records"][0]["typeset"]["pdfUrl"])
+        render.assert_called_once_with(
+            "answer",
+            title="Assistant answer",
+            force=False,
+            header_mode="external",
+            code_mode="auto",
+        )
 
     def test_normal_typeset_api_rejects_line_targeting(self) -> None:
         path = Path("/tmp/session.jsonl")

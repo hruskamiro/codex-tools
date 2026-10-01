@@ -132,8 +132,24 @@ def parse_args(
         type=Path,
         help=(
             "Custom daily prompt template using $weekday, $day, $timezone, "
-            "and $context placeholders."
+            "$target_words, $format_instructions, and $context placeholders."
         ),
+    )
+    parser.add_argument(
+        "--words",
+        type=summary_common.positive_int,
+        default=summary_common.DEFAULT_SUMMARY_WORDS,
+        help=(
+            "Approximate number of words in the summary. "
+            f"Default: {summary_common.DEFAULT_SUMMARY_WORDS}"
+        ),
+    )
+    parser.add_argument(
+        "--format",
+        dest="summary_format",
+        choices=summary_common.SUMMARY_FORMATS,
+        default=summary_common.DEFAULT_SUMMARY_FORMAT,
+        help="Summary organization. Default: freeform.",
     )
     parser.add_argument(
         "--output",
@@ -155,7 +171,11 @@ def parse_args(
     )
     parser.add_argument(
         "--model",
-        help="Optional model to pass through to codex exec.",
+        default=summary_common.read_default_model(),
+        help=(
+            "Model for summary generation. Default: "
+            f"{summary_common.default_model_label()}"
+        ),
     )
     parser.add_argument(
         "--codex-bin",
@@ -338,16 +358,25 @@ def summary_prompt(
     day: date,
     timezone: ZoneInfo,
     template_path: Path | None = None,
+    *,
+    words: int = summary_common.DEFAULT_SUMMARY_WORDS,
+    summary_format: str = summary_common.DEFAULT_SUMMARY_FORMAT,
 ) -> str:
-    return summary_prompts.render_template(
-        "daily",
-        {
-            "weekday": weekday_label(day),
-            "day": day.isoformat(),
-            "timezone": timezone.key,
-            "context": context,
-        },
-        template_path,
+    return summary_common.structured_prompt(
+        summary_prompts.render_template(
+            "daily",
+            {
+                "weekday": weekday_label(day),
+                "day": day.isoformat(),
+                "timezone": timezone.key,
+                "target_words": str(words),
+                "format_instructions": summary_common.format_instructions(
+                    "daily", summary_format
+                ),
+                "context": context,
+            },
+            template_path,
+        )
     )
 
 
@@ -379,6 +408,11 @@ def prepare_daily_summary(
     context = summary_common.truncate_context(context, args.max_context_chars)
 
     template = summary_prompts.template_text("daily", args.prompt_template)
+    words = getattr(args, "words", summary_common.DEFAULT_SUMMARY_WORDS)
+    summary_format = getattr(
+        args, "summary_format", summary_common.DEFAULT_SUMMARY_FORMAT
+    )
+    model = getattr(args, "model", None)
     source_last_timestamp = summary_timestamp(sessions, day, timezone).isoformat()
     context_sha256 = sha256_text(context)
     template_sha256 = sha256_text(template)
@@ -387,6 +421,9 @@ def prepare_daily_summary(
             "context_sha256": context_sha256,
             "source_last_timestamp": source_last_timestamp,
             "template_sha256": template_sha256,
+            "target_words": words,
+            "summary_format": summary_format,
+            "model": model,
         },
         sort_keys=True,
         separators=(",", ":"),
@@ -394,7 +431,14 @@ def prepare_daily_summary(
     return DailySummaryInputs(
         sessions=sessions,
         context=context,
-        prompt=summary_prompt(context, day, timezone, args.prompt_template),
+        prompt=summary_prompt(
+            context,
+            day,
+            timezone,
+            args.prompt_template,
+            words=words,
+            summary_format=summary_format,
+        ),
         source_last_timestamp=source_last_timestamp,
         context_sha256=context_sha256,
         template_sha256=template_sha256,
@@ -485,6 +529,14 @@ def generate_daily_summary(
                     "profile": args.profile,
                     "max_record_chars": args.max_record_chars,
                     "max_context_chars": args.max_context_chars,
+                    "target_words": getattr(
+                        args, "words", summary_common.DEFAULT_SUMMARY_WORDS
+                    ),
+                    "summary_format": getattr(
+                        args,
+                        "summary_format",
+                        summary_common.DEFAULT_SUMMARY_FORMAT,
+                    ),
                 },
             )
 

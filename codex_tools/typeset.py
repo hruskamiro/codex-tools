@@ -25,7 +25,7 @@ except ImportError:  # Pygments is optional when running directly from a checkou
     ClassNotFound = LookupError
 
 
-RENDERER_VERSION = "typeset-v39"
+RENDERER_VERSION = "typeset-v42"
 DEFAULT_PARAGRAPH_MODE = "spaced"
 DEFAULT_HEADER_MODE = "external"
 BODY_LINE_STRETCH = "1.08"
@@ -118,6 +118,7 @@ class ListItem:
     ordered: bool
     text: str
     number: int | None = None
+    continuation: tuple[str, ...] = ()
 
 
 def user_cache_dir() -> Path:
@@ -162,6 +163,12 @@ def render_inline(text: str) -> str:
                     r"\CodexInlineCode{" + latex_escape(text[cursor + 1 : end]) + "}"
                 )
                 cursor = end + 1
+                continue
+        if text.startswith(r"\(", cursor):
+            end = text.find(r"\)", cursor + 2)
+            if end > cursor + 2:
+                rendered.append(r"\(" + text[cursor + 2 : end] + r"\)")
+                cursor = end + 2
                 continue
         if text.startswith("**", cursor):
             end = text.find("**", cursor + 2)
@@ -227,6 +234,7 @@ def is_block_start(line: str) -> bool:
     stripped = line.strip()
     return bool(
         stripped.startswith("```")
+        or stripped in {r"\[", r"\]", "$$"}
         or re.match(r"#{1,4}\s+", stripped)
         or re.match(r"[-*+]\s+", stripped)
         or re.match(r"\d+[.)]\s+", stripped)
@@ -273,6 +281,13 @@ def render_code_block(
             highlighted = highlight(
                 "\n".join(lines), lexer, PYGMENTS_FORMATTER
             ).rstrip("\n")
+            highlighted_lines = highlighted.splitlines()
+            if (
+                len(highlighted_lines) >= 2
+                and highlighted_lines[0].startswith(r"\begin{Verbatim}[")
+                and highlighted_lines[-1] == r"\end{Verbatim}"
+            ):
+                highlighted = "\n".join(highlighted_lines[1:-1])
             return copy_target + (
                 "\\begin{Verbatim}[breaklines=true,breakanywhere=true,"
                 "fontsize=\\small,commandchars=\\\\\\{\\}]\n"
@@ -320,11 +335,90 @@ def parse_list_item(line: str) -> ListItem | None:
     )
 
 
-def render_list_level(
-    items: list[ListItem], index: int, indent: int, level: int = 1
-) -> tuple[str, int]:
+def line_indentation(line: str) -> int:
+    prefix = line[: len(line) - len(line.lstrip(" \t"))]
+    return len(prefix.expandtabs(4))
+
+
+def remove_indentation(line: str, width: int) -> str:
+    """Remove up to ``width`` leading indentation columns from a source line."""
+    consumed = 0
+    index = 0
+    while index < len(line) and consumed < width and line[index] in " \t":
+        consumed += 4 - consumed % 4 if line[index] == "\t" else 1
+        index += 1
+    return line[index:]
+
+
+def list_marker_content_indent(line: str) -> int:
+    match = re.match(r"^[ \t]*(?:[-*+]|\d+[.)])[ \t]+", line)
+    if not match:
+        return 0
+    return len(match.group(0).expandtabs(4))
+
+
+def parse_list_block(lines: list[str], index: int) -> tuple[list[ListItem], int]:
+    """Parse one Markdown list, retaining loose item continuation blocks."""
+    first = parse_list_item(lines[index])
+    if first is None:
+        return [], index
+    base_indent = first.indent
+    items: list[ListItem] = []
+
+    while index < len(lines):
+        marker = parse_list_item(lines[index])
+        if marker is None or marker.indent != base_indent:
+            break
+        content_indent = list_marker_content_indent(lines[index])
+        index += 1
+        continuation: list[str] = []
+
+        while index < len(lines):
+            line = lines[index]
+            if not line.strip():
+                lookahead = index + 1
+                while lookahead < len(lines) and not lines[lookahead].strip():
+                    lookahead += 1
+                if lookahead >= len(lines):
+                    index = lookahead
+                    break
+                following = parse_list_item(lines[lookahead])
+                if following is not None and following.indent == base_indent:
+                    index = lookahead
+                    break
+                if line_indentation(lines[lookahead]) >= content_indent:
+                    continuation.append("")
+                    index = lookahead
+                    continue
+                break
+
+            following = parse_list_item(line)
+            if following is not None and following.indent == base_indent:
+                break
+            if line_indentation(line) < content_indent:
+                break
+            continuation.append(remove_indentation(line, content_indent))
+            index += 1
+
+        items.append(
+            ListItem(
+                indent=marker.indent,
+                ordered=marker.ordered,
+                text=marker.text,
+                number=marker.number,
+                continuation=tuple(continuation),
+            )
+        )
+
+    return items, index
+
+
+def render_list(
+    items: list[ListItem], code_mode: str, code_index: list[int], level: int = 1
+) -> str:
     rendered: list[str] = []
-    while index < len(items) and items[index].indent == indent:
+    index = 0
+    while index < len(items):
         ordered = items[index].ordered
         env = "enumerate" if ordered else "itemize"
         start = items[index].number
@@ -333,7 +427,6 @@ def render_list_level(
         expected_number = start
         while (
             index < len(items)
-            and items[index].indent == indent
             and items[index].ordered == ordered
         ):
             if (
@@ -347,29 +440,28 @@ def render_list_level(
                 rendered.append(
                     f"\\setcounter{{{counter}}}{{{items[index].number - 1}}}"
                 )
-            rendered.append(r"\item " + render_inline(items[index].text.strip()))
+            item = items[index]
+            rendered.append(r"\item " + render_inline(item.text.strip()))
             if ordered:
-                expected_number = items[index].number + 1
+                expected_number = item.number + 1
             index += 1
-            if index < len(items) and items[index].indent > indent:
-                child_indent = items[index].indent
-                children, index = render_list_level(
-                    items, index, child_indent, level + 1
-                )
-                rendered.append(children)
+            if item.continuation:
+                continuation = list(item.continuation)
+                while continuation and not continuation[0].strip():
+                    continuation.pop(0)
+                if continuation:
+                    if not is_block_start(continuation[0]):
+                        rendered.append(r"\par")
+                    rendered.append(
+                        _markdown_to_latex_lines(
+                            continuation,
+                            code_mode=code_mode,
+                            code_index=code_index,
+                            list_level=level + 1,
+                        )
+                    )
         rendered.append(f"\\end{{{env}}}")
-    return "\n".join(rendered), index
-
-
-def render_list(items: list[ListItem]) -> str:
-    if not items:
-        return ""
-    base_indent = min(item.indent for item in items)
-    rendered, index = render_list_level(items, 0, base_indent)
-    if index < len(items):
-        remainder, _ = render_list_level(items, index, items[index].indent)
-        rendered += "\n" + remainder
-    return rendered + "\n"
+    return "\n".join(rendered) + "\n"
 
 
 def render_quote(lines: list[str]) -> str:
@@ -468,13 +560,34 @@ def render_table(header: list[str], rows: list[list[str]], alignments: list[str]
     )
 
 
-def markdown_to_latex(
-    markdown: str, *, code_mode: str = DEFAULT_CODE_MODE
+def render_display_math(lines: list[str], index: int) -> tuple[str, int]:
+    stripped = lines[index].strip()
+    if (
+        stripped.startswith("$$")
+        and stripped.endswith("$$")
+        and len(stripped) > 4
+    ):
+        return "\\[\n" + stripped[2:-2].strip() + "\n\\]", index + 1
+
+    closer = r"\]" if stripped == r"\[" else "$$"
+    index += 1
+    math_lines: list[str] = []
+    while index < len(lines) and lines[index].strip() != closer:
+        math_lines.append(lines[index].strip())
+        index += 1
+    if index < len(lines):
+        index += 1
+    return "\\[\n" + "\n".join(math_lines) + "\n\\]", index
+
+
+def _markdown_to_latex_lines(
+    lines: list[str],
+    *,
+    code_mode: str,
+    code_index: list[int],
+    list_level: int = 1,
 ) -> str:
-    resolved_code_mode(code_mode)
-    lines = markdown.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     blocks: list[str] = []
-    code_index = 0
     noindent_next = True
     index = 0
     while index < len(lines):
@@ -498,10 +611,20 @@ def markdown_to_latex(
                     code_lines,
                     language,
                     code_mode,
-                    copy_index=code_index,
+                    copy_index=code_index[0],
                 )
             )
-            code_index += 1
+            code_index[0] += 1
+            noindent_next = True
+            continue
+
+        if stripped in {r"\[", "$$"} or (
+            stripped.startswith("$$")
+            and stripped.endswith("$$")
+            and len(stripped) > 4
+        ):
+            math, index = render_display_math(lines, index)
+            blocks.append(math + "\n")
             noindent_next = True
             continue
 
@@ -531,14 +654,8 @@ def markdown_to_latex(
             continue
 
         if parse_list_item(line):
-            items: list[ListItem] = []
-            while index < len(lines):
-                item = parse_list_item(lines[index])
-                if item is None:
-                    break
-                items.append(item)
-                index += 1
-            blocks.append(render_list(items))
+            items, index = parse_list_block(lines, index)
+            blocks.append(render_list(items, code_mode, code_index, list_level))
             noindent_next = True
             continue
 
@@ -561,6 +678,18 @@ def markdown_to_latex(
         noindent_next = False
 
     return "\n".join(blocks).strip() or latex_escape("(empty assistant message)")
+
+
+def markdown_to_latex(
+    markdown: str, *, code_mode: str = DEFAULT_CODE_MODE
+) -> str:
+    resolved_code_mode(code_mode)
+    lines = markdown.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    return _markdown_to_latex_lines(
+        lines,
+        code_mode=code_mode,
+        code_index=[0],
+    )
 
 
 def document_for(
@@ -599,6 +728,7 @@ def document_for(
     )
     return rf"""\documentclass[10pt,border={{{document_border}}}]{{standalone}}
 \usepackage{{fontspec}}
+\usepackage{{amsmath}}
 \usepackage[dvipsnames]{{xcolor}}
 \usepackage{{hyperref}}
 \usepackage{{fvextra}}

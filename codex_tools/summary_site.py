@@ -7,6 +7,7 @@ import argparse
 import html
 import re
 import shutil
+import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta

@@ -13,6 +13,7 @@ from codex_tools import (
     browser,
     cli,
     paths,
+    summary,
     summarize_daily,
     summarize_weekly,
     summary_clean,
@@ -112,6 +113,65 @@ class SummaryCommandTests(unittest.TestCase):
         self.assertTrue(weekly.show_context)
         self.assertEqual(weekly.save_context, Path("w.md"))
 
+    def test_summary_defaults_to_freeform_at_roughly_200_words(self) -> None:
+        daily = summarize_daily.parse_args([])
+        weekly = summarize_weekly.parse_args([])
+
+        self.assertEqual(daily.words, 200)
+        self.assertEqual(daily.summary_format, "freeform")
+        self.assertEqual(weekly.words, 200)
+        self.assertEqual(weekly.summary_format, "freeform")
+
+    def test_summary_default_model_is_private_and_round_trips(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Path(temporary) / "config" / "summary.json"
+
+            self.assertIsNone(summary_common.read_default_model(config))
+            summary_common.write_default_model("gpt-6.1-sol", config)
+            self.assertEqual(
+                summary_common.read_default_model(config), "gpt-6.1-sol"
+            )
+            self.assertEqual(config.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(config.parent.stat().st_mode & 0o777, 0o700)
+
+            summary_common.write_default_model(None, config)
+            self.assertIsNone(summary_common.read_default_model(config))
+
+    def test_summary_model_command_sets_shows_and_resets_default(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Path(temporary) / "summary.json"
+            with (
+                patch.object(summary_common.paths, "SUMMARY_CONFIG_FILE", config),
+                patch("builtins.print") as output,
+            ):
+                self.assertEqual(summary.main(["model", "gpt-6.1-sol"]), 0)
+                self.assertEqual(
+                    output.call_args.args[0], "Default summary model: gpt-6.1-sol"
+                )
+
+                output.reset_mock()
+                self.assertEqual(summary.main(["model"]), 0)
+                self.assertEqual(
+                    output.call_args.args[0], "Default summary model: gpt-6.1-sol"
+                )
+
+                output.reset_mock()
+                self.assertEqual(summary.main(["model", "--reset"]), 0)
+                self.assertEqual(
+                    output.call_args.args[0],
+                    "Default summary model: Codex profile default",
+                )
+
+    def test_saved_summary_model_is_default_but_cli_can_override_it(self) -> None:
+        with patch.object(
+            summary_common, "read_default_model", return_value="saved-model"
+        ):
+            daily = summarize_daily.parse_args([])
+            weekly = summarize_weekly.parse_args(["--model", "one-run-model"])
+
+        self.assertEqual(daily.model, "saved-model")
+        self.assertEqual(weekly.model, "one-run-model")
+
     def test_packaged_daily_prompt_renders_context_verbatim(self) -> None:
         prompt = summarize_daily.summary_prompt(
             "A formula costs $5 and uses $x$.",
@@ -121,7 +181,21 @@ class SummaryCommandTests(unittest.TestCase):
 
         self.assertIn("Monday, 2026-09-28", prompt)
         self.assertIn("timezone Europe/Bratislava", prompt)
+        self.assertIn("approximately 200 words", prompt)
+        self.assertIn("do not force the content into fixed sections", prompt)
         self.assertIn("A formula costs $5 and uses $x$.", prompt)
+
+    def test_worklog_format_retains_fixed_daily_sections(self) -> None:
+        prompt = summarize_daily.summary_prompt(
+            "Context",
+            date(2026, 9, 28),
+            ZoneInfo("UTC"),
+            words=350,
+            summary_format="worklog",
+        )
+
+        self.assertIn("approximately 350 words", prompt)
+        self.assertIn("Main Work, Smaller Items, and Open Threads", prompt)
 
     def test_custom_summary_prompt_template(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -135,7 +209,8 @@ class SummaryCommandTests(unittest.TestCase):
                 template,
             )
 
-        self.assertEqual(prompt, "Summary for 2026-09-28\n\nContext body")
+        self.assertTrue(prompt.startswith("Summary for 2026-09-28\n\nContext body\n\n"))
+        self.assertIn("Return a JSON object matching the supplied schema", prompt)
 
     def test_show_prompt_does_not_invoke_model(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

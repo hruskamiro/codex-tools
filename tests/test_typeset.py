@@ -13,6 +13,7 @@ class TypesetTests(unittest.TestCase):
         document = typeset.document_for("```text\na very long line\n```")
 
         self.assertIn(r"\usepackage{fvextra}", document)
+        self.assertIn(r"\usepackage{amsmath}", document)
         self.assertIn(r"\usepackage{enumitem}", document)
         self.assertNotIn(r"\usepackage{fancyvrb}", document)
         self.assertIn(r"\setmonofont[Scale=MatchLowercase]{PT Mono}", document)
@@ -131,7 +132,22 @@ class TypesetTests(unittest.TestCase):
         self.assertIn(r"\def\CodexTok", document)
         self.assertIn(r"\CodexTok{c+c1}", document)
         self.assertIn(r"\CodexTok{l+m}{42}", document)
+        self.assertEqual(document.count(r"\begin{Verbatim}"), 1)
+        self.assertEqual(document.count(r"\end{Verbatim}"), 1)
         self.assertIn("-no-shell-escape", Path(typeset.__file__).read_text())
+
+    def test_pygments_toml_does_not_nest_verbatim_environments(self) -> None:
+        document = typeset.document_for(
+            "```toml\n"
+            "matched_source_paramset =\n"
+            '  "r4-grch37@mono@z1@abs-score=division"\n'
+            "```",
+            code_mode="pygments",
+        )
+
+        self.assertEqual(document.count(r"\begin{Verbatim}"), 1)
+        self.assertEqual(document.count(r"\end{Verbatim}"), 1)
+        self.assertIn(r"\CodexTok", document)
 
     def test_verbatim_mode_and_unknown_languages_fall_back_cleanly(self) -> None:
         verbatim = typeset.document_for(
@@ -200,6 +216,21 @@ class TypesetTests(unittest.TestCase):
         self.assertIn("Don't color", latex)
         self.assertIn(r'\CodexInlineCode{"quoted code"}', latex)
         self.assertNotIn(r'\CodexInlineCode{\CodexString', latex)
+
+    def test_inline_latex_math_is_preserved_outside_code(self) -> None:
+        latex = typeset.markdown_to_latex(
+            r"At \(d=0.95\), compare \(10^{-2}\)–\(10^{-1}\) with `\(literal\)`."
+        )
+
+        self.assertIn(r"\(d=0.95\)", latex)
+        self.assertIn(r"\(10^{-2}\)–\(10^{-1}\)", latex)
+        self.assertIn(r"\CodexInlineCode{\textbackslash{}(literal\textbackslash{})}", latex)
+        self.assertNotIn(r"\textbackslash{}(d=0.95\textbackslash{})", latex)
+
+    def test_unclosed_inline_latex_math_remains_plain_text(self) -> None:
+        latex = typeset.markdown_to_latex(r"An unfinished \(expression.")
+
+        self.assertIn(r"\textbackslash{}(expression.", latex)
 
     def test_external_header_does_not_affect_cache_identity(self) -> None:
         external_a = typeset.cache_key("Text", "First", header_mode="external")
@@ -271,6 +302,56 @@ class TypesetTests(unittest.TestCase):
             "\\item Next parent",
             latex,
         )
+
+    def test_loose_list_keeps_paragraphs_and_nested_lists_inside_each_item(self) -> None:
+        latex = typeset.markdown_to_latex(
+            "1. Validate it.\n\n"
+            "   Check that it has the expected columns:\n\n"
+            "   - `snv`\n"
+            "   - `score`\n\n"
+            "   Confirm the threshold.\n\n"
+            "2. Point to the new resource.\n\n"
+            "   Keep the legacy resource for comparison."
+        )
+
+        self.assertEqual(latex.count(r"\begin{enumerate}"), 1)
+        self.assertEqual(latex.count(r"\end{enumerate}"), 1)
+        self.assertIn(
+            "\\item Validate it.\n"
+            "\\par\n"
+            "\\noindent Check that it has the expected columns:",
+            latex,
+        )
+        self.assertIn(
+            "\\begin{itemize}\n"
+            "\\item \\CodexInlineCode{snv}\n"
+            "\\item \\CodexInlineCode{score}\n"
+            "\\end{itemize}",
+            latex,
+        )
+        self.assertLess(
+            latex.index("Confirm the threshold."), latex.index(r"\item Point")
+        )
+
+    def test_display_math_is_preserved_inside_a_loose_list_item(self) -> None:
+        markdown = (
+            "1. Calculate the score:\n\n"
+            "   \\[\n"
+            "   S=\\sum_{\\text{alt reads}}-\\log_{10}(p_{\\text{base error}})\n"
+            "   \\]\n\n"
+            "2. Compare it with the null."
+        )
+        latex = typeset.markdown_to_latex(markdown)
+
+        self.assertIn(
+            "\\item Calculate the score:\n"
+            "\\[\n"
+            "S=\\sum_{\\text{alt reads}}-\\log_{10}(p_{\\text{base error}})\n"
+            "\\]\n"
+            "\\item Compare it with the null.",
+            latex,
+        )
+        self.assertNotIn(r"\textbackslash{}[", latex)
 
     def test_separate_ordered_lists_preserve_explicit_start_numbers(self) -> None:
         latex = typeset.markdown_to_latex(

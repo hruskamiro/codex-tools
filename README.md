@@ -148,7 +148,9 @@ codex-viewer doctor
 After a conversation is selected, they start the daemon when needed and open
 that conversation in the browser.
 
-For typesetter development, enable per-bubble isolated previews:
+Every assistant bubble has an `Open answer` link that opens a focused, cached
+LaTeX preview of that answer. For typesetter development, enable fresh-render
+previews as well:
 
 ```bash
 codex-viewer restart --typeset-debug
@@ -163,9 +165,17 @@ Pygments. Highlighting is generated in Python; XeLaTeX remains in
 `-no-shell-escape` mode. In the LaTeX view, each fenced code block has a copy
 button that copies its exact original contents rather than PDF-extracted text.
 
-Assistant bubbles in the normal conversation view then show a `Typeset debug`
-link. It opens a dedicated `/debug/typeset/...` page; refreshing that page
-recompiles only the selected bubble and bypasses its PDF cache.
+Focused answers use `/t/<session-id>/<line>` URLs. With `--typeset-debug`, a
+focused answer also offers a `Fresh render` link to `/debug/typeset/...`;
+refreshing that debug page recompiles only the selected bubble and bypasses its
+PDF cache.
+
+When an assistant answer links to an existing absolute local file in a supported
+format, the typeset view lists it under `Attachment` or `Attachments` and opens
+it in a new browser tab. Previewable formats are PDF, PNG, JPEG, WebP, GIF,
+plain text, logs, CSV, TSV, JSON, YAML, and TOML. The `/open` route resolves only
+links present in that specific assistant record and validates their content;
+active formats such as HTML and SVG are not exposed.
 
 Typeset views use an HTML bubble header by default, leaving the generated PDF
 to contain only the assistant answer. Add `?header=embedded` to a typeset or
@@ -222,8 +232,9 @@ themes can replace the palette without changing the tokenizer.
 
 The live conversation view does not auto-refresh. Press `R` or use either
 refresh button to fetch new messages while keeping the currently visible
-message at the same screen position. The viewer shows refresh progress and does
-not move to the latest message unless you choose `Latest` or press `L`.
+message at the same screen position; newly appended content only extends the
+scrollbar. Press `Shift+R` to refresh and jump directly to the latest answer.
+You can also choose `Latest` or press `L` without refreshing.
 
 ### Manage Codex Profiles
 
@@ -300,6 +311,35 @@ Ask `codex exec` to summarize the extracted context:
 ./codex-tools summary today
 ```
 
+Summaries are free-form by default and target approximately 200 words. Change
+the target length with `--words`; the model may vary slightly when that produces
+a more natural summary. The earlier fixed-section layout remains available as
+the optional `worklog` format:
+
+```bash
+./codex-tools summary today --words 100
+./codex-tools summary today --words 400
+./codex-tools summary today --format worklog
+./codex-tools summary week --last-week --words 300
+```
+
+Show or select the model used by default for daily and weekly summaries:
+
+```bash
+./codex-tools summary model
+./codex-tools summary model gpt-6.1-sol
+./codex-tools summary model --reset
+```
+
+The selection is stored privately in `~/.config/codex-tools/summary.json`.
+When no summary-specific model is selected, the active Codex profile chooses
+the model. `--model MODEL` on a daily or weekly command overrides the saved
+selection for that run.
+
+Model-backed summaries use a schema-constrained, read-only, ephemeral Codex
+turn. User configuration and repository rules are ignored, tool actions are
+rejected, and the structured result is rendered to Markdown locally.
+
 Other summary commands:
 
 ```bash
@@ -320,9 +360,10 @@ The built-in model instructions are ordinary Markdown templates:
 - `codex_tools/templates/daily_summary.md`
 - `codex_tools/templates/weekly_summary.md`
 
-Daily templates receive `$weekday`, `$day`, `$timezone`, and `$context`.
-Weekly templates receive `$start`, `$end`, and `$context`. Override either for
-one run with `--prompt-template PATH`; the template is rendered before any
+Daily templates receive `$weekday`, `$day`, `$timezone`, `$target_words`,
+`$format_instructions`, and `$context`. Weekly templates receive `$start`,
+`$end`, `$target_words`, `$format_instructions`, and `$context`. Override either
+for one run with `--prompt-template PATH`; the template is rendered before any
 model invocation.
 
 Daily and weekly commands detect the local IANA timezone from `TZ` and the

@@ -22,7 +22,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlencode, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 from urllib.request import urlopen
 
 from codex_tools import paths, typeset
@@ -64,6 +64,33 @@ SUMMARY_TAIL_LINES = 80
 TAIL_READ_BLOCK_SIZE = 64 * 1024
 VIEWER_PID_FILE = paths.VIEWER_STATE_DIR / "viewer.json"
 VIEWER_LOG_FILE = paths.VIEWER_STATE_DIR / "viewer.log"
+MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+ATTACHMENT_TYPES = {
+    ".pdf": ("application/pdf", "PDF"),
+    ".png": ("image/png", "PNG"),
+    ".jpg": ("image/jpeg", "JPEG"),
+    ".jpeg": ("image/jpeg", "JPEG"),
+    ".webp": ("image/webp", "WEBP"),
+    ".gif": ("image/gif", "GIF"),
+    ".txt": ("text/plain; charset=utf-8", "TEXT"),
+    ".log": ("text/plain; charset=utf-8", "LOG"),
+    ".csv": ("text/csv; charset=utf-8", "CSV"),
+    ".tsv": ("text/tab-separated-values; charset=utf-8", "TSV"),
+    ".json": ("application/json; charset=utf-8", "JSON"),
+    ".yaml": ("text/yaml; charset=utf-8", "YAML"),
+    ".yml": ("text/yaml; charset=utf-8", "YAML"),
+    ".toml": ("text/plain; charset=utf-8", "TOML"),
+}
+TEXT_ATTACHMENT_SUFFIXES = {
+    ".txt",
+    ".log",
+    ".csv",
+    ".tsv",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".toml",
+}
 
 
 def read_default_view(config_path: Path | None = None) -> str:
@@ -566,6 +593,7 @@ def handle_typeset(
     query: dict[str, list[str]],
     *,
     isolated: bool = False,
+    force: bool = False,
 ) -> dict[str, Any]:
     path = resolve_session_path(state, query)
     include_tools = query.get("tools", ["0"])[0] == "1"
@@ -581,23 +609,23 @@ def handle_typeset(
     effective_code_mode = typeset.resolved_code_mode(code_mode)
     session = read_session(path, include_tools=include_tools, include_system=False)
     resolve_session_title(session, state.titles)
-    debug_line_raw = query.get("line", [""])[0].strip()
-    debug_line: int | None = None
-    if debug_line_raw:
+    isolated_line_raw = query.get("line", [""])[0].strip()
+    isolated_line: int | None = None
+    if isolated_line_raw:
         if not isolated:
             raise FileNotFoundError("isolated typeset route not found")
-        if not state.typeset_debug:
+        if force and not state.typeset_debug:
             raise PermissionError("isolated typeset rendering requires --typeset-debug")
-        if not debug_line_raw.isdigit():
+        if not isolated_line_raw.isdigit():
             raise ValueError("typeset line must be a positive integer")
-        debug_line = int(debug_line_raw)
+        isolated_line = int(isolated_line_raw)
         matching = [
             record
             for record in session.records
-            if record.role == "assistant" and record.line_no == debug_line
+            if record.role == "assistant" and record.line_no == isolated_line
         ]
         if not matching:
-            raise FileNotFoundError(f"assistant bubble not found at line {debug_line}")
+            raise FileNotFoundError(f"assistant bubble not found at line {isolated_line}")
         records = [matching[-1]]
     else:
         records = records_for_view(session.records, tail, all_records, anchor_line)
@@ -612,11 +640,12 @@ def handle_typeset(
             time_label = format_time(record.timestamp)
             title = f"Assistant answer · {time_label}" if time_label else "Assistant answer"
             assistant_jobs.append((index, record.text, title))
+            item["attachments"] = attachment_link_payload(path, record)
         payload_records.append(item)
 
     def attach_result(index: int, result: typeset.TypesetResult) -> None:
         pdf_url = f"/typeset/pdf/{result.key}.pdf" if result.ok else ""
-        if pdf_url and debug_line is not None:
+        if pdf_url and force:
             pdf_url += f"?fresh={time.time_ns()}"
         payload_records[index]["typeset"] = {
             "ok": result.ok,
@@ -634,7 +663,7 @@ def handle_typeset(
                     typeset.render_pdf,
                     text,
                     title=title,
-                    force=debug_line is not None,
+                    force=force,
                     header_mode=header_mode,
                     code_mode=code_mode,
                 ): index
@@ -652,11 +681,116 @@ def handle_typeset(
         "typesetDebug": state.typeset_debug,
         "typesetHeaderMode": header_mode,
         "typesetCodeMode": effective_code_mode,
-        "debugLine": debug_line,
+        "isolatedLine": isolated_line,
+        "debugLine": isolated_line if force else None,
+        "typesetFresh": force,
         "shownCount": len(records),
         "totalCount": len(session.records),
         "records": payload_records,
     }
+
+
+def local_attachment_links(markdown: str) -> list[tuple[str, Path]]:
+    links: list[tuple[str, Path]] = []
+    for match in MARKDOWN_LINK_RE.finditer(markdown):
+        label = match.group(1).strip()
+        target = match.group(2).strip()
+        if target.startswith("<") and target.endswith(">"):
+            target = target[1:-1].strip()
+        candidate = Path(target).expanduser()
+        if (
+            not candidate.is_absolute()
+            or candidate.suffix.lower() not in ATTACHMENT_TYPES
+        ):
+            continue
+        links.append((label or candidate.name, candidate))
+    return links
+
+
+def validated_attachment(path: Path) -> tuple[Path, str, str]:
+    candidate = path.resolve()
+    suffix = candidate.suffix.lower()
+    attachment_type = ATTACHMENT_TYPES.get(suffix)
+    if attachment_type is None or not candidate.is_file():
+        raise FileNotFoundError("attachment not found")
+    try:
+        with candidate.open("rb") as handle:
+            sample = handle.read(8192)
+    except OSError as exc:
+        raise FileNotFoundError("attachment not found") from exc
+
+    valid = False
+    if suffix == ".pdf":
+        valid = sample.startswith(b"%PDF-")
+    elif suffix == ".png":
+        valid = sample.startswith(b"\x89PNG\r\n\x1a\n")
+    elif suffix in {".jpg", ".jpeg"}:
+        valid = sample.startswith(b"\xff\xd8\xff")
+    elif suffix == ".gif":
+        valid = sample.startswith((b"GIF87a", b"GIF89a"))
+    elif suffix == ".webp":
+        valid = len(sample) >= 12 and sample[:4] == b"RIFF" and sample[8:12] == b"WEBP"
+    elif suffix in TEXT_ATTACHMENT_SUFFIXES and b"\x00" not in sample:
+        try:
+            sample.decode("utf-8")
+        except UnicodeDecodeError:
+            valid = False
+        else:
+            valid = True
+    if not valid:
+        raise FileNotFoundError("attachment not found")
+    return candidate, attachment_type[0], attachment_type[1]
+
+
+def attachment_link_payload(session_path: Path, record: Any) -> list[dict[str, str]]:
+    payload: list[dict[str, str]] = []
+    for index, (label, candidate) in enumerate(local_attachment_links(record.text)):
+        try:
+            _, _, kind = validated_attachment(candidate)
+        except (FileNotFoundError, OSError):
+            continue
+        payload.append(
+            {
+                "label": label,
+                "kind": kind,
+                "url": "/open?"
+                + urlencode(
+                    {
+                        "path": str(session_path),
+                        "line": record.line_no,
+                        "link": index,
+                    }
+                ),
+            }
+        )
+    return payload
+
+
+def resolve_linked_attachment(
+    state: ViewerState, query: dict[str, list[str]]
+) -> tuple[Path, str]:
+    session_path = resolve_session_path(state, query)
+    line_raw = query.get("line", [""])[0]
+    link_raw = query.get("link", [""])[0]
+    if not line_raw.isdigit() or int(line_raw) <= 0:
+        raise FileNotFoundError("attachment not found")
+    if not link_raw.isdigit():
+        raise FileNotFoundError("attachment not found")
+    line = int(line_raw)
+    link_index = int(link_raw)
+    session = read_session(session_path, include_tools=False, include_system=False)
+    matching = [
+        record
+        for record in session.records
+        if record.role == "assistant" and record.line_no == line
+    ]
+    if not matching:
+        raise FileNotFoundError("attachment not found")
+    links = local_attachment_links(matching[-1].text)
+    if link_index >= len(links):
+        raise FileNotFoundError("attachment not found")
+    candidate, content_type, _ = validated_attachment(links[link_index][1])
+    return candidate, content_type
 
 
 def handle_version(state: ViewerState, query: dict[str, list[str]]) -> dict[str, Any]:
@@ -702,6 +836,22 @@ def bytes_response(
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
+
+
+def attachment_file_response(
+    handler: BaseHTTPRequestHandler, path: Path, content_type: str
+) -> None:
+    size = path.stat().st_size
+    encoded_name = quote(path.name, safe="")
+    handler.send_response(HTTPStatus.OK)
+    handler.send_header("Content-Type", content_type)
+    handler.send_header("Content-Disposition", f"inline; filename*=UTF-8''{encoded_name}")
+    handler.send_header("Cache-Control", "private, no-store")
+    handler.send_header("X-Content-Type-Options", "nosniff")
+    handler.send_header("Content-Length", str(size))
+    handler.end_headers()
+    with path.open("rb") as source:
+        shutil.copyfileobj(source, handler.wfile)
 
 
 def handle_typeset_pdf(handler: BaseHTTPRequestHandler, key_with_suffix: str) -> None:
@@ -815,10 +965,20 @@ def make_handler(state: ViewerState) -> type[BaseHTTPRequestHandler]:
                     json_response(self, handle_session(state, query))
                 elif parsed.path == "/api/typeset":
                     json_response(self, handle_typeset(state, query))
-                elif parsed.path == "/api/debug/typeset":
+                elif parsed.path == "/api/typeset/answer":
                     json_response(self, handle_typeset(state, query, isolated=True))
+                elif parsed.path == "/api/debug/typeset":
+                    json_response(
+                        self,
+                        handle_typeset(state, query, isolated=True, force=True),
+                    )
                 elif parsed.path == "/api/version":
                     json_response(self, handle_version(state, query))
+                elif parsed.path == "/open":
+                    attachment_path, content_type = resolve_linked_attachment(
+                        state, query
+                    )
+                    attachment_file_response(self, attachment_path, content_type)
                 elif parsed.path.startswith("/typeset/pdf/"):
                     handle_typeset_pdf(self, parsed.path.removeprefix("/typeset/pdf/"))
                 else:
@@ -1667,7 +1827,7 @@ VIEW_HTML = """<!doctype html>
         <button id="jumpLatest" class="status-button" type="button">Latest <kbd>L</kbd></button>
         <button id="loadEarlier" class="status-button" type="button">Earlier <kbd>E</kbd></button>
         <button id="loadAll" class="status-button" type="button">All <kbd>A</kbd></button>
-        <button id="statusRefresh" class="status-button icon-status-button" type="button" title="Refresh conversation (R)" aria-label="Refresh conversation, R shortcut"><span class="refresh-icon" aria-hidden="true">↻</span><kbd>R</kbd></button>
+        <button id="statusRefresh" class="status-button icon-status-button" type="button" title="Refresh conversation (R); refresh and jump to latest (Shift+R)" aria-label="Refresh conversation with R; refresh and jump to latest with Shift+R"><span class="refresh-icon" aria-hidden="true">↻</span><kbd>R</kbd></button>
         <a id="typesetViewLink" class="status-button" href="/typeset">LaTeX <kbd>T</kbd></a>
         <a class="status-button" href="/">Choose <kbd>C</kbd></a>
       </div>
@@ -1719,7 +1879,7 @@ TYPESET_HTML = """<!doctype html>
         <button id="jumpLatest" class="status-button" type="button">Latest <kbd>L</kbd></button>
         <button id="loadEarlier" class="status-button" type="button">Earlier <kbd>E</kbd></button>
         <button id="loadAll" class="status-button" type="button">All <kbd>A</kbd></button>
-        <button id="statusRefresh" class="status-button icon-status-button" type="button" title="Refresh typeset view (R)" aria-label="Refresh typeset view, R shortcut"><span class="refresh-icon" aria-hidden="true">↻</span><kbd>R</kbd></button>
+        <button id="statusRefresh" class="status-button icon-status-button" type="button" title="Refresh typeset view (R); refresh and jump to latest (Shift+R)" aria-label="Refresh typeset view with R; refresh and jump to latest with Shift+R"><span class="refresh-icon" aria-hidden="true">↻</span><kbd>R</kbd></button>
         <a id="normalViewLink" class="status-button" href="/view">Markdown <kbd>T</kbd></a>
         <a class="status-button" href="/">Choose <kbd>C</kbd></a>
       </div>
@@ -2118,35 +2278,6 @@ h2 {
   font-weight: 700;
 }
 
-.refresh-bubble {
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  width: min(760px, 100%);
-  min-height: 58px;
-  margin: 0 auto 22px;
-  padding: 13px 16px;
-  border: 1px solid var(--line);
-  border-left: 3px solid var(--accent);
-  border-radius: 8px;
-  background: var(--assistant);
-  color: var(--muted);
-  font-family: var(--font-ui);
-  font-size: 13px;
-  font-weight: 700;
-  overflow-anchor: none;
-}
-
-.refresh-bubble-spinner {
-  width: 18px;
-  height: 18px;
-  flex: 0 0 auto;
-  border: 2px solid var(--line-strong);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: refresh-spin 800ms linear infinite;
-}
-
 .is-refreshing .refresh-icon {
   display: inline-block;
   animation: refresh-spin 800ms linear infinite;
@@ -2271,6 +2402,14 @@ h2 {
 .view-statusbar.is-expanded .statusbar-toggle {
   background: var(--accent-soft);
   outline: none;
+}
+
+.statusbar-toggle.is-refreshing,
+.statusbar-toggle.is-refreshing:disabled {
+  color: var(--accent-dark);
+  background: var(--accent-soft);
+  opacity: 1;
+  cursor: wait;
 }
 
 .status-button {
@@ -2436,6 +2575,58 @@ h2 {
   border-radius: 0 0 8px 8px;
 }
 
+.typeset-pdf-page.has-attachments {
+  border-bottom: 0;
+  border-radius: 8px 8px 0 0;
+}
+
+.typeset-external-header + .typeset-pdf-page.has-attachments {
+  border-radius: 0;
+}
+
+.typeset-attachments {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: min(760px, 100%);
+  margin: 0 auto;
+  padding: 8px 11px;
+  border: 1px solid var(--panel-line);
+  border-top: 0;
+  border-radius: 0 0 8px 8px;
+  background: var(--toolbar-bg);
+  color: var(--muted);
+  font-family: var(--font-ui);
+  font-size: 11px;
+}
+
+.typeset-attachments strong {
+  flex: 0 0 auto;
+  color: var(--accent-dark);
+}
+
+.typeset-attachment-list {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.typeset-attachments a {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: #8b570b;
+  font-weight: 750;
+  text-underline-offset: 2px;
+}
+
+.typeset-attachment-kind {
+  margin-left: 4px;
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+}
+
 .typeset-message.assistant-continuing {
   margin-bottom: 0;
 }
@@ -2526,6 +2717,28 @@ h2 {
 
 .typeset-debug-bar a {
   color: #714708;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+.typeset-answer-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: min(760px, 100%);
+  min-height: 30px;
+  margin: 0 auto 6px;
+  padding: 4px 9px;
+  border-left: 3px solid var(--accent);
+  color: var(--muted);
+  background: var(--toolbar-bg);
+  font-family: var(--font-ui);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.typeset-answer-bar a {
+  color: var(--accent-dark);
   text-decoration-thickness: 1px;
   text-underline-offset: 2px;
 }
@@ -2828,8 +3041,8 @@ h2 {
   flex: 0 0 auto;
 }
 
-.typeset-debug-link {
-  color: #8b570b;
+.typeset-answer-link {
+  color: var(--accent-dark);
   font-weight: 750;
   text-decoration-thickness: 1px;
   text-underline-offset: 2px;
@@ -3199,7 +3412,6 @@ let loadingConversation = false;
 let currentTail = Number.parseInt(params.get("tail") || "24", 10) || 24;
 let showAllRecords = params.get("all") === "1";
 let lastConversationData = null;
-let typesetDebugEnabled = false;
 let messageNavigationIndex = -1;
 let refreshStatusTimer = 0;
 const els = {
@@ -3221,22 +3433,22 @@ const els = {
   typesetViewLink: document.getElementById("typesetViewLink"),
 };
 
-function showRefreshBubble() {
-  if (!els.conversation || els.conversation.querySelector("[data-refresh-bubble]")) return;
-  const bubble = document.createElement("section");
-  bubble.className = "refresh-bubble";
-  bubble.dataset.refreshBubble = "";
-  bubble.setAttribute("role", "status");
-  bubble.setAttribute("aria-live", "polite");
-  bubble.innerHTML = `
-    <span class="refresh-bubble-spinner" aria-hidden="true"></span>
-    <span>Refreshing conversation...</span>
-  `;
-  els.conversation.appendChild(bubble);
-}
-
-function removeRefreshBubble() {
-  els.conversation?.querySelector("[data-refresh-bubble]")?.remove();
+function setStatusbarRefreshState(refreshing) {
+  if (!els.statusbarToggle) return;
+  els.statusbarToggle.disabled = refreshing;
+  els.statusbarToggle.classList.toggle("is-refreshing", refreshing);
+  els.statusbarToggle.toggleAttribute("aria-busy", refreshing);
+  if (refreshing) {
+    els.statusbarToggle.innerHTML = '<span class="refresh-icon" aria-hidden="true">↻</span>';
+    els.statusbarToggle.title = "Refreshing conversation...";
+    els.statusbarToggle.setAttribute("aria-label", "Refreshing conversation");
+    return;
+  }
+  els.statusbarToggle.textContent = "/";
+  const expanded = els.statusbar?.classList.contains("is-expanded") || false;
+  const label = expanded ? "Hide navigation" : "Show navigation";
+  els.statusbarToggle.title = label;
+  els.statusbarToggle.setAttribute("aria-label", label);
 }
 
 function setRefreshState(refreshing) {
@@ -3253,8 +3465,7 @@ function setRefreshState(refreshing) {
     );
   }
   els.conversation?.toggleAttribute("aria-busy", refreshing);
-  if (refreshing) showRefreshBubble();
-  else removeRefreshBubble();
+  setStatusbarRefreshState(refreshing);
   if (refreshing && els.refreshStatus) {
     window.clearTimeout(refreshStatusTimer);
     els.refreshStatus.textContent = "Refreshing...";
@@ -3298,6 +3509,7 @@ function setStatusbarExpanded(expanded) {
 }
 
 function toggleStatusbar() {
+  if (els.statusbarToggle?.disabled) return;
   setStatusbarExpanded(!els.statusbar?.classList.contains("is-expanded"));
 }
 
@@ -3316,13 +3528,13 @@ function identityParams(prefix = "v") {
   return identity;
 }
 
-function isolatedTypesetUrl(record) {
+function focusedTypesetUrl(record) {
   const identity = identityParams("v");
   if (identity.has("id")) {
-    return `/debug/typeset/${encodeURIComponent(identity.get("id"))}/${encodeURIComponent(record.line_no)}`;
+    return `/t/${encodeURIComponent(identity.get("id"))}/${encodeURIComponent(record.line_no)}`;
   }
   identity.set("line", String(record.line_no));
-  return `/debug/typeset?${identity}`;
+  return `/typeset?${identity}`;
 }
 
 function normalizeLanguage(lang) {
@@ -3592,15 +3804,15 @@ function compactText(value, limit = 140) {
 function renderRecord(record) {
   const role = record.role || "message";
   const roleClass = recordClass(role);
-  const debugLink = typesetDebugEnabled && roleClass === "assistant"
-    ? `<a class="typeset-debug-link" href="${escapeHtml(isolatedTypesetUrl(record))}" target="_blank" rel="noopener">Typeset debug ↗</a>`
+  const answerLink = roleClass === "assistant"
+    ? `<a class="typeset-answer-link" href="${escapeHtml(focusedTypesetUrl(record))}" target="_blank" rel="noopener">Open answer ↗</a>`
     : "";
   const header = `
     <header class="message-header">
       <span><span class="role">${escapeHtml(role)}</span> · line ${escapeHtml(record.line_no)}</span>
       <span class="message-header-actions">
         <time>${escapeHtml(record.timeLabel || record.timestamp || "")}</time>
-        ${debugLink}
+        ${answerLink}
       </span>
     </header>
   `;
@@ -3730,7 +3942,6 @@ function updateLoadButtons(data) {
 
 function renderConversation(data, options = {}) {
   lastConversationData = data;
-  typesetDebugEnabled = Boolean(data.typesetDebug);
   messageNavigationIndex = -1;
   const anchorLine = options.anchorLine || "";
   const session = data.session;
@@ -3764,7 +3975,6 @@ function renderConversation(data, options = {}) {
   els.conversation.innerHTML = data.records.map(renderRecord).join("");
   applyMathAndCode(els.conversation);
   applySemanticHighlights(document);
-  if (els.conversation.hasAttribute("aria-busy")) showRefreshBubble();
   if (anchorLine) {
     requestAnimationFrame(() => {
       if (!scrollToMessageLine(anchorLine)) restoreScrollAnchor(options.scrollAnchor);
@@ -3813,12 +4023,17 @@ async function loadConversation(options = {}) {
   }
 }
 
-async function refreshConversation() {
+async function refreshConversation(options = {}) {
   if (loadingConversation) return;
+  const jumpToLatest = Boolean(options.jumpToLatest);
   const previousTotal = Number(lastConversationData?.totalCount || 0);
   setRefreshState(true);
   try {
-    await loadConversation({ preserveScroll: true, avoidUnchangedRender: true });
+    await loadConversation({
+      preserveScroll: !jumpToLatest,
+      avoidUnchangedRender: true,
+    });
+    if (jumpToLatest) scrollToLatestAssistant();
     showRefreshResult(previousTotal);
   } catch (error) {
     showRefreshResult(previousTotal, true);
@@ -3885,7 +4100,7 @@ window.addEventListener("keydown", (event) => {
   if (isStatusbarKey) {
     toggleStatusbar();
   } else if (isRefreshKey) {
-    refreshConversation().catch((error) => {
+    refreshConversation({ jumpToLatest: event.shiftKey }).catch((error) => {
       setStatus(error.message, "error");
     });
   } else if (isPreviousKey) {
@@ -3951,22 +4166,22 @@ const els = {
   sessionMeta: document.getElementById("sessionMeta"),
 };
 
-function showRefreshBubble() {
-  if (!els.conversation || els.conversation.querySelector("[data-refresh-bubble]")) return;
-  const bubble = document.createElement("section");
-  bubble.className = "refresh-bubble";
-  bubble.dataset.refreshBubble = "";
-  bubble.setAttribute("role", "status");
-  bubble.setAttribute("aria-live", "polite");
-  bubble.innerHTML = `
-    <span class="refresh-bubble-spinner" aria-hidden="true"></span>
-    <span>Refreshing typeset conversation...</span>
-  `;
-  els.conversation.appendChild(bubble);
-}
-
-function removeRefreshBubble() {
-  els.conversation?.querySelector("[data-refresh-bubble]")?.remove();
+function setStatusbarRefreshState(refreshing) {
+  if (!els.statusbarToggle) return;
+  els.statusbarToggle.disabled = refreshing;
+  els.statusbarToggle.classList.toggle("is-refreshing", refreshing);
+  els.statusbarToggle.toggleAttribute("aria-busy", refreshing);
+  if (refreshing) {
+    els.statusbarToggle.innerHTML = '<span class="refresh-icon" aria-hidden="true">↻</span>';
+    els.statusbarToggle.title = "Refreshing typeset view...";
+    els.statusbarToggle.setAttribute("aria-label", "Refreshing typeset view");
+    return;
+  }
+  els.statusbarToggle.textContent = "/";
+  const expanded = els.statusbar?.classList.contains("is-expanded") || false;
+  const label = expanded ? "Hide navigation" : "Show navigation";
+  els.statusbarToggle.title = label;
+  els.statusbarToggle.setAttribute("aria-label", label);
 }
 
 function setRefreshState(refreshing) {
@@ -3983,8 +4198,7 @@ function setRefreshState(refreshing) {
     );
   }
   els.conversation?.toggleAttribute("aria-busy", refreshing);
-  if (refreshing) showRefreshBubble();
-  else removeRefreshBubble();
+  setStatusbarRefreshState(refreshing);
   if (refreshing && els.refreshStatus) {
     window.clearTimeout(refreshStatusTimer);
     els.refreshStatus.textContent = "Refreshing...";
@@ -4028,6 +4242,7 @@ function setStatusbarExpanded(expanded) {
 }
 
 function toggleStatusbar() {
+  if (els.statusbarToggle?.disabled) return;
   setStatusbarExpanded(!els.statusbar?.classList.contains("is-expanded"));
 }
 
@@ -4037,22 +4252,36 @@ function routeId(prefix) {
   return decodeURIComponent(location.pathname.slice(marker.length));
 }
 
-function isolatedRoute() {
-  const marker = "/debug/typeset/";
-  if (!location.pathname.startsWith(marker)) {
-    return { active: location.pathname === "/debug/typeset", id: "", line: params.get("line") || "" };
+function focusedRoute() {
+  const debugMarker = "/debug/typeset/";
+  if (location.pathname === "/debug/typeset") {
+    return { active: true, debug: true, id: "", line: params.get("line") || "" };
   }
-  const parts = location.pathname.slice(marker.length).split("/");
-  if (parts.length < 2) return { active: true, id: "", line: "" };
-  const line = decodeURIComponent(parts.pop() || "");
-  const id = decodeURIComponent(parts.join("/"));
-  return { active: true, id, line };
+  if (location.pathname.startsWith(debugMarker)) {
+    const parts = location.pathname.slice(debugMarker.length).split("/");
+    const line = decodeURIComponent(parts.pop() || "");
+    const id = decodeURIComponent(parts.join("/"));
+    return { active: true, debug: true, id, line };
+  }
+  if (location.pathname === "/typeset" && params.get("line")) {
+    return { active: true, debug: false, id: "", line: params.get("line") || "" };
+  }
+  const marker = "/t/";
+  if (location.pathname.startsWith(marker)) {
+    const parts = location.pathname.slice(marker.length).split("/");
+    if (parts.length >= 2) {
+      const line = decodeURIComponent(parts.pop() || "");
+      const id = decodeURIComponent(parts.join("/"));
+      return { active: true, debug: false, id, line };
+    }
+  }
+  return { active: false, debug: false, id: "", line: "" };
 }
 
 function identityParams(prefix = "t") {
   const identity = new URLSearchParams();
-  const debugRoute = isolatedRoute();
-  const id = debugRoute.id || routeId(prefix) || params.get("id") || "";
+  const route = focusedRoute();
+  const id = route.id || routeId(prefix) || params.get("id") || "";
   const path = params.get("path") || "";
   if (id) identity.set("id", id);
   else if (path) identity.set("path", path);
@@ -4104,14 +4333,14 @@ function setStatus(message, className = "loading") {
   els.conversation.innerHTML = `<p>${escapeHtml(message)}</p>`;
 }
 
-function showTypesetDebugLoader(line) {
+function showFocusedAnswerLoader(line, fresh = false) {
   els.conversation.className = "conversation view-conversation typeset-conversation loading";
   els.conversation.innerHTML = `
     <div class="typeset-debug-loading" role="status" aria-live="polite">
       <span class="typeset-debug-spinner" aria-hidden="true"></span>
       <div>
-        <strong>Recompiling assistant line ${escapeHtml(line)}</strong>
-        <span>Running XeLaTeX and preparing the PDF preview...</span>
+        <strong>${fresh ? "Recompiling" : "Opening"} assistant line ${escapeHtml(line)}</strong>
+        <span>${fresh ? "Running XeLaTeX and preparing" : "Loading"} the PDF preview...</span>
       </div>
     </div>
   `;
@@ -4137,7 +4366,17 @@ function recordHeader(record) {
   `;
 }
 
-function isolatedTypesetUrl(record) {
+function focusedTypesetUrl(record) {
+  const identity = identityParams("t");
+  if (identity.has("id")) {
+    const id = identity.get("id");
+    return `/t/${encodeURIComponent(id)}/${encodeURIComponent(record.line_no)}`;
+  }
+  identity.set("line", String(record.line_no));
+  return `/typeset?${identity}`;
+}
+
+function debugTypesetUrl(record) {
   const identity = identityParams("t");
   if (identity.has("id")) {
     const id = identity.get("id");
@@ -4148,8 +4387,17 @@ function isolatedTypesetUrl(record) {
 }
 
 function typesetDebugBar(record) {
+  const route = focusedRoute();
+  if (!route.active) {
+    return `
+      <header class="typeset-answer-bar">
+        <span>Assistant answer · line ${escapeHtml(record.line_no)}</span>
+        <a href="${escapeHtml(focusedTypesetUrl(record))}" target="_blank" rel="noopener">Open answer ↗</a>
+      </header>
+    `;
+  }
   if (!typesetDebugEnabled) return "";
-  if (isolatedRoute().active) {
+  if (route.debug) {
     return `
       <header class="typeset-debug-bar">
         <span>TYPESET DEBUG · line ${escapeHtml(record.line_no)}</span>
@@ -4160,18 +4408,35 @@ function typesetDebugBar(record) {
   return `
     <header class="typeset-debug-bar">
       <span>TYPESET DEBUG · line ${escapeHtml(record.line_no)}</span>
-      <a href="${escapeHtml(isolatedTypesetUrl(record))}" target="_blank" rel="noopener">Open isolated ↗</a>
+      <a href="${escapeHtml(debugTypesetUrl(record))}" target="_blank" rel="noopener">Fresh render ↗</a>
     </header>
   `;
 }
 
 function pdfPage(record) {
   const url = record.typeset?.pdfUrl || "";
+  const linkClass = record.attachments?.length ? " has-attachments" : "";
   return `
-    <div class="typeset-pdf-page is-loading" data-pdf-url="${escapeHtml(url)}"
+    <div class="typeset-pdf-page is-loading${linkClass}" data-pdf-url="${escapeHtml(url)}"
       data-copy-line="${escapeHtml(record.line_no)}">
       <span>Rendering PDF...</span>
     </div>
+  `;
+}
+
+function attachmentLinks(record) {
+  const links = Array.isArray(record.attachments) ? record.attachments : [];
+  if (!links.length) return "";
+  const heading = links.length === 1 ? "Attachment" : "Attachments";
+  return `
+    <footer class="typeset-attachments">
+      <strong>${heading}</strong>
+      <span class="typeset-attachment-list">
+        ${links.map((link) => `
+          <a href="${escapeHtml(link.url)}" target="_blank" rel="noopener">${escapeHtml(link.label)}<span class="typeset-attachment-kind">${escapeHtml(link.kind)}</span> ↗</a>
+        `).join("")}
+      </span>
+    </footer>
   `;
 }
 
@@ -4186,8 +4451,12 @@ function copyMarkdownButton(record) {
 }
 
 function externalTypesetHeader(record, showLabel = true) {
-  const debugLink = typesetDebugEnabled && !isolatedRoute().active
-    ? `<a href="${escapeHtml(isolatedTypesetUrl(record))}" target="_blank" rel="noopener">Open isolated ↗</a>`
+  const route = focusedRoute();
+  const answerLink = !route.active
+    ? `<a href="${escapeHtml(focusedTypesetUrl(record))}" target="_blank" rel="noopener">Open answer ↗</a>`
+    : "";
+  const debugLink = typesetDebugEnabled && route.active && !route.debug
+    ? `<a href="${escapeHtml(debugTypesetUrl(record))}" target="_blank" rel="noopener">Fresh render ↗</a>`
     : "";
   return `
     <header class="typeset-external-header">
@@ -4195,6 +4464,7 @@ function externalTypesetHeader(record, showLabel = true) {
       <span class="typeset-external-header-actions">
         <time>${escapeHtml(record.timeLabel || record.timestamp || "")}</time>
         ${copyMarkdownButton(record)}
+        ${answerLink}
         ${debugLink}
       </span>
     </header>
@@ -4232,6 +4502,7 @@ function renderRecord(record, index, records) {
         ${debugBar}
         ${externalHeader}
         ${body}
+        ${attachmentLinks(record)}
       </section>
     `;
   }
@@ -4487,7 +4758,7 @@ function scrollToConversationTop() {
 }
 
 function updateLoadButtons(data) {
-  const isolated = data.debugLine !== null && data.debugLine !== undefined;
+  const isolated = data.isolatedLine !== null && data.isolatedLine !== undefined;
   const allShown = Boolean(data.all) || data.shownCount >= data.totalCount;
   if (els.loadEarlier) els.loadEarlier.disabled = isolated || allShown || loadingConversation;
   if (els.loadAll) els.loadAll.disabled = isolated || allShown || loadingConversation;
@@ -4584,15 +4855,17 @@ async function renderConversation(data, options = {}) {
   document.body.classList.toggle("typeset-debug-enabled", typesetDebugEnabled);
   document.body.classList.toggle(
     "typeset-debug-isolated",
-    data.debugLine !== null && data.debugLine !== undefined,
+    Boolean(data.typesetFresh),
   );
   const anchorLine = options.anchorLine || "";
   const session = data.session;
   document.title = `${session.title || "Codex Conversation"} · Typeset`;
   els.sessionTitle.textContent = session.title || "Untitled conversation";
   els.sessionMeta.textContent = session.cwd || session.path;
-  if (data.debugLine !== null && data.debugLine !== undefined) {
-    els.sessionMeta.textContent = `Typeset debug · assistant line ${data.debugLine}`;
+  if (data.isolatedLine !== null && data.isolatedLine !== undefined) {
+    els.sessionMeta.textContent = data.typesetFresh
+      ? `Typeset debug · assistant line ${data.isolatedLine}`
+      : `Focused answer · assistant line ${data.isolatedLine}`;
   }
   const normalParams = identityParams("t");
   normalParams.set("tail", String(currentTail));
@@ -4604,9 +4877,12 @@ async function renderConversation(data, options = {}) {
   } else {
     els.normalViewLink.href = `/view?${normalParams}`;
   }
-  const isolated = data.debugLine !== null && data.debugLine !== undefined;
+  const isolated = data.isolatedLine !== null && data.isolatedLine !== undefined;
   els.conversationInfo.textContent = (isolated
-    ? [`assistant line ${data.debugLine}`, "fresh render on every refresh"]
+    ? [
+        `assistant line ${data.isolatedLine}`,
+        data.typesetFresh ? "fresh render on every refresh" : "cached typeset render",
+      ]
     : [
         session.lastLabel ? `Last message ${session.lastLabel}` : "",
         `${data.shownCount || data.records.length} of ${data.totalCount || data.records.length} shown`,
@@ -4624,7 +4900,6 @@ async function renderConversation(data, options = {}) {
   els.conversation.className = "conversation view-conversation typeset-conversation";
   els.conversation.innerHTML = data.records.map(renderRecord).join("");
   applyMathAndCode(els.conversation);
-  if (els.conversation.hasAttribute("aria-busy")) showRefreshBubble();
   await renderPdfPages(els.conversation);
   await nextAnimationFrame();
   if (anchorLine) {
@@ -4643,12 +4918,14 @@ async function loadConversation(options = {}) {
     setStatus("No conversation path or id was provided.", "error");
     return;
   }
-  const debugRoute = isolatedRoute();
+  const route = focusedRoute();
   const scrollAnchor = options.preserveScroll ? captureScrollAnchor() : null;
   const renderOptions = { ...options, scrollAnchor };
   loadingConversation = true;
   updateLoadButtons({ shownCount: 0, totalCount: 1, all: false });
-  if (debugRoute.active && !lastConversationData) showTypesetDebugLoader(debugRoute.line);
+  if (route.active && !lastConversationData) {
+    showFocusedAnswerLoader(route.line, route.debug);
+  }
   const apiParams = new URLSearchParams(identity);
   apiParams.set("tail", String(currentTail));
   if (renderOptions.scrollAnchor?.lineNo) {
@@ -4659,14 +4936,18 @@ async function loadConversation(options = {}) {
     if (params.get("tools") === "1") apiParams.set("tools", "1");
     if (params.get("header")) apiParams.set("header", params.get("header"));
     if (params.get("code")) apiParams.set("code", params.get("code"));
-    if (debugRoute.line) apiParams.set("line", debugRoute.line);
-    const apiPath = debugRoute.active ? "/api/debug/typeset" : "/api/typeset";
+    if (route.line) apiParams.set("line", route.line);
+    const apiPath = route.debug
+      ? "/api/debug/typeset"
+      : route.active
+        ? "/api/typeset/answer"
+        : "/api/typeset";
     const response = await fetch(`${apiPath}?${apiParams}`);
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "Could not load typeset conversation");
     if (
       renderOptions.avoidUnchangedRender
-      && !debugRoute.active
+      && !route.debug
       && sameConversationContent(lastConversationData, data)
     ) {
       lastConversationData = data;
@@ -4679,12 +4960,17 @@ async function loadConversation(options = {}) {
   }
 }
 
-async function refreshConversation() {
+async function refreshConversation(options = {}) {
   if (loadingConversation) return;
+  const jumpToLatest = Boolean(options.jumpToLatest);
   const previousTotal = Number(lastConversationData?.totalCount || 0);
   setRefreshState(true);
   try {
-    await loadConversation({ preserveScroll: true, avoidUnchangedRender: true });
+    await loadConversation({
+      preserveScroll: !jumpToLatest,
+      avoidUnchangedRender: true,
+    });
+    if (jumpToLatest) scrollToLatestAssistant();
     showRefreshResult(previousTotal);
   } catch (error) {
     showRefreshResult(previousTotal, true);
@@ -4750,7 +5036,8 @@ window.addEventListener("keydown", (event) => {
   if (isStatusbarKey) {
     toggleStatusbar();
   } else if (isRefreshKey) {
-    refreshConversation().catch((error) => setStatus(error.message, "error"));
+    refreshConversation({ jumpToLatest: event.shiftKey })
+      .catch((error) => setStatus(error.message, "error"));
   } else if (isPreviousKey) {
     jumpMessage(-1);
   } else if (isNextKey) {

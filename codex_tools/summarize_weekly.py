@@ -140,7 +140,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--prompt-template",
         type=Path,
-        help="Custom weekly prompt template using $start, $end, and $context placeholders.",
+        help=(
+            "Custom weekly prompt template using $start, $end, $target_words, "
+            "$format_instructions, and $context placeholders."
+        ),
+    )
+    parser.add_argument(
+        "--words",
+        type=summary_common.positive_int,
+        default=summary_common.DEFAULT_SUMMARY_WORDS,
+        help=(
+            "Approximate number of words in the summary. "
+            f"Default: {summary_common.DEFAULT_SUMMARY_WORDS}"
+        ),
+    )
+    parser.add_argument(
+        "--format",
+        dest="summary_format",
+        choices=summary_common.SUMMARY_FORMATS,
+        default=summary_common.DEFAULT_SUMMARY_FORMAT,
+        help="Summary organization. Default: freeform.",
     )
     parser.add_argument(
         "--output",
@@ -162,7 +181,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--model",
-        help="Optional model to pass through to codex exec.",
+        default=summary_common.read_default_model(),
+        help=(
+            "Model for summary generation. Default: "
+            f"{summary_common.default_model_label()}"
+        ),
     )
     parser.add_argument(
         "--codex-bin",
@@ -348,15 +371,24 @@ def summary_prompt(
     start: date,
     end: date,
     template_path: Path | None = None,
+    *,
+    words: int = summary_common.DEFAULT_SUMMARY_WORDS,
+    summary_format: str = summary_common.DEFAULT_SUMMARY_FORMAT,
 ) -> str:
-    return summary_prompts.render_template(
-        "weekly",
-        {
-            "start": start.isoformat(),
-            "end": end.isoformat(),
-            "context": context,
-        },
-        template_path,
+    return summary_common.structured_prompt(
+        summary_prompts.render_template(
+            "weekly",
+            {
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+                "target_words": str(words),
+                "format_instructions": summary_common.format_instructions(
+                    "weekly", summary_format
+                ),
+                "context": context,
+            },
+            template_path,
+        )
     )
 
 
@@ -406,6 +438,8 @@ def refresh_daily_summaries(
             profile=args.profile,
             manager_root=args.manager_root,
             default_home=args.default_home,
+            words=summary_common.DEFAULT_SUMMARY_WORDS,
+            summary_format=summary_common.DEFAULT_SUMMARY_FORMAT,
         )
         inputs = summarize_daily.prepare_daily_summary(daily_args, day, timezone)
         current = existing_by_day.get(day)
@@ -494,14 +528,29 @@ def main(argv: list[str] | None = None) -> int:
         result = context
     elif args.show_prompt:
         try:
-            result = summary_prompt(context, start, end, args.prompt_template)
+            result = summary_prompt(
+                context,
+                start,
+                end,
+                args.prompt_template,
+                words=args.words,
+                summary_format=args.summary_format,
+            )
         except (OSError, ValueError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
     else:
         try:
             result = summary_common.run_codex_exec(
-                args, summary_prompt(context, start, end, args.prompt_template)
+                args,
+                summary_prompt(
+                    context,
+                    start,
+                    end,
+                    args.prompt_template,
+                    words=args.words,
+                    summary_format=args.summary_format,
+                ),
             )
         except (OSError, RuntimeError, ValueError) as exc:
             print(f"error: {exc}", file=sys.stderr)

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import argparse
-import subprocess
+import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from codex_tools import manager, summary_common
+from codex_tools import codex_exec, manager, summary_common
 
 
 class SummaryProfileTests(unittest.TestCase):
@@ -35,19 +35,39 @@ class SummaryProfileTests(unittest.TestCase):
                 default_home=root / "default-home",
             )
 
-            completed = subprocess.CompletedProcess(
-                args=[], returncode=0, stdout="summary", stderr=""
-            )
+            def run_exec(**kwargs):
+                command = kwargs["command"]
+                response = Path(command[command.index("--output-last-message") + 1])
+                response.write_text(
+                    json.dumps(
+                        {"title": "Daily Summary", "summary_markdown": "Summary"}
+                    ),
+                    encoding="utf-8",
+                )
+                return codex_exec.ExecResult(
+                    command=command,
+                    returncode=0,
+                    events=[],
+                    event_parse_errors=[],
+                    stderr="",
+                    duration_s=0.1,
+                )
+
             with patch.object(
-                summary_common.subprocess, "run", return_value=completed
+                summary_common.codex_exec, "run_exec", side_effect=run_exec
             ) as run:
                 self.assertEqual(
-                    summary_common.run_codex_exec(args, "prompt"), "summary"
+                    summary_common.run_codex_exec(args, "prompt"),
+                    "# Daily Summary\n\nSummary",
                 )
             self.assertEqual(
                 run.call_args.kwargs["env"]["CODEX_HOME"],
                 str(profile_home.resolve()),
             )
+            command = run.call_args.kwargs["command"]
+            self.assertIn("--output-schema", command)
+            self.assertIn("--ignore-user-config", command)
+            self.assertIn("--ignore-rules", command)
 
 
 if __name__ == "__main__":

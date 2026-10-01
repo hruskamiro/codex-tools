@@ -27,33 +27,38 @@ class ExecResult:
 def build_command(
     *,
     codex_bin: str,
-    model: str,
+    model: str | None,
     reasoning_effort: str,
     schema_path: Path,
     response_path: Path,
 ) -> list[str]:
     if reasoning_effort not in REASONING_EFFORTS:
         raise ValueError(f"unsupported reasoning effort: {reasoning_effort}")
-    return [
+    command = [
         codex_bin,
         "exec",
-        "--model",
-        model,
-        "-c",
-        f'model_reasoning_effort="{reasoning_effort}"',
-        "--ephemeral",
-        "--ignore-user-config",
-        "--ignore-rules",
-        "--skip-git-repo-check",
-        "--sandbox",
-        "read-only",
-        "--json",
-        "--output-schema",
-        str(schema_path),
-        "--output-last-message",
-        str(response_path),
-        "-",
     ]
+    if model:
+        command.extend(["--model", model])
+    command.extend(
+        [
+            "-c",
+            f'model_reasoning_effort="{reasoning_effort}"',
+            "--ephemeral",
+            "--ignore-user-config",
+            "--ignore-rules",
+            "--skip-git-repo-check",
+            "--sandbox",
+            "read-only",
+            "--json",
+            "--output-schema",
+            str(schema_path),
+            "--output-last-message",
+            str(response_path),
+            "-",
+        ]
+    )
+    return command
 
 
 def run_exec(
