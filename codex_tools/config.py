@@ -5,6 +5,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
+import shutil
+import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -321,6 +325,31 @@ def render_toml(data: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def render_template(data: dict[str, Any] | None = None) -> str:
+    selected = data or {"version": 1}
+    lines = ["# Codex Tools configuration", "version = 1"]
+    for section_name in ("summary.daily", "summary.weekly", "viewer"):
+        lines.extend(["", f"[{section_name}]"])
+        prefix = section_name + "."
+        for setting in SETTINGS.values():
+            if not setting.key.startswith(prefix):
+                continue
+            key = setting.key.removeprefix(prefix)
+            details = setting.description
+            if setting.choices:
+                details += f" Choices: {', '.join(setting.choices)}."
+            lines.append(f"# {details}")
+            found, value = _nested_value(selected, setting.key)
+            if found:
+                lines.append(f"{key} = {_toml_scalar(value)}")
+            else:
+                example = setting.default
+                if example is None:
+                    example = "PATH" if setting.kind == "optional_path" else "MODEL"
+                lines.append(f"# {key} = {_toml_scalar(example)}")
+    return "\n".join(lines) + "\n"
+
+
 def write_config(data: dict[str, Any], config_path: Path | None = None) -> None:
     path = config_path or paths.CONFIG_FILE
     validate_config(data)
@@ -340,6 +369,39 @@ def write_config(data: dict[str, Any], config_path: Path | None = None) -> None:
             temporary.unlink()
         except FileNotFoundError:
             pass
+
+
+def _editor_command(explicit: str | None = None) -> list[str]:
+    configured = explicit or os.environ.get("VISUAL") or os.environ.get("EDITOR")
+    if configured:
+        command = shlex.split(configured)
+        if command:
+            return command
+    for candidate in ("sensible-editor", "editor", "nano", "vi"):
+        found = shutil.which(candidate)
+        if found:
+            return [found]
+    raise ValueError("no editor found; set VISUAL or EDITOR, or pass --editor")
+
+
+def edit_config(editor: str | None = None, config_path: Path | None = None) -> int:
+    path = config_path or paths.CONFIG_FILE
+    if not path.exists():
+        paths.ensure_private_dir(path.parent)
+        initial = _config_with_legacy_values() if config_path is None else {"version": 1}
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(render_template(initial))
+    completed = subprocess.run([*_editor_command(editor), str(path)], check=False)
+    if completed.returncode:
+        print(
+            f"error: editor exited with status {completed.returncode}",
+            file=sys.stderr,
+        )
+        return int(completed.returncode)
+    read_config(path)
+    print(f"Configuration is valid: {path}")
+    return 0
 
 
 def set_value(key: str, raw_value: Any, config_path: Path | None = None) -> Any:
@@ -386,6 +448,11 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="config_command")
     commands.add_parser("show", help="Show effective values and their sources.")
     commands.add_parser("path", help="Print the user configuration path.")
+    edit_cmd = commands.add_parser("edit", help="Edit the user configuration file.")
+    edit_cmd.add_argument(
+        "--editor",
+        help="Editor command. Defaults to VISUAL, EDITOR, or a system editor.",
+    )
     commands.add_parser("validate", help="Validate the user configuration file.")
     set_cmd = commands.add_parser("set", help="Set a typed configuration value.")
     set_cmd.add_argument("key", choices=tuple(SETTINGS))
@@ -404,6 +471,8 @@ def main(argv: list[str] | None = None) -> int:
             show_config()
         elif command == "path":
             print(paths.CONFIG_FILE)
+        elif command == "edit":
+            return edit_config(args.editor)
         elif command == "validate":
             read_config()
             print(f"Configuration is valid: {paths.CONFIG_FILE}")

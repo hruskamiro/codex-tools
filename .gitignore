@@ -18,3 +18,4 @@ daily_summaries/
 weekly_summaries/
 daily_summary_site/
 *.log
+*.codex-profile

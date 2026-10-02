@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -33,6 +34,43 @@ class ConfigTests(unittest.TestCase):
 
             config.unset_value("summary.daily.words", path)
             self.assertEqual(config.resolve("summary.daily.words", path), (200, "built-in"))
+
+    def test_edit_creates_template_and_uses_visual(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "nested" / "config.toml"
+            with (
+                patch.object(config.paths, "CONFIG_FILE", path),
+                patch.dict(os.environ, {"VISUAL": "example-editor --wait"}, clear=True),
+                patch.object(config.subprocess, "run") as run,
+                patch("builtins.print") as output,
+            ):
+                run.return_value.returncode = 0
+                self.assertEqual(config.main(["edit"]), 0)
+
+            run.assert_called_once_with(
+                ["example-editor", "--wait", str(path)], check=False
+            )
+            rendered = path.read_text(encoding="utf-8")
+            self.assertIn("# Codex Tools configuration", rendered)
+            self.assertIn("[summary.daily]", rendered)
+            self.assertIn("# words = 200", rendered)
+            self.assertIn("[viewer]", rendered)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            output.assert_called_once_with(f"Configuration is valid: {path}")
+
+    def test_edit_accepts_an_explicit_editor(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.toml"
+            path.write_text("version = 1\n", encoding="utf-8")
+            with (
+                patch.object(config.paths, "CONFIG_FILE", path),
+                patch.object(config.subprocess, "run") as run,
+                patch("builtins.print"),
+            ):
+                run.return_value.returncode = 0
+                self.assertEqual(config.main(["edit", "--editor", "nano -w"]), 0)
+
+            run.assert_called_once_with(["nano", "-w", str(path)], check=False)
 
     def test_unknown_and_invalid_values_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

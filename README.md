@@ -1,8 +1,8 @@
 # Codex Tools
 
-**A small local toolkit for making Codex history useful.** Browse past
-conversations, search across them, build summaries, keep separate Codex
-profiles, and run reproducible structured tasks.
+**A small local toolkit for working with Codex.** Manage separate profiles,
+browse and search past conversations, create work summaries, and run
+reproducible structured tasks.
 
 Codex Tools is an independent project and is not affiliated with or endorsed by
 OpenAI.
@@ -30,17 +30,24 @@ pipx install git+https://github.com/hruskamiro/codex-tools.git
 
 You now have `codex-tools`, `codex-viewer`, and `codex-manager`.
 
-### Optional: install `ct`
+### Optional: install `ct` and completion
 
-The shorter `ct` command is convenient for everyday use:
+The shorter `ct` command is convenient for everyday use. Its installer also
+adds Bash completion for both `ct` and `codex-tools`:
 
 ```bash
 codex-tools alias install
-source ~/.local/share/bash-completion/completions/ct
+source ~/.local/share/bash-completion/completions/codex-tools
 ```
 
-**Bash completion is installed with the alias.** It completes top-level tools
-and their common subcommands.
+**Completion covers every current top-level tool and its subcommands.** New
+shells load it automatically when the `bash-completion` package is available.
+
+If an earlier uninstall left stale alias or completion files, replace them with:
+
+```bash
+codex-tools alias install --force
+```
 
 Open the conversation picker:
 
@@ -223,13 +230,15 @@ results, hashes, settings, and token usage are retained in the run directory.
 
 ```bash
 ct config show
+ct config edit
 ct config path
 ct config validate
 ct diagnose
 ```
 
 Configuration lives in `$XDG_CONFIG_HOME/codex-tools/config.toml`, or
-`~/.config/codex-tools/config.toml` when `XDG_CONFIG_HOME` is unset.
+`~/.config/codex-tools/config.toml` when `XDG_CONFIG_HOME` is unset. The first
+`config edit` creates a commented template and opens `$VISUAL` or `$EDITOR`.
 
 ## Privacy and safety
 
