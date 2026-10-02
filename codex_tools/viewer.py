@@ -458,7 +458,10 @@ def session_summary(path: Path, titles: dict[str, SessionTitle]) -> dict[str, An
         "sessionId": session.session_id or "",
         "threadId": session.parent_thread_id or session.session_id or "",
         "rolloutId": session.rollout_id or "",
-        "recordCount": 0,
+        # This is a sampled count used by the chooser to distinguish actual
+        # conversations from metadata-only internal rollouts.  Full parsing
+        # remains deferred until the conversation is opened.
+        "recordCount": len(session.records),
         "mtime": mtime,
     }
     payload["id"] = preferred_session_id(payload)
@@ -473,6 +476,16 @@ def session_sort_key(item: dict[str, Any]) -> tuple[str, float]:
     return (str(item.get("lastAt") or ""), float(item.get("mtime") or 0))
 
 
+def session_selection_key(item: dict[str, Any]) -> tuple[int, int, str, float]:
+    """Prefer the Codex CLI thread rollout over its internal child rollouts."""
+    rollout_id = str(item.get("rolloutId") or "")
+    session_id = str(item.get("sessionId") or "")
+    is_canonical = bool(rollout_id and session_id and rollout_id == session_id)
+    has_records = int(item.get("recordCount") or 0) > 0
+    last_at, mtime = session_sort_key(item)
+    return (int(is_canonical), int(has_records), last_at, mtime)
+
+
 def dedupe_session_summaries(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     for item in items:
@@ -480,7 +493,7 @@ def dedupe_session_summaries(items: list[dict[str, Any]]) -> list[dict[str, Any]
 
     deduped = []
     for group in grouped.values():
-        group.sort(key=session_sort_key, reverse=True)
+        group.sort(key=session_selection_key, reverse=True)
         selected = dict(group[0])
         selected["rolloutCount"] = len(group)
         selected["rolloutPaths"] = [str(item.get("path") or "") for item in group]

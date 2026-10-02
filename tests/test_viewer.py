@@ -117,6 +117,60 @@ class ViewerCommandTests(unittest.TestCase):
         self.assertEqual(summary["title"], "Indexed title")
         self.assertEqual(summary["titleSource"], search.TITLE_SOURCE_SESSION_INDEX)
 
+    def test_session_deduplication_prefers_the_codex_cli_thread_rollout(self) -> None:
+        items = [
+            {
+                "path": "/sessions/root.jsonl",
+                "sessionId": "thread-1",
+                "threadId": "thread-1",
+                "rolloutId": "thread-1",
+                "recordCount": 12,
+                "lastAt": "2026-09-28T21:09:38Z",
+                "mtime": 1.0,
+            },
+            {
+                "path": "/sessions/guardian.jsonl",
+                "sessionId": "thread-1",
+                "threadId": "thread-1",
+                "rolloutId": "guardian-1",
+                "recordCount": 0,
+                "lastAt": "2026-10-01T00:05:15Z",
+                "mtime": 2.0,
+            },
+        ]
+
+        selected = viewer.dedupe_session_summaries(items)
+
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0]["rolloutId"], "thread-1")
+        self.assertEqual(selected[0]["rolloutCount"], 2)
+
+    def test_session_deduplication_falls_back_to_a_renderable_rollout(self) -> None:
+        items = [
+            {
+                "path": "/sessions/renderable.jsonl",
+                "sessionId": "thread-1",
+                "threadId": "thread-1",
+                "rolloutId": "child-1",
+                "recordCount": 2,
+                "lastAt": "2026-09-30T00:05:15Z",
+                "mtime": 1.0,
+            },
+            {
+                "path": "/sessions/empty.jsonl",
+                "sessionId": "thread-1",
+                "threadId": "thread-1",
+                "rolloutId": "child-2",
+                "recordCount": 0,
+                "lastAt": "2026-10-01T00:05:15Z",
+                "mtime": 2.0,
+            },
+        ]
+
+        selected = viewer.dedupe_session_summaries(items)
+
+        self.assertEqual(selected[0]["rolloutId"], "child-1")
+
     def test_semantic_prose_highlighting_skips_code(self) -> None:
         self.assertIn('"code",', viewer.VIEW_JS)
         self.assertIn('token.startsWith("“")', viewer.VIEW_JS)
