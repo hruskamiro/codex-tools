@@ -13,6 +13,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from codex_tools import (
+    config,
     manager,
     paths,
     search,
@@ -41,6 +42,8 @@ class DailySummary:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    defaults = config.section("summary.weekly")
+    daily_defaults = config.section("summary.daily")
     parser = argparse.ArgumentParser(
         prog="codex-tools summary week",
         description=(
@@ -79,16 +82,25 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--refresh-dailies",
         choices=("auto", "missing", "all", "none"),
-        default="auto",
+        default=defaults["refresh_dailies"],
         help=(
             "Daily refresh policy. auto rebuilds missing or stale active days; "
-            "default: auto."
+            "effective default: "
+            f"{config.default_help('summary.weekly.refresh_dailies')}."
         ),
     )
     parser.add_argument(
         "--daily-prompt-template",
         type=Path,
-        help="Custom daily prompt template used when refreshing daily summaries.",
+        default=(
+            Path(daily_defaults["prompt_template"]).expanduser()
+            if daily_defaults["prompt_template"] is not None
+            else None
+        ),
+        help=(
+            "Custom daily prompt template used when refreshing daily summaries. "
+            "Defaults to summary.daily.prompt_template."
+        ),
     )
     parser.add_argument(
         "--sessions-root",
@@ -140,26 +152,35 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--prompt-template",
         type=Path,
+        default=(
+            Path(defaults["prompt_template"]).expanduser()
+            if defaults["prompt_template"] is not None
+            else None
+        ),
         help=(
             "Custom weekly prompt template using $start, $end, $target_words, "
-            "$format_instructions, and $context placeholders."
+            "$format_instructions, and $context placeholders. Effective default: "
+            f"{config.default_help('summary.weekly.prompt_template')}."
         ),
     )
     parser.add_argument(
         "--words",
         type=summary_common.positive_int,
-        default=summary_common.DEFAULT_SUMMARY_WORDS,
+        default=defaults["words"],
         help=(
             "Approximate number of words in the summary. "
-            f"Default: {summary_common.DEFAULT_SUMMARY_WORDS}"
+            f"Effective default: {config.default_help('summary.weekly.words')}."
         ),
     )
     parser.add_argument(
         "--format",
         dest="summary_format",
         choices=summary_common.SUMMARY_FORMATS,
-        default=summary_common.DEFAULT_SUMMARY_FORMAT,
-        help="Summary organization. Default: freeform.",
+        default=defaults["format"],
+        help=(
+            "Summary organization. Effective default: "
+            f"{config.default_help('summary.weekly.format')}."
+        ),
     )
     parser.add_argument(
         "--output",
@@ -181,10 +202,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--model",
-        default=summary_common.read_default_model(),
+        default=defaults["model"],
         help=(
-            "Model for summary generation. Default: "
-            f"{summary_common.default_model_label()}"
+            "Model for weekly summary generation. Effective default: "
+            f"{config.default_help('summary.weekly.model')}."
+        ),
+    )
+    parser.add_argument(
+        "--reasoning-effort",
+        choices=config.SETTINGS["summary.weekly.reasoning_effort"].choices,
+        default=defaults["reasoning_effort"],
+        help=(
+            "Model reasoning effort. Effective default: "
+            f"{config.default_help('summary.weekly.reasoning_effort')}."
+        ),
+    )
+    parser.add_argument(
+        "--timeout",
+        type=summary_common.positive_int,
+        default=defaults["timeout_seconds"],
+        help=(
+            "Model timeout in seconds. Effective default: "
+            f"{config.default_help('summary.weekly.timeout_seconds')}."
         ),
     )
     parser.add_argument(
@@ -213,14 +252,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--max-record-chars",
         type=int,
-        default=900,
-        help="Maximum characters per transcript message in generated daily summaries.",
+        default=defaults["max_record_chars"],
+        help=(
+            "Maximum characters per transcript message in generated daily summaries. "
+            f"Effective default: {config.default_help('summary.weekly.max_record_chars')}."
+        ),
     )
     parser.add_argument(
         "--max-context-chars",
         type=int,
-        default=120_000,
-        help="Maximum combined daily-summary context size sent to codex exec.",
+        default=defaults["max_context_chars"],
+        help=(
+            "Maximum combined daily-summary context size sent to codex exec. "
+            f"Effective default: {config.default_help('summary.weekly.max_context_chars')}."
+        ),
     )
     return parser.parse_args(argv)
 
@@ -414,6 +459,7 @@ def refresh_daily_summaries(
     """Refresh daily summaries according to the selected freshness policy."""
     if args.refresh_dailies == "none":
         return []
+    daily_defaults = config.section("summary.daily")
     existing = select_latest_by_day(
         read_daily_summaries(args.daily_summaries_dir), start, end
     )
@@ -433,13 +479,15 @@ def refresh_daily_summaries(
             prompt_template=args.daily_prompt_template,
             output=None,
             output_dir=args.daily_summaries_dir,
-            model=args.model,
+            model=daily_defaults["model"],
+            reasoning_effort=daily_defaults["reasoning_effort"],
+            timeout=daily_defaults["timeout_seconds"],
             codex_bin=args.codex_bin,
             profile=args.profile,
             manager_root=args.manager_root,
             default_home=args.default_home,
-            words=summary_common.DEFAULT_SUMMARY_WORDS,
-            summary_format=summary_common.DEFAULT_SUMMARY_FORMAT,
+            words=daily_defaults["words"],
+            summary_format=daily_defaults["format"],
         )
         inputs = summarize_daily.prepare_daily_summary(daily_args, day, timezone)
         current = existing_by_day.get(day)

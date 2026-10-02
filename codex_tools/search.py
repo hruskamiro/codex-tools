@@ -7,12 +7,17 @@ import argparse
 import json
 import os
 import re
+import shutil
 import sqlite3
 import sys
+import textwrap
 from dataclasses import dataclass, field
 from datetime import datetime, time, timezone
 from pathlib import Path
 from typing import Any, Iterable
+
+from codex_tools import config as user_config
+from codex_tools import paths as tool_paths
 
 
 HELP_EPILOG = """\
@@ -1234,7 +1239,7 @@ def sqlite_table_names(db_path: Path) -> list[str]:
 def parse_diagnose_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="codex-tools diagnose",
-        description="Inspect local Codex transcript and title-index health.",
+        description="Check Codex Tools configuration, dependencies, and local data.",
     )
     parser.add_argument(
         "--sessions-root", type=Path, default=DEFAULT_SESSIONS_ROOT
@@ -1253,7 +1258,90 @@ def parse_diagnose_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--json", action="store_true", help="Emit machine-readable JSON."
     )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Show storage paths, exact timestamps, and database internals.",
+    )
     return parser.parse_args(argv)
+
+
+def _diagnostic_status(checks: list[dict[str, str]]) -> str:
+    statuses = {check["status"] for check in checks}
+    if "error" in statuses:
+        return "error"
+    if "warning" in statuses:
+        return "warning"
+    return "ok"
+
+
+def _friendly_range(oldest: str | None, newest: str | None) -> str:
+    def friendly(value: str | None) -> str:
+        parsed = parse_record_timestamp(value)
+        if parsed is None:
+            return "unknown"
+        local = parsed.astimezone()
+        return f"{local.day} {local.strftime('%b %Y')}"
+
+    return f"{friendly(oldest)} – {friendly(newest)}"
+
+
+def _count_phrase(count: int, singular: str, plural: str | None = None) -> str:
+    noun = singular if count == 1 else (plural or singular + "s")
+    return f"{count:,} {noun}"
+
+
+def _inspect_session_index(path: Path) -> dict[str, Any]:
+    info: dict[str, Any] = {
+        "exists": path.exists(),
+        "readable": False,
+        "titles": 0,
+        "malformed_lines": 0,
+    }
+    if not info["exists"]:
+        return info
+    titles: set[str] = set()
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    info["malformed_lines"] += 1
+                    continue
+                if not isinstance(item, dict):
+                    info["malformed_lines"] += 1
+                    continue
+                thread_id = str(item.get("id") or "")
+                thread_name = str(item.get("thread_name") or "")
+                if thread_id and thread_name:
+                    titles.add(thread_id)
+        info["readable"] = True
+    except OSError as exc:
+        info["error"] = str(exc)
+    info["titles"] = len(titles)
+    return info
+
+
+def _print_diagnostic_check(check: dict[str, str]) -> None:
+    print(f"[{check['status'].upper()}] {check['name']}")
+    print(
+        textwrap.fill(
+            check["message"],
+            width=88,
+            initial_indent="     ",
+            subsequent_indent="     ",
+        )
+    )
+    if check.get("fix"):
+        print(
+            textwrap.fill(
+                check["fix"],
+                width=88,
+                initial_indent="     Fix: ",
+                subsequent_indent="          ",
+            )
+        )
 
 
 def diagnose(args: argparse.Namespace) -> int:
@@ -1263,11 +1351,17 @@ def diagnose(args: argparse.Namespace) -> int:
         "session_index": str(args.session_index),
     }
 
-    jsonl_paths = list(iter_jsonl_paths(args.sessions_root))
-    if args.include_archive:
-        jsonl_paths.extend(iter_jsonl_paths(DEFAULT_ARCHIVE_ROOT))
+    scan_error: str | None = None
+    try:
+        jsonl_paths = list(iter_jsonl_paths(args.sessions_root))
+        if args.include_archive:
+            jsonl_paths.extend(iter_jsonl_paths(DEFAULT_ARCHIVE_ROOT))
+    except OSError as exc:
+        jsonl_paths = []
+        scan_error = str(exc)
     readable = 0
     malformed_lines = 0
+    unreadable_paths: list[str] = []
     oldest_jsonl: str | None = None
     newest_jsonl: str | None = None
     for path in jsonl_paths:
@@ -1282,24 +1376,34 @@ def diagnose(args: argparse.Namespace) -> int:
                     if isinstance(event, dict):
                         timestamp = str(event.get("timestamp") or "")
                         if timestamp:
-                            oldest_jsonl = min(oldest_jsonl, timestamp) if oldest_jsonl else timestamp
-                            newest_jsonl = max(newest_jsonl, timestamp) if newest_jsonl else timestamp
+                            oldest_jsonl = (
+                                min(oldest_jsonl, timestamp)
+                                if oldest_jsonl
+                                else timestamp
+                            )
+                            newest_jsonl = (
+                                max(newest_jsonl, timestamp)
+                                if newest_jsonl
+                                else timestamp
+                            )
             readable += 1
         except OSError:
+            unreadable_paths.append(str(path))
             continue
     payload["jsonl"] = {
+        "root_exists": args.sessions_root.exists(),
         "files_found": len(jsonl_paths),
         "files_readable": readable,
         "files_unreadable": len(jsonl_paths) - readable,
+        "unreadable_paths": unreadable_paths,
         "malformed_lines": malformed_lines,
         "oldest_timestamp": oldest_jsonl,
         "newest_timestamp": newest_jsonl,
     }
+    if scan_error:
+        payload["jsonl"]["error"] = scan_error
 
-    session_index_info = {
-        "exists": args.session_index.exists(),
-        "titles": len(load_session_index_titles(args.session_index)),
-    }
+    session_index_info = _inspect_session_index(args.session_index)
     payload["session_index_info"] = session_index_info
 
     sqlite_info: dict[str, Any] = {
@@ -1340,49 +1444,239 @@ def diagnose(args: argparse.Namespace) -> int:
             sqlite_info["error"] = str(exc)
     payload["sqlite"] = sqlite_info
 
+    config_info: dict[str, Any] = {
+        "path": str(tool_paths.CONFIG_FILE),
+        "exists": tool_paths.CONFIG_FILE.exists(),
+    }
+    try:
+        user_config.read_config()
+        config_info["valid"] = True
+    except ValueError as exc:
+        config_info["valid"] = False
+        config_info["error"] = str(exc)
+    payload["config"] = config_info
+
+    codex_path = shutil.which("codex")
+    payload["codex_cli"] = {"found": codex_path is not None, "path": codex_path}
+
+    checks: list[dict[str, str]] = []
+    if config_info["valid"]:
+        config_message = (
+            "User configuration is valid."
+            if config_info["exists"]
+            else "No user configuration file; built-in defaults are valid."
+        )
+        checks.append({"name": "Configuration", "status": "ok", "message": config_message})
+    else:
+        checks.append(
+            {
+                "name": "Configuration",
+                "status": "error",
+                "message": str(config_info["error"]),
+                "fix": (
+                    "Run `codex-tools config validate`, then correct or remove the "
+                    "invalid value."
+                ),
+            }
+        )
+
+    if codex_path:
+        checks.append(
+            {
+                "name": "Codex CLI",
+                "status": "ok",
+                "message": f"Available at {codex_path}.",
+            }
+        )
+    else:
+        checks.append(
+            {
+                "name": "Codex CLI",
+                "status": "warning",
+                "message": (
+                    "Not found on PATH. Search and the viewer still work, but "
+                    "generated summaries do not."
+                ),
+                "fix": "Install Codex CLI or make the `codex` executable available on PATH.",
+            }
+        )
+
+    jsonl = payload["jsonl"]
+    if jsonl.get("error"):
+        checks.append(
+            {
+                "name": "Conversation transcripts",
+                "status": "error",
+                "message": f"Could not scan {args.sessions_root}: {jsonl['error']}",
+                "fix": "Check the directory path and its permissions.",
+            }
+        )
+    elif not jsonl["root_exists"]:
+        checks.append(
+            {
+                "name": "Conversation transcripts",
+                "status": "warning",
+                "message": (
+                    "No Codex sessions directory was found; there are no "
+                    "conversations to search yet."
+                ),
+                "fix": "Run Codex once, or pass the correct directory with `--sessions-root`.",
+            }
+        )
+    elif jsonl["files_found"] == 0:
+        checks.append(
+            {
+                "name": "Conversation transcripts",
+                "status": "warning",
+                "message": "The sessions directory exists but contains no transcript files.",
+                "fix": "Run Codex to create a conversation, or check `--sessions-root`.",
+            }
+        )
+    elif jsonl["files_readable"] == 0:
+        checks.append(
+            {
+                "name": "Conversation transcripts",
+                "status": "error",
+                "message": f"None of the {jsonl['files_found']} transcript files could be read.",
+                "fix": "Check ownership and read permissions for the sessions directory.",
+            }
+        )
+    elif jsonl["files_unreadable"] or jsonl["malformed_lines"]:
+        problems = []
+        if jsonl["files_unreadable"]:
+            problems.append(f"{jsonl['files_unreadable']} unreadable file(s)")
+        if jsonl["malformed_lines"]:
+            problems.append(f"{jsonl['malformed_lines']} malformed record(s)")
+        checks.append(
+            {
+                "name": "Conversation transcripts",
+                "status": "warning",
+                "message": (
+                    f"Read {jsonl['files_readable']} of {jsonl['files_found']} files; "
+                    + " and ".join(problems)
+                    + "."
+                ),
+                "fix": "Run with `--verbose` to inspect the affected paths and exact counts.",
+            }
+        )
+    else:
+        checks.append(
+            {
+                "name": "Conversation transcripts",
+                "status": "ok",
+                "message": (
+                    f"All {_count_phrase(jsonl['files_found'], 'file')} are readable "
+                    "with no malformed records. "
+                    "Coverage: "
+                    f"{_friendly_range(jsonl['oldest_timestamp'], jsonl['newest_timestamp'])}."
+                ),
+            }
+        )
+
+    if not session_index_info["exists"]:
+        title_message = "No title index found; titles will be derived from conversation prompts."
+        title_status = "ok"
+        title_fix = ""
+    elif not session_index_info["readable"]:
+        title_message = (
+            "The optional title index could not be read: "
+            f"{session_index_info.get('error', 'unknown error')}"
+        )
+        title_status = "warning"
+        title_fix = "Check the file's ownership and read permissions."
+    elif session_index_info["malformed_lines"]:
+        title_message = (
+            f"Loaded {session_index_info['titles']} indexed titles, but skipped "
+            f"{session_index_info['malformed_lines']} malformed record(s)."
+        )
+        title_status = "warning"
+        title_fix = "Codex Tools will derive titles for entries it cannot read."
+    else:
+        title_message = (
+            f"{_count_phrase(session_index_info['titles'], 'indexed title')} available; "
+            "other titles will be derived from conversation prompts."
+        )
+        title_status = "ok"
+        title_fix = ""
+    title_check = {
+        "name": "Conversation titles",
+        "status": title_status,
+        "message": title_message,
+    }
+    if title_fix:
+        title_check["fix"] = title_fix
+    checks.append(title_check)
+
+    if not sqlite_info["exists"]:
+        sqlite_check = {
+            "name": "Thread-history database (optional)",
+            "status": "ok",
+            "message": "Not present; JSONL transcripts remain the primary data source.",
+        }
+    elif sqlite_info.get("error"):
+        sqlite_check = {
+            "name": "Thread-history database (optional)",
+            "status": "warning",
+            "message": f"Could not read the optional database: {sqlite_info['error']}",
+            "fix": "Use the default JSONL source, or check the database file and schema.",
+        }
+    else:
+        sqlite_check = {
+            "name": "Thread-history database (optional)",
+            "status": "ok",
+            "message": (
+                "Readable: "
+                f"{_count_phrase(sqlite_info.get('thread_count', 0), 'thread')}, "
+                f"{_count_phrase(sqlite_info.get('thread_turns', 0), 'turn')}, and "
+                f"{_count_phrase(sqlite_info.get('thread_items', 0), 'item')}."
+            ),
+        }
+    checks.append(sqlite_check)
+
+    payload["checks"] = checks
+    payload["status"] = _diagnostic_status(checks)
+
     if args.json:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
     else:
-        print("Codex task search diagnostics")
-        print(f"sessions root: {payload['sessions_root']}")
-        print(
-            "jsonl: "
-            f"{payload['jsonl']['files_readable']}/{payload['jsonl']['files_found']} "
-            f"readable, malformed lines: {payload['jsonl']['malformed_lines']}"
-        )
-        print(
-            "jsonl range: "
-            f"{payload['jsonl']['oldest_timestamp'] or 'unknown'} -> "
-            f"{payload['jsonl']['newest_timestamp'] or 'unknown'}"
-        )
-        print(f"session index: {payload['session_index']}")
-        print(
-            "session index status: "
-            f"exists={session_index_info['exists']}, "
-            f"titles={session_index_info['titles']}"
-        )
-        print(f"thread history: {payload['thread_history']}")
-        print(f"sqlite exists: {sqlite_info['exists']}")
-        if sqlite_info.get("error"):
-            print(f"sqlite error: {sqlite_info['error']}")
+        print(f"Codex Tools health: {payload['status'].upper()}")
+        print()
+        for index, check in enumerate(checks):
+            if index:
+                print()
+            _print_diagnostic_check(check)
+        print()
+        if payload["status"] == "ok":
+            print("No problems found.")
+        elif payload["status"] == "warning":
+            print("Codex Tools is usable, but the warnings above may limit some features.")
         else:
-            print(f"sqlite tables: {', '.join(sqlite_info['tables']) or '(none)'}")
+            print("One or more errors need attention before all features will work.")
+
+        if args.verbose:
+            print("\nTechnical details")
+            print(f"  Configuration: {config_info['path']}")
+            print(f"  Sessions root: {payload['sessions_root']}")
+            print(
+                "  Transcript range: "
+                f"{jsonl['oldest_timestamp'] or 'unknown'} -> "
+                f"{jsonl['newest_timestamp'] or 'unknown'}"
+            )
+            for path in jsonl["unreadable_paths"]:
+                print(f"  Unreadable transcript: {path}")
+            print(f"  Session index: {payload['session_index']}")
+            print(f"  Thread history: {payload['thread_history']}")
+            print(f"  SQLite tables: {', '.join(sqlite_info['tables']) or '(none)'}")
             if "thread_items" in sqlite_info:
                 print(
-                    "sqlite counts: "
-                    f"{sqlite_info['thread_count']} threads, "
-                    f"{sqlite_info['thread_turns']} turns, "
-                    f"{sqlite_info['thread_items']} items"
-                )
-                print(
-                    "sqlite range: "
+                    "  SQLite range: "
                     f"{sqlite_info['oldest_timestamp'] or 'unknown'} -> "
                     f"{sqlite_info['newest_timestamp'] or 'unknown'}"
                 )
-                print("sqlite item types:")
+                print("  SQLite item types:")
                 for item_type, count in sqlite_info["item_types"].items():
-                    print(f"  {item_type}: {count}")
-    return 0
+                    print(f"    {item_type}: {count}")
+    return 1 if payload["status"] == "error" else 0
 
 
 def diagnose_main(argv: list[str] | None = None) -> int:

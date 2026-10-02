@@ -25,7 +25,7 @@ from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 from urllib.request import urlopen
 
-from codex_tools import paths, typeset
+from codex_tools import config, paths, typeset
 from codex_tools.browser import add_browser_args, browser_command, open_browser
 from codex_tools.search import (
     DEFAULT_ARCHIVE_ROOT,
@@ -55,7 +55,7 @@ LATEX_FILES = (
     "enumitem.sty",
     "tabularx.sty",
     "colortbl.sty",
-    "tikz.sty",
+    "soul.sty",
 )
 LATEX_FONTS = ("TeX Gyre Pagella", "TeX Gyre Heros", "PT Mono")
 VENDOR_DIR = Path(__file__).with_name("vendor")
@@ -94,6 +94,8 @@ TEXT_ATTACHMENT_SUFFIXES = {
 
 
 def read_default_view(config_path: Path | None = None) -> str:
+    if config_path is None:
+        return str(config.value("viewer.default_view"))
     path = config_path or paths.VIEWER_CONFIG_FILE
     try:
         value = json.loads(path.read_text(encoding="utf-8")).get("default_view")
@@ -105,16 +107,19 @@ def read_default_view(config_path: Path | None = None) -> str:
 def write_default_view(mode: str, config_path: Path | None = None) -> None:
     if mode not in VIEW_MODES:
         raise ValueError(f"unsupported viewer mode: {mode}")
+    if config_path is None:
+        config.set_value("viewer.default_view", mode)
+        return
     path = config_path or paths.VIEWER_CONFIG_FILE
     paths.ensure_private_dir(path.parent)
     try:
-        config = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(config, dict):
-            config = {}
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            payload = {}
     except (FileNotFoundError, OSError, json.JSONDecodeError):
-        config = {}
-    config["default_view"] = mode
-    paths.write_private_text(path, json.dumps(config, indent=2, sort_keys=True) + "\n")
+        payload = {}
+    payload["default_view"] = mode
+    paths.write_private_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
 def command_set_default_view(args: argparse.Namespace) -> int:
@@ -123,7 +128,15 @@ def command_set_default_view(args: argparse.Namespace) -> int:
     return 0
 
 
+def configured_typeset_code_mode() -> tuple[str, str]:
+    selected, source = config.resolve("viewer.typeset_code_mode")
+    if source == "built-in" and typeset.DEFAULT_CODE_MODE != "auto":
+        return typeset.DEFAULT_CODE_MODE, "environment"
+    return str(selected), source
+
+
 def add_server_args(parser: argparse.ArgumentParser) -> None:
+    configured_code_mode, code_mode_source = configured_typeset_code_mode()
     parser.add_argument(
         "--sessions-root",
         type=Path,
@@ -182,8 +195,11 @@ def add_server_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--typeset-code-mode",
         choices=sorted(typeset.CODE_MODES),
-        default=typeset.DEFAULT_CODE_MODE,
-        help="Code-block renderer: auto, pygments, or verbatim. Default: auto.",
+        default=configured_code_mode,
+        help=(
+            "Code-block renderer: auto, pygments, or verbatim. Effective default: "
+            f"{configured_code_mode} ({code_mode_source})."
+        ),
     )
     parser.add_argument(
         "--web-assets",
@@ -1327,12 +1343,13 @@ def command_doctor(args: argparse.Namespace) -> int:
     print("Ubuntu/Debian install hint:")
     print(
         "  sudo apt install texlive-xetex texlive-latex-extra "
-        "texlive-pictures fonts-texgyre fonts-paratype"
+        "fonts-texgyre fonts-paratype"
     )
     return 1
 
 
 def default_server_args() -> argparse.Namespace:
+    code_mode, _ = configured_typeset_code_mode()
     return argparse.Namespace(
         sessions_root=DEFAULT_SESSIONS_ROOT,
         include_archive=False,
@@ -1346,7 +1363,7 @@ def default_server_args() -> argparse.Namespace:
         same_window=False,
         no_self_reload=True,
         typeset_debug=False,
-        typeset_code_mode=typeset.DEFAULT_CODE_MODE,
+        typeset_code_mode=code_mode,
         web_assets="bundled",
     )
 

@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 from codex_tools import (
     browser,
     cli,
+    config as user_config,
     paths,
     summary,
     summarize_daily,
@@ -139,35 +140,57 @@ class SummaryCommandTests(unittest.TestCase):
 
     def test_summary_model_command_sets_shows_and_resets_default(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            config = Path(temporary) / "summary.json"
+            config = Path(temporary) / "config.toml"
             with (
-                patch.object(summary_common.paths, "SUMMARY_CONFIG_FILE", config),
+                patch.object(user_config.paths, "CONFIG_FILE", config),
+                patch.object(
+                    user_config.paths,
+                    "SUMMARY_CONFIG_FILE",
+                    Path(temporary) / "legacy-summary.json",
+                ),
+                patch.object(
+                    user_config.paths,
+                    "VIEWER_CONFIG_FILE",
+                    Path(temporary) / "legacy-viewer.json",
+                ),
                 patch("builtins.print") as output,
             ):
                 self.assertEqual(summary.main(["model", "gpt-6.1-sol"]), 0)
                 self.assertEqual(
-                    output.call_args.args[0], "Default summary model: gpt-6.1-sol"
+                    [call.args[0] for call in output.call_args_list],
+                    [
+                        "Daily summary model: gpt-6.1-sol (user config)",
+                        "Weekly summary model: gpt-6.1-sol (user config)",
+                    ],
                 )
 
                 output.reset_mock()
                 self.assertEqual(summary.main(["model"]), 0)
                 self.assertEqual(
-                    output.call_args.args[0], "Default summary model: gpt-6.1-sol"
+                    [call.args[0] for call in output.call_args_list],
+                    [
+                        "Daily summary model: gpt-6.1-sol (user config)",
+                        "Weekly summary model: gpt-6.1-sol (user config)",
+                    ],
                 )
 
                 output.reset_mock()
                 self.assertEqual(summary.main(["model", "--reset"]), 0)
                 self.assertEqual(
-                    output.call_args.args[0],
-                    "Default summary model: Codex profile default",
+                    [call.args[0] for call in output.call_args_list],
+                    [
+                        "Daily summary model: Codex profile default (built-in)",
+                        "Weekly summary model: Codex profile default (built-in)",
+                    ],
                 )
 
     def test_saved_summary_model_is_default_but_cli_can_override_it(self) -> None:
-        with patch.object(
-            summary_common, "read_default_model", return_value="saved-model"
-        ):
-            daily = summarize_daily.parse_args([])
-            weekly = summarize_weekly.parse_args(["--model", "one-run-model"])
+        with tempfile.TemporaryDirectory() as temporary:
+            config = Path(temporary) / "config.toml"
+            user_config.set_value("summary.daily.model", "saved-model", config)
+            with patch.object(user_config.paths, "CONFIG_FILE", config):
+                daily = summarize_daily.parse_args([])
+                weekly = summarize_weekly.parse_args(["--model", "one-run-model"])
 
         self.assertEqual(daily.model, "saved-model")
         self.assertEqual(weekly.model, "one-run-model")
@@ -330,6 +353,52 @@ class SummaryCommandTests(unittest.TestCase):
                 generated_days,
                 [date(2026, 9, day) for day in range(22, 28)],
             )
+
+    def test_weekly_refresh_uses_daily_model_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config_path = root / "config.toml"
+            user_config.set_value("summary.daily.model", "daily-model", config_path)
+            user_config.set_value("summary.daily.words", 175, config_path)
+            args = argparse.Namespace(
+                daily_summaries_dir=root / "daily",
+                refresh_dailies="missing",
+                daily_prompt_template=None,
+                sessions_root=root / "sessions",
+                session_index=root / "session_index.jsonl",
+                max_record_chars=900,
+                max_context_chars=120_000,
+                model="weekly-model",
+                reasoning_effort="high",
+                timeout=999,
+                codex_bin="codex",
+                profile="default",
+                manager_root=root / "manager",
+                default_home=root / "home",
+            )
+            captured = []
+
+            def prepare(daily_args, _day, _timezone):
+                captured.append(daily_args)
+                return SimpleNamespace(sessions=[], input_fingerprint="empty")
+
+            with (
+                patch.object(user_config.paths, "CONFIG_FILE", config_path),
+                patch.object(
+                    summarize_daily, "prepare_daily_summary", side_effect=prepare
+                ),
+            ):
+                summarize_weekly.refresh_daily_summaries(
+                    args,
+                    date(2026, 9, 28),
+                    date(2026, 9, 28),
+                    ZoneInfo("Europe/Bratislava"),
+                )
+
+            self.assertEqual(captured[0].model, "daily-model")
+            self.assertEqual(captured[0].words, 175)
+            self.assertEqual(captured[0].reasoning_effort, "low")
+            self.assertEqual(captured[0].timeout, 300)
 
     def test_daily_freshness_uses_input_fingerprint(self) -> None:
         summary = summarize_weekly.DailySummary(

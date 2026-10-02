@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 
-from codex_tools import aliases, manager, search, structured, summary, viewer
+from codex_tools import aliases, config, manager, search, structured, summary, viewer
 
 
 def help_text() -> str:
@@ -18,6 +18,7 @@ Commands:
   manager     Manage isolated Codex profiles.
   alias       Install or remove the short ct alias.
   structured  Run reproducible schema-constrained Codex tasks.
+  config      Inspect or change per-user defaults.
   diagnose    Inspect local Codex source health.
 
 Examples:
@@ -34,6 +35,7 @@ Examples:
   codex-tools structured batch batch.json --batch-dir runs/batch-001 --jobs 4 --idxs 10 20
   codex-tools structured batch batch.json --batch-dir runs/model-test --model gpt-6-astra --reasoning-effort high
   codex-tools structured check runs/batch-001
+  codex-tools config show
   codex-tools diagnose
 """
 
@@ -58,6 +60,8 @@ def main(argv: list[str] | None = None) -> int:
         return aliases.main(rest)
     if command == "structured":
         return structured.main(rest)
+    if command == "config":
+        return config.main(rest)
     if command == "diagnose":
         return search.diagnose_main(rest)
 

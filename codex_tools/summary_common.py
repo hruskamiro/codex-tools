@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from jsonschema import ValidationError, validators
 
-from codex_tools import codex_exec, manager, paths
+from codex_tools import codex_exec, config, manager, paths
 
 
 TRUNCATION_MARKER = "\n\n_Context truncated by --max-context-chars._\n\n"
@@ -32,10 +32,14 @@ SUMMARY_SCHEMA = {
 
 
 def read_default_model(config_path: Path | None = None) -> str | None:
+    if config_path is None:
+        daily = config.value("summary.daily.model")
+        weekly = config.value("summary.weekly.model")
+        return daily if daily == weekly else None
     path = config_path or paths.SUMMARY_CONFIG_FILE
     try:
-        config = json.loads(path.read_text(encoding="utf-8"))
-        value = config.get("default_model")
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        value = payload.get("default_model")
     except (FileNotFoundError, OSError, json.JSONDecodeError, AttributeError):
         return None
     if not isinstance(value, str):
@@ -45,26 +49,37 @@ def read_default_model(config_path: Path | None = None) -> str | None:
 
 
 def write_default_model(model: str | None, config_path: Path | None = None) -> None:
+    if config_path is None:
+        if model is None:
+            config.unset_value("summary.daily.model")
+            config.unset_value("summary.weekly.model")
+        else:
+            selected = model.strip()
+            if not selected:
+                raise ValueError("summary model cannot be empty")
+            config.set_value("summary.daily.model", selected)
+            config.set_value("summary.weekly.model", selected)
+        return
     path = config_path or paths.SUMMARY_CONFIG_FILE
     try:
-        config = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(config, dict):
-            config = {}
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            payload = {}
     except (FileNotFoundError, OSError, json.JSONDecodeError):
-        config = {}
+        payload = {}
     if model is None:
-        config.pop("default_model", None)
+        payload.pop("default_model", None)
     else:
         selected = model.strip()
         if not selected:
             raise ValueError("summary model cannot be empty")
-        config["default_model"] = selected
+        payload["default_model"] = selected
     paths.ensure_private_dir(path.parent)
-    paths.write_private_text(path, json.dumps(config, indent=2, sort_keys=True) + "\n")
+    paths.write_private_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
 def default_model_label() -> str:
-    return read_default_model() or "Codex profile default"
+    return read_default_model() or "command-specific/Codex profile default"
 
 
 def positive_int(value: str) -> int:

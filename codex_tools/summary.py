@@ -6,6 +6,7 @@ import argparse
 import sys
 
 from codex_tools import (
+    config,
     summarize_daily,
     summarize_weekly,
     summary_clean,
@@ -41,7 +42,10 @@ Examples:
 def model_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="codex-tools summary model",
-        description="Show or set the default model used for summaries.",
+        description=(
+            "Show or set both daily and weekly default models. Use "
+            "`codex-tools config set summary.daily.model MODEL` for separate defaults."
+        ),
     )
     parser.add_argument(
         "model",
@@ -61,11 +65,18 @@ def model_main(argv: list[str]) -> int:
     elif args.model:
         summary_common.write_default_model(args.model)
 
-    selected = summary_common.read_default_model()
-    if selected:
-        print(f"Default summary model: {selected}")
-    else:
-        print("Default summary model: Codex profile default")
+    daily, daily_source = config.resolve("summary.daily.model")
+    weekly, weekly_source = config.resolve("summary.weekly.model")
+    print(
+        "Daily summary model: "
+        f"{config.display_value(config.SETTINGS['summary.daily.model'], daily)} "
+        f"({daily_source})"
+    )
+    print(
+        "Weekly summary model: "
+        f"{config.display_value(config.SETTINGS['summary.weekly.model'], weekly)} "
+        f"({weekly_source})"
+    )
     return 0
 
 

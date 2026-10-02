@@ -191,6 +191,98 @@ class SearchCommandTests(unittest.TestCase):
         self.assertEqual(payload["jsonl"]["files_found"], 0)
         self.assertFalse(payload["session_index_info"]["exists"])
         self.assertFalse(payload["sqlite"]["exists"])
+        self.assertEqual(payload["status"], "warning")
+
+    def test_diagnose_reports_invalid_configuration_as_an_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config_path = root / "config.toml"
+            config_path.write_text("not valid toml = [", encoding="utf-8")
+            args = search.parse_diagnose_args(
+                [
+                    "--sessions-root",
+                    str(root / "sessions"),
+                    "--session-index",
+                    str(root / "session_index.jsonl"),
+                    "--thread-history",
+                    str(root / "history.sqlite"),
+                ]
+            )
+
+            output = io.StringIO()
+            with (
+                patch.object(search.tool_paths, "CONFIG_FILE", config_path),
+                patch.object(search.shutil, "which", return_value="/usr/bin/codex"),
+                redirect_stdout(output),
+            ):
+                result = search.diagnose(args)
+
+        self.assertEqual(result, 1)
+        self.assertIn("Codex Tools health: ERROR", output.getvalue())
+        self.assertIn("[ERROR] Configuration", output.getvalue())
+        self.assertIn("Fix:", output.getvalue())
+
+    def test_diagnose_default_output_hides_database_internals(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            sessions = root / "sessions"
+            sessions.mkdir()
+            (sessions / "one.jsonl").write_text(
+                '{"timestamp":"2026-09-01T12:00:00Z"}\n', encoding="utf-8"
+            )
+            args = search.parse_diagnose_args(
+                [
+                    "--sessions-root",
+                    str(sessions),
+                    "--session-index",
+                    str(root / "session_index.jsonl"),
+                    "--thread-history",
+                    str(root / "history.sqlite"),
+                ]
+            )
+
+            output = io.StringIO()
+            with (
+                patch.object(search.tool_paths, "CONFIG_FILE", root / "config.toml"),
+                patch.object(search.shutil, "which", return_value="/usr/bin/codex"),
+                redirect_stdout(output),
+            ):
+                result = search.diagnose(args)
+
+        self.assertEqual(result, 0)
+        text = output.getvalue()
+        self.assertIn("Codex Tools health: OK", text)
+        self.assertIn("[OK] Conversation transcripts", text)
+        self.assertIn("No problems found.", text)
+        self.assertNotIn("SQLite tables:", text)
+
+    def test_diagnose_verbose_output_includes_technical_details(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            sessions = root / "sessions"
+            sessions.mkdir()
+            args = search.parse_diagnose_args(
+                [
+                    "--sessions-root",
+                    str(sessions),
+                    "--session-index",
+                    str(root / "session_index.jsonl"),
+                    "--thread-history",
+                    str(root / "history.sqlite"),
+                    "--verbose",
+                ]
+            )
+
+            output = io.StringIO()
+            with (
+                patch.object(search.tool_paths, "CONFIG_FILE", root / "config.toml"),
+                patch.object(search.shutil, "which", return_value="/usr/bin/codex"),
+                redirect_stdout(output),
+            ):
+                search.diagnose(args)
+
+        self.assertIn("Technical details", output.getvalue())
+        self.assertIn("SQLite tables:", output.getvalue())
 
 
 if __name__ == "__main__":

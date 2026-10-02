@@ -4,6 +4,15 @@ Codex Tools reads local Codex transcripts, which may contain private source
 code, prompts, filesystem paths, and tool output. Keep the generated summaries,
 viewer state, and managed conversation stores private to your user account.
 
+## Profile exports
+
+`codex-manager export` bundles file-backed Codex credentials and profile setup.
+Exports are encrypted with a passphrase and created with owner-only permissions,
+but they still grant access to the exported account when decrypted. Use a strong
+passphrase, transfer bundles only through trusted channels, and remove copies
+that are no longer needed. Passphrases are read from the terminal and should
+never be supplied in command arguments.
+
 ## Viewer exposure
 
 The viewer has no authentication. It binds to `127.0.0.1` by default and

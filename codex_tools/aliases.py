@@ -19,11 +19,12 @@ _ct_completion() {
   local cur prev words cword
   _init_completion -n : || return
 
-  local commands="search summary viewer manager alias structured diagnose"
+  local commands="search summary viewer manager alias structured config diagnose"
   local summary_commands="today yesterday day week model site clean"
   local viewer_commands="serve start restart stop status open pick doctor"
-  local manager_commands="new list run install uninstall remove rm delete path doctor repair"
+  local manager_commands="new rename export import list run install uninstall remove rm delete path doctor repair"
   local alias_commands="install remove list"
+  local config_commands="show path validate set unset"
 
   if [[ ${cword} -eq 1 ]]; then
     COMPREPLY=( $(compgen -W "${commands}" -- "${cur}") )
@@ -42,6 +43,9 @@ _ct_completion() {
       ;;
     alias)
       [[ ${cword} -eq 2 ]] && COMPREPLY=( $(compgen -W "${alias_commands}" -- "${cur}") )
+      ;;
+    config)
+      [[ ${cword} -eq 2 ]] && COMPREPLY=( $(compgen -W "${config_commands}" -- "${cur}") )
       ;;
   esac
 }

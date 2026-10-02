@@ -17,7 +17,7 @@ from datetime import date, datetime, time, timedelta, timezone as datetime_timez
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from codex_tools import manager, paths, search, summary_common, summary_prompts
+from codex_tools import config, manager, paths, search, summary_common, summary_prompts
 
 
 DEFAULT_TIMEZONE = summary_common.detect_local_timezone()
@@ -61,6 +61,7 @@ def parse_args(
     argv: list[str] | None = None,
     prog: str = "codex-tools summary today",
 ) -> argparse.Namespace:
+    defaults = config.section("summary.daily")
     parser = argparse.ArgumentParser(
         prog=prog,
         description="Create a Markdown daily summary from local Codex sessions."
@@ -130,26 +131,35 @@ def parse_args(
     parser.add_argument(
         "--prompt-template",
         type=Path,
+        default=(
+            Path(defaults["prompt_template"]).expanduser()
+            if defaults["prompt_template"] is not None
+            else None
+        ),
         help=(
             "Custom daily prompt template using $weekday, $day, $timezone, "
-            "$target_words, $format_instructions, and $context placeholders."
+            "$target_words, $format_instructions, and $context placeholders. "
+            f"Effective default: {config.default_help('summary.daily.prompt_template')}."
         ),
     )
     parser.add_argument(
         "--words",
         type=summary_common.positive_int,
-        default=summary_common.DEFAULT_SUMMARY_WORDS,
+        default=defaults["words"],
         help=(
             "Approximate number of words in the summary. "
-            f"Default: {summary_common.DEFAULT_SUMMARY_WORDS}"
+            f"Effective default: {config.default_help('summary.daily.words')}."
         ),
     )
     parser.add_argument(
         "--format",
         dest="summary_format",
         choices=summary_common.SUMMARY_FORMATS,
-        default=summary_common.DEFAULT_SUMMARY_FORMAT,
-        help="Summary organization. Default: freeform.",
+        default=defaults["format"],
+        help=(
+            "Summary organization. Effective default: "
+            f"{config.default_help('summary.daily.format')}."
+        ),
     )
     parser.add_argument(
         "--output",
@@ -171,10 +181,28 @@ def parse_args(
     )
     parser.add_argument(
         "--model",
-        default=summary_common.read_default_model(),
+        default=defaults["model"],
         help=(
-            "Model for summary generation. Default: "
-            f"{summary_common.default_model_label()}"
+            "Model for summary generation. Effective default: "
+            f"{config.default_help('summary.daily.model')}."
+        ),
+    )
+    parser.add_argument(
+        "--reasoning-effort",
+        choices=config.SETTINGS["summary.daily.reasoning_effort"].choices,
+        default=defaults["reasoning_effort"],
+        help=(
+            "Model reasoning effort. Effective default: "
+            f"{config.default_help('summary.daily.reasoning_effort')}."
+        ),
+    )
+    parser.add_argument(
+        "--timeout",
+        type=summary_common.positive_int,
+        default=defaults["timeout_seconds"],
+        help=(
+            "Model timeout in seconds. Effective default: "
+            f"{config.default_help('summary.daily.timeout_seconds')}."
         ),
     )
     parser.add_argument(
@@ -203,14 +231,20 @@ def parse_args(
     parser.add_argument(
         "--max-record-chars",
         type=int,
-        default=900,
-        help="Maximum characters to include from each transcript message.",
+        default=defaults["max_record_chars"],
+        help=(
+            "Maximum characters to include from each transcript message. "
+            f"Effective default: {config.default_help('summary.daily.max_record_chars')}."
+        ),
     )
     parser.add_argument(
         "--max-context-chars",
         type=int,
-        default=120_000,
-        help="Maximum extracted context size sent to codex exec.",
+        default=defaults["max_context_chars"],
+        help=(
+            "Maximum extracted context size sent to codex exec. Effective default: "
+            f"{config.default_help('summary.daily.max_context_chars')}."
+        ),
     )
     return parser.parse_args(argv)
 

@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from codex_tools import search, typeset, viewer
+from codex_tools import config, search, typeset, viewer
 
 
 class ViewerCommandTests(unittest.TestCase):
@@ -46,6 +46,15 @@ class ViewerCommandTests(unittest.TestCase):
             self.assertEqual(viewer.read_default_view(config), "latex")
             self.assertEqual(config.stat().st_mode & 0o777, 0o600)
             self.assertEqual(config.parent.stat().st_mode & 0o777, 0o700)
+
+    def test_default_view_uses_unified_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.toml"
+            with patch.object(config.paths, "CONFIG_FILE", path):
+                viewer.write_default_view("latex")
+
+                self.assertEqual(viewer.read_default_view(), "latex")
+                self.assertEqual(config.value("viewer.default_view"), "latex")
 
     def test_default_view_flags_select_the_preference_command(self) -> None:
         latex = viewer.parse_args(["--set-default-latex"])
