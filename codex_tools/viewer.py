@@ -2360,6 +2360,7 @@ h2 {
   flex: 1;
   min-height: 0;
   overflow: auto;
+  overflow-anchor: none;
   padding: 30px clamp(20px, 4vw, 56px) 24px;
   scroll-behavior: smooth;
 }
@@ -3499,16 +3500,24 @@ function showRefreshResult(previousTotal, failed = false) {
   }, 1800);
 }
 
+function sameConversationRecord(record, candidate) {
+  return record.line_no === candidate?.line_no
+    && record.role === candidate?.role
+    && record.timestamp === candidate?.timestamp
+    && record.text === candidate?.text;
+}
+
 function sameConversationContent(previous, next) {
   if (!previous || previous.totalCount !== next.totalCount) return false;
   if (previous.records.length !== next.records.length) return false;
-  return previous.records.every((record, index) => {
-    const candidate = next.records[index];
-    return record.line_no === candidate?.line_no
-      && record.role === candidate?.role
-      && record.timestamp === candidate?.timestamp
-      && record.text === candidate?.text;
-  });
+  return previous.records.every((record, index) =>
+    sameConversationRecord(record, next.records[index]));
+}
+
+function extendsConversationContent(previous, next) {
+  if (!previous || previous.records.length > next.records.length) return false;
+  return previous.records.every((record, index) =>
+    sameConversationRecord(record, next.records[index]));
 }
 
 function setStatusbarExpanded(expanded) {
@@ -3954,6 +3963,7 @@ function updateLoadButtons(data) {
 }
 
 function renderConversation(data, options = {}) {
+  const previousData = lastConversationData;
   lastConversationData = data;
   messageNavigationIndex = -1;
   const anchorLine = options.anchorLine || "";
@@ -3985,9 +3995,27 @@ function renderConversation(data, options = {}) {
   }
 
   els.conversation.className = "conversation view-conversation";
-  els.conversation.innerHTML = data.records.map(renderRecord).join("");
-  applyMathAndCode(els.conversation);
-  applySemanticHighlights(document);
+  if (options.preserveScroll && extendsConversationContent(previousData, data)) {
+    const addedRecords = data.records.slice(previousData.records.length);
+    if (addedRecords.length) {
+      const firstAddedIndex = els.conversation.querySelectorAll(".message").length;
+      els.conversation.insertAdjacentHTML(
+        "beforeend",
+        addedRecords.map(renderRecord).join(""),
+      );
+      const addedMessages = Array.from(
+        els.conversation.querySelectorAll(".message"),
+      ).slice(firstAddedIndex);
+      for (const message of addedMessages) {
+        applyMathAndCode(message);
+        applySemanticHighlights(message);
+      }
+    }
+  } else {
+    els.conversation.innerHTML = data.records.map(renderRecord).join("");
+    applyMathAndCode(els.conversation);
+    applySemanticHighlights(document);
+  }
   if (anchorLine) {
     requestAnimationFrame(() => {
       if (!scrollToMessageLine(anchorLine)) restoreScrollAnchor(options.scrollAnchor);
@@ -4018,6 +4046,11 @@ async function loadConversation(options = {}) {
   apiParams.set("tail", String(currentTail));
   if (renderOptions.scrollAnchor?.lineNo) {
     apiParams.set("anchor", renderOptions.scrollAnchor.lineNo);
+  }
+  if (options.preserveScroll) {
+    const firstRendered = els.conversation.querySelector(".message");
+    const firstRenderedLine = messageLineId(firstRendered);
+    if (firstRenderedLine) apiParams.set("anchor", firstRenderedLine);
   }
   try {
     if (showAllRecords) apiParams.set("all", "1");
@@ -4232,16 +4265,24 @@ function showRefreshResult(previousTotal, failed = false) {
   }, 1800);
 }
 
+function sameConversationRecord(record, candidate) {
+  return record.line_no === candidate?.line_no
+    && record.role === candidate?.role
+    && record.timestamp === candidate?.timestamp
+    && record.text === candidate?.text;
+}
+
 function sameConversationContent(previous, next) {
   if (!previous || previous.totalCount !== next.totalCount) return false;
   if (previous.records.length !== next.records.length) return false;
-  return previous.records.every((record, index) => {
-    const candidate = next.records[index];
-    return record.line_no === candidate?.line_no
-      && record.role === candidate?.role
-      && record.timestamp === candidate?.timestamp
-      && record.text === candidate?.text;
-  });
+  return previous.records.every((record, index) =>
+    sameConversationRecord(record, next.records[index]));
+}
+
+function extendsConversationContent(previous, next) {
+  if (!previous || previous.records.length > next.records.length) return false;
+  return previous.records.every((record, index) =>
+    sameConversationRecord(record, next.records[index]));
 }
 
 function setStatusbarExpanded(expanded) {
@@ -4861,6 +4902,7 @@ async function copyRecordCode(button) {
 }
 
 async function renderConversation(data, options = {}) {
+  const previousData = lastConversationData;
   lastConversationData = data;
   typesetDebugEnabled = Boolean(data.typesetDebug);
   typesetHeaderMode = data.typesetHeaderMode || "external";
@@ -4911,9 +4953,37 @@ async function renderConversation(data, options = {}) {
   }
 
   els.conversation.className = "conversation view-conversation typeset-conversation";
-  els.conversation.innerHTML = data.records.map(renderRecord).join("");
-  applyMathAndCode(els.conversation);
-  await renderPdfPages(els.conversation);
+  if (
+    options.preserveScroll
+    && !focusedRoute().debug
+    && extendsConversationContent(previousData, data)
+  ) {
+    const previousLength = previousData.records.length;
+    const addedRecords = data.records.slice(previousLength);
+    if (addedRecords.length) {
+      const firstAddedIndex = els.conversation.querySelectorAll(".message").length;
+      els.conversation.insertAdjacentHTML(
+        "beforeend",
+        addedRecords.map((record, index) =>
+          renderRecord(record, previousLength + index, data.records)).join(""),
+      );
+      const messages = Array.from(els.conversation.querySelectorAll(".message"));
+      const addedMessages = messages.slice(firstAddedIndex);
+      messages.forEach((message, index) => {
+        const isAssistant = recordClass(data.records[index]?.role) === "assistant";
+        const previousIsAssistant = recordClass(data.records[index - 1]?.role) === "assistant";
+        const nextIsAssistant = recordClass(data.records[index + 1]?.role) === "assistant";
+        message.classList.toggle("assistant-continued", isAssistant && previousIsAssistant);
+        message.classList.toggle("assistant-continuing", isAssistant && nextIsAssistant);
+      });
+      for (const message of addedMessages) applyMathAndCode(message);
+      await Promise.all(addedMessages.map(renderPdfPages));
+    }
+  } else {
+    els.conversation.innerHTML = data.records.map(renderRecord).join("");
+    applyMathAndCode(els.conversation);
+    await renderPdfPages(els.conversation);
+  }
   await nextAnimationFrame();
   if (anchorLine) {
     if (!scrollToMessageLine(anchorLine)) restoreScrollAnchor(options.scrollAnchor);
@@ -4943,6 +5013,11 @@ async function loadConversation(options = {}) {
   apiParams.set("tail", String(currentTail));
   if (renderOptions.scrollAnchor?.lineNo) {
     apiParams.set("anchor", renderOptions.scrollAnchor.lineNo);
+  }
+  if (options.preserveScroll) {
+    const firstRendered = els.conversation.querySelector(".message");
+    const firstRenderedLine = messageLineId(firstRendered);
+    if (firstRenderedLine) apiParams.set("anchor", firstRenderedLine);
   }
   try {
     if (showAllRecords) apiParams.set("all", "1");

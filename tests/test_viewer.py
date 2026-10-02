@@ -214,10 +214,15 @@ class ViewerCommandTests(unittest.TestCase):
             self.assertIn("restoreScrollAnchor(options.scrollAnchor)", script)
             self.assertIn('toggleAttribute("aria-busy", refreshing)', script)
             self.assertIn('apiParams.set("anchor", renderOptions.scrollAnchor.lineNo)', script)
+            self.assertIn("function extendsConversationContent(previous, next)", script)
+            self.assertIn('insertAdjacentHTML(', script)
+            self.assertIn('apiParams.set("anchor", firstRenderedLine)', script)
 
         self.assertIn("const scrollAnchor = options.preserveScroll", viewer.VIEW_JS)
         self.assertNotIn("els.conversation.scrollTop = previousScrollTop", viewer.VIEW_JS)
         self.assertIn("@keyframes refresh-spin", viewer.APP_CSS)
+        conversation_rule = viewer.APP_CSS.split(".conversation {", 1)[1].split("}", 1)[0]
+        self.assertIn("overflow-anchor: none", conversation_rule)
         self.assertIn(".statusbar-toggle.is-refreshing", viewer.APP_CSS)
         self.assertNotIn(".refresh-bubble", viewer.APP_CSS)
         self.assertNotIn(".refresh-bubble-spinner", viewer.APP_CSS)
