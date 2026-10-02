@@ -18,7 +18,7 @@ class TypesetTests(unittest.TestCase):
         self.assertNotIn(r"\usepackage{fancyvrb}", document)
         self.assertIn(r"\setmonofont[Scale=MatchLowercase]{PT Mono}", document)
         self.assertIn(r"\linespread{1.08}", document)
-        self.assertIn(r"\usepackage{tikz}", document)
+        self.assertNotIn(r"\usepackage{tikz}", document)
         self.assertNotIn(r"\usepackage{varwidth}", document)
         self.assertIn(r"\begin{minipage}{150mm}", document)
         self.assertNotIn(r"\begin{varwidth}", document)
@@ -36,9 +36,11 @@ class TypesetTests(unittest.TestCase):
             r"\newcommand{\CodexString}[1]{{\color{CodexStringColor}#1}}",
             document,
         )
-        self.assertIn(r"rounded corners=1pt", document)
-        self.assertIn(r"inner ysep=0.2pt", document)
-        self.assertIn(r"\usebox{\CodexInlineCodeBox}", document)
+        self.assertIn(r"\usepackage{soul}", document)
+        self.assertIn(r"\ttfamily\sethlcolor{CodexCode}\hl{#1}", document)
+        self.assertIn(r"\soulregister\CodexInlineCodeBreak0", document)
+        self.assertNotIn(r"rounded corners", document)
+        self.assertNotIn(r"\CodexInlineCodeBox", document)
         self.assertNotIn(r"\raisebox{0pt}[\ht\strutbox][\dp\strutbox]", document)
         self.assertNotIn(r"\fcolorbox", document)
         self.assertNotIn(r"\strut\texttt", document)
@@ -201,7 +203,10 @@ class TypesetTests(unittest.TestCase):
         self.assertIn(r"item\_2", latex)
         self.assertNotIn(r"v\CodexNumber{25}", latex)
         self.assertNotIn(r"item\_\CodexNumber{2}", latex)
-        self.assertIn(r"\CodexInlineCode{code42 99}", latex)
+        self.assertIn(
+            r"\CodexInlineCode{code42 99}",
+            latex,
+        )
 
     def test_prose_quote_pairs_use_the_string_color_command(self) -> None:
         latex = typeset.markdown_to_latex(
@@ -214,8 +219,24 @@ class TypesetTests(unittest.TestCase):
         self.assertIn(r"\CodexString{“curly double”}", latex)
         self.assertIn(r"\CodexString{‘curly single’}", latex)
         self.assertIn("Don't color", latex)
-        self.assertIn(r'\CodexInlineCode{"quoted code"}', latex)
+        self.assertIn(
+            r'\CodexInlineCode{"quoted code"}',
+            latex,
+        )
         self.assertNotIn(r'\CodexInlineCode{\CodexString', latex)
+
+    def test_inline_code_breaks_at_common_code_and_path_separators(self) -> None:
+        latex = typeset.render_inline(r"`alpha-beta/gamma_delta.py:value\path`")
+
+        self.assertEqual(
+            latex,
+            r"\CodexInlineCode{alpha-\CodexInlineCodeBreak{}"
+            r"beta/\CodexInlineCodeBreak{}"
+            r"gamma\_\CodexInlineCodeBreak{}"
+            r"delta.\CodexInlineCodeBreak{}"
+            r"py:\CodexInlineCodeBreak{}"
+            r"value\textbackslash{}\CodexInlineCodeBreak{}path}",
+        )
 
     def test_inline_latex_math_is_preserved_outside_code(self) -> None:
         latex = typeset.markdown_to_latex(
@@ -224,7 +245,11 @@ class TypesetTests(unittest.TestCase):
 
         self.assertIn(r"\(d=0.95\)", latex)
         self.assertIn(r"\(10^{-2}\)–\(10^{-1}\)", latex)
-        self.assertIn(r"\CodexInlineCode{\textbackslash{}(literal\textbackslash{})}", latex)
+        self.assertIn(
+            r"\CodexInlineCode{\textbackslash{}\CodexInlineCodeBreak{}"
+            r"(literal\textbackslash{}\CodexInlineCodeBreak{})}",
+            latex,
+        )
         self.assertNotIn(r"\textbackslash{}(d=0.95\textbackslash{})", latex)
 
     def test_unclosed_inline_latex_math_remains_plain_text(self) -> None:

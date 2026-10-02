@@ -25,7 +25,7 @@ except ImportError:  # Pygments is optional when running directly from a checkou
     ClassNotFound = LookupError
 
 
-RENDERER_VERSION = "typeset-v42"
+RENDERER_VERSION = "typeset-v44"
 DEFAULT_PARAGRAPH_MODE = "spaced"
 DEFAULT_HEADER_MODE = "external"
 BODY_LINE_STRETCH = "1.08"
@@ -152,6 +152,26 @@ def latex_url_escape(value: str) -> str:
     return value.replace("\\", "/").replace("%", r"\%").replace("#", r"\#")
 
 
+INLINE_CODE_BREAK_AFTER = frozenset("-/_.:\\")
+
+
+def render_inline_code(value: str) -> str:
+    """Render one continuous highlight with useful code/path breakpoints."""
+    rendered: list[str] = []
+    previous_was_space = False
+    for char in value:
+        if char.isspace():
+            if not previous_was_space:
+                rendered.append(" ")
+            previous_was_space = True
+            continue
+        previous_was_space = False
+        rendered.append(latex_escape(char))
+        if char in INLINE_CODE_BREAK_AFTER:
+            rendered.append(r"\CodexInlineCodeBreak{}")
+    return r"\CodexInlineCode{" + "".join(rendered) + "}"
+
+
 def render_inline(text: str) -> str:
     rendered: list[str] = []
     cursor = 0
@@ -159,9 +179,7 @@ def render_inline(text: str) -> str:
         if text.startswith("`", cursor):
             end = text.find("`", cursor + 1)
             if end > cursor + 1:
-                rendered.append(
-                    r"\CodexInlineCode{" + latex_escape(text[cursor + 1 : end]) + "}"
-                )
+                rendered.append(render_inline_code(text[cursor + 1 : end]))
                 cursor = end + 1
                 continue
         if text.startswith(r"\(", cursor):
@@ -735,7 +753,7 @@ def document_for(
 \usepackage{{enumitem}}
 \usepackage{{tabularx}}
 \usepackage{{colortbl}}
-\usepackage{{tikz}}
+\usepackage{{soul}}
 \setmainfont{{TeX Gyre Pagella}}
 \setsansfont{{TeX Gyre Heros}}
 \setmonofont[Scale=MatchLowercase]{{PT Mono}}
@@ -769,10 +787,14 @@ def document_for(
 \setlist[enumerate,1]{{labelindent=0.8em,leftmargin=*}}
 \renewcommand{{\familydefault}}{{\rmdefault}}
 \newsavebox{{\CodexTableBox}}
-\newsavebox{{\CodexInlineCodeBox}}
 \newcommand{{\CodexCopyTarget}}{{{{\color{{white}}\sffamily\scriptsize COPY}}}}
 \newcommand{{\CodexNumber}}[1]{{{{\color{{CodexNumberColor}}#1}}}}
 \newcommand{{\CodexString}}[1]{{{{\color{{CodexStringColor}}#1}}}}
+\newcommand{{\CodexInlineCodeBreak}}{{\allowbreak}}
+\soulregister\CodexInlineCodeBreak0
+\soulregister\textbackslash0
+\soulregister\textasciitilde0
+\soulregister\textasciicircum0
 \newenvironment{{CodexQuote}}{{%
   \begin{{list}}{{}}{{%
     \setlength{{\leftmargin}}{{2.5em}}%
@@ -796,18 +818,7 @@ def document_for(
   \addvspace{{\CodexQuoteAfterSep}}%
 }}
 \newcommand{{\CodexInlineCode}}[1]{{%
-  \sbox{{\CodexInlineCodeBox}}{{%
-    \tikz[baseline=(CodexCodeText.base)]{{%
-      \node[
-        fill=CodexCode,
-        rounded corners=1pt,
-        inner xsep=1.1pt,
-        inner ysep=0.2pt,
-        outer sep=0pt
-      ] (CodexCodeText) {{\texttt{{#1}}}};
-    }}%
-  }}%
-  \usebox{{\CodexInlineCodeBox}}%
+  {{\ttfamily\sethlcolor{{CodexCode}}\hl{{#1}}}}%
 }}
 \RecustomVerbatimEnvironment{{Verbatim}}{{Verbatim}}{{%
   frame=lines,
