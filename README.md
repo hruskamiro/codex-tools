@@ -72,7 +72,8 @@ codex-viewer stop         # stop it
 ```
 
 **Markdown is the portable default.** Press `T` inside a conversation to switch
-between Markdown and the LaTeX view.
+between Markdown and the LaTeX view. In the LaTeX view, local attachments and
+external links from each assistant answer are collected in a footer below it.
 
 ![Codex Viewer showing the symmetry of Riemann zeta zeros](docs/assets/codex-viewer-riemann-symmetry.png)
 
@@ -175,11 +176,17 @@ Search ordinary user and assistant messages across local conversations:
 ```bash
 ct search "JSONDecodeError"
 ct search "stored sessions" --context-turns 2
+ct search "render failure" --here
+ct search --list --work-dir ~/projects/codex-tools
 ct search --list --limit 20
 ```
 
 **Search is local and read-only.** Add `--include-tools` when command output and
-tool events should be searched too.
+tool events should be searched too. Use `--here` to select conversations started
+from the current directory, or `--work-dir PATH` to select another directory.
+Directory matching uses canonical paths and is exact, so nested working
+directories are not included. These filters require the default JSONL source;
+the SQLite compatibility source does not contain working-directory metadata.
 
 ## Summaries
 

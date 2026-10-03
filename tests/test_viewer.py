@@ -321,9 +321,83 @@ class ViewerCommandTests(unittest.TestCase):
 
     def test_typeset_attachments_open_in_a_new_tab(self) -> None:
         self.assertIn('target="_blank" rel="noopener"', viewer.TYPESET_JS)
-        self.assertIn("attachmentLinks(record)", viewer.TYPESET_JS)
-        self.assertIn('links.length === 1 ? "Attachment" : "Attachments"', viewer.TYPESET_JS)
+        self.assertIn("resourceLinks(record)", viewer.TYPESET_JS)
+        self.assertIn(
+            'attachments.length === 1 ? "Attachment" : "Attachments"',
+            viewer.TYPESET_JS,
+        )
         self.assertIn(".typeset-attachments", viewer.APP_CSS)
+
+    def test_external_links_are_collected_for_the_typeset_footer(self) -> None:
+        markdown = """\
+[OpenAI docs](https://platform.openai.com/docs), plus
+https://example.com/a_(b). The docs repeat at https://platform.openai.com/docs.
+`https://inline.example/ignored`
+
+```text
+https://fenced.example/ignored
+```
+[Local file](/tmp/report.pdf) and [mail](mailto:person@example.com).
+"""
+
+        payload = viewer.external_link_payload(markdown)
+
+        self.assertEqual(
+            payload,
+            [
+                {
+                    "label": "OpenAI docs",
+                    "url": "https://platform.openai.com/docs",
+                    "host": "platform.openai.com",
+                },
+                {
+                    "label": "https://example.com/a_(b)",
+                    "url": "https://example.com/a_(b)",
+                    "host": "example.com",
+                },
+            ],
+        )
+        self.assertIn('rel="noopener noreferrer"', viewer.TYPESET_JS)
+        self.assertIn('linkHeading = externalLinks.length === 1 ? "Link" : "Links"', viewer.TYPESET_JS)
+
+    def test_typeset_payload_includes_external_links_for_assistant_records(self) -> None:
+        record = search.TextRecord(
+            "",
+            "assistant",
+            "See [the reference](https://example.com/reference).",
+            42,
+            "message",
+        )
+        session = search.Session(path=Path("session.jsonl"), records=[record])
+        state = SimpleNamespace(
+            titles={},
+            typeset_debug=False,
+            typeset_code_mode="verbatim",
+        )
+        rendered = SimpleNamespace(
+            ok=False,
+            key="test",
+            cached=False,
+            error="not rendered",
+        )
+        with (
+            patch.object(viewer, "resolve_session_path", return_value=session.path),
+            patch.object(viewer, "read_session", return_value=session),
+            patch.object(viewer, "session_summary", return_value={}),
+            patch.object(viewer.typeset, "render_pdf", return_value=rendered),
+        ):
+            payload = viewer.handle_typeset(state, {"all": ["1"]})
+
+        self.assertEqual(
+            payload["records"][0]["externalLinks"],
+            [
+                {
+                    "label": "the reference",
+                    "url": "https://example.com/reference",
+                    "host": "example.com",
+                }
+            ],
+        )
 
     def test_local_attachments_are_derived_from_the_assistant_markdown(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

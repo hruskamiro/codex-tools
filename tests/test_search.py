@@ -6,7 +6,7 @@ import json
 import re
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import date
 from pathlib import Path
 from unittest.mock import patch
@@ -23,6 +23,86 @@ class SearchCommandTests(unittest.TestCase):
         self.assertFalse(args.ungrouped)
         self.assertEqual(args.matches_per_session, 5)
         self.assertEqual(args.context_lines, 2)
+        self.assertFalse(args.here)
+        self.assertIsNone(args.work_dir)
+
+    def test_here_and_work_dir_are_mutually_exclusive(self) -> None:
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            search.parse_args(["needle", "--here", "--work-dir", "/tmp"])
+
+    def test_selected_work_dir_uses_current_directory_for_here(self) -> None:
+        args = search.parse_args(["needle", "--here"])
+
+        selected = search.selected_work_dir(
+            args, current_dir=Path("/tmp/project/../project")
+        )
+
+        self.assertEqual(selected, Path("/tmp/project").resolve())
+
+    def test_work_dir_matching_canonicalizes_symlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project = root / "project"
+            alias = root / "project-link"
+            project.mkdir()
+            alias.symlink_to(project, target_is_directory=True)
+            session = search.Session(path=Path("session.jsonl"), cwd=str(alias))
+
+            matches = search.session_matches_work_dir(
+                session, search.canonical_work_dir(project)
+            )
+
+        self.assertTrue(matches)
+
+    def test_search_filters_by_exact_work_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project = root / "project"
+            nested = project / "nested"
+            project.mkdir()
+            nested.mkdir()
+            paths = [Path("one.jsonl"), Path("two.jsonl")]
+            sessions = [
+                search.Session(
+                    path=paths[0],
+                    session_id="matching-session",
+                    cwd=str(project),
+                    records=[
+                        search.TextRecord("", "user", "needle", 1, "message")
+                    ],
+                ),
+                search.Session(
+                    path=paths[1],
+                    session_id="nested-session",
+                    cwd=str(nested),
+                    records=[
+                        search.TextRecord("", "user", "needle", 1, "message")
+                    ],
+                ),
+            ]
+
+            output = io.StringIO()
+            with (
+                patch.object(search, "iter_jsonl_paths", return_value=paths),
+                patch.object(search, "read_session", side_effect=sessions),
+                patch.object(search, "load_session_index_titles", return_value={}),
+                redirect_stdout(output),
+            ):
+                result = search.main(
+                    ["needle", "--work-dir", str(project), "--json"]
+                )
+
+        self.assertEqual(result, 0)
+        payload = json.loads(output.getvalue())
+        self.assertEqual([item["thread_id"] for item in payload], ["matching-session"])
+
+    def test_work_dir_filter_rejects_sqlite_source(self) -> None:
+        error = io.StringIO()
+        with redirect_stderr(error):
+            result = search.main(["needle", "--source", "sqlite", "--here"])
+
+        self.assertEqual(result, 2)
+        self.assertIn("does not contain working-directory metadata", error.getvalue())
 
     def test_multiline_excerpt_preserves_and_marks_surrounding_lines(self) -> None:
         text = "first\nsecond\n  target value\nfourth\nfifth\nsixth"

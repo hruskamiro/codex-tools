@@ -65,6 +65,12 @@ TAIL_READ_BLOCK_SIZE = 64 * 1024
 VIEWER_PID_FILE = paths.VIEWER_STATE_DIR / "viewer.json"
 VIEWER_LOG_FILE = paths.VIEWER_STATE_DIR / "viewer.log"
 MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+EXTERNAL_URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
+FENCED_MARKDOWN_CODE_RE = re.compile(
+    r"^[ \t]*(?:```|~~~)[^\n]*\n.*?^[ \t]*(?:```|~~~)[ \t]*$",
+    re.MULTILINE | re.DOTALL,
+)
+INLINE_MARKDOWN_CODE_RE = re.compile(r"(?P<ticks>`+)[^\n]*?(?P=ticks)")
 ATTACHMENT_TYPES = {
     ".pdf": ("application/pdf", "PDF"),
     ".png": ("image/png", "PNG"),
@@ -670,6 +676,7 @@ def handle_typeset(
             title = f"Assistant answer · {time_label}" if time_label else "Assistant answer"
             assistant_jobs.append((index, record.text, title))
             item["attachments"] = attachment_link_payload(path, record)
+            item["externalLinks"] = external_link_payload(record.text)
         payload_records.append(item)
 
     def attach_result(index: int, result: typeset.TypesetResult) -> None:
@@ -734,6 +741,57 @@ def local_attachment_links(markdown: str) -> list[tuple[str, Path]]:
             continue
         links.append((label or candidate.name, candidate))
     return links
+
+
+def _without_markdown_code(markdown: str) -> str:
+    without_fences = FENCED_MARKDOWN_CODE_RE.sub("", markdown)
+    return INLINE_MARKDOWN_CODE_RE.sub("", without_fences)
+
+
+def _external_url(target: str) -> str | None:
+    candidate = target.strip()
+    if candidate.startswith("<") and candidate.endswith(">"):
+        candidate = candidate[1:-1].strip()
+    else:
+        candidate = candidate.split(maxsplit=1)[0]
+    candidate = candidate.rstrip(".,;:!?")
+    while candidate.endswith(")") and candidate.count(")") > candidate.count("("):
+        candidate = candidate[:-1]
+    candidate = candidate.rstrip("]}")
+    if candidate.count("(") > candidate.count(")"):
+        return None
+    parsed = urlparse(candidate)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        return None
+    return candidate
+
+
+def external_link_payload(markdown: str) -> list[dict[str, str]]:
+    text = _without_markdown_code(markdown)
+    candidates: list[tuple[int, int, str, str]] = []
+    for match in MARKDOWN_LINK_RE.finditer(text):
+        url = _external_url(match.group(2))
+        if url:
+            candidates.append((match.start(), 0, match.group(1).strip() or url, url))
+    for match in EXTERNAL_URL_RE.finditer(text):
+        url = _external_url(match.group(0))
+        if url:
+            candidates.append((match.start(), 1, url, url))
+
+    payload: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for _, _, label, url in sorted(candidates):
+        if url in seen:
+            continue
+        seen.add(url)
+        payload.append(
+            {
+                "label": label,
+                "url": url,
+                "host": urlparse(url).hostname or "",
+            }
+        )
+    return payload
 
 
 def validated_attachment(path: Path) -> tuple[Path, str, str]:
@@ -2606,19 +2664,27 @@ h2 {
   border-radius: 0 0 8px 8px;
 }
 
-.typeset-pdf-page.has-attachments {
+.typeset-pdf-page.has-resources {
   border-bottom: 0;
   border-radius: 8px 8px 0 0;
 }
 
-.typeset-external-header + .typeset-pdf-page.has-attachments {
+.typeset-fallback.has-resources {
+  border-bottom: 0;
+  border-radius: 8px 8px 0 0;
+}
+
+.typeset-external-header + .typeset-pdf-page.has-resources {
+  border-radius: 0;
+}
+
+.typeset-external-header + .typeset-fallback.has-resources {
   border-radius: 0;
 }
 
 .typeset-attachments {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
+  display: grid;
+  gap: 6px;
   width: min(760px, 100%);
   margin: 0 auto;
   padding: 8px 11px;
@@ -2631,8 +2697,16 @@ h2 {
   font-size: 11px;
 }
 
-.typeset-attachments strong {
+.typeset-resource-group {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.typeset-resource-group strong {
   flex: 0 0 auto;
+  min-width: 68px;
   color: var(--accent-dark);
 }
 
@@ -4486,7 +4560,8 @@ function typesetDebugBar(record) {
 
 function pdfPage(record) {
   const url = record.typeset?.pdfUrl || "";
-  const linkClass = record.attachments?.length ? " has-attachments" : "";
+  const hasResources = record.attachments?.length || record.externalLinks?.length;
+  const linkClass = hasResources ? " has-resources" : "";
   return `
     <div class="typeset-pdf-page is-loading${linkClass}" data-pdf-url="${escapeHtml(url)}"
       data-copy-line="${escapeHtml(record.line_no)}">
@@ -4495,18 +4570,34 @@ function pdfPage(record) {
   `;
 }
 
-function attachmentLinks(record) {
-  const links = Array.isArray(record.attachments) ? record.attachments : [];
-  if (!links.length) return "";
-  const heading = links.length === 1 ? "Attachment" : "Attachments";
+function resourceLinks(record) {
+  const attachments = Array.isArray(record.attachments) ? record.attachments : [];
+  const externalLinks = Array.isArray(record.externalLinks) ? record.externalLinks : [];
+  if (!attachments.length && !externalLinks.length) return "";
+  const attachmentHeading = attachments.length === 1 ? "Attachment" : "Attachments";
+  const linkHeading = externalLinks.length === 1 ? "Link" : "Links";
   return `
     <footer class="typeset-attachments">
-      <strong>${heading}</strong>
-      <span class="typeset-attachment-list">
-        ${links.map((link) => `
-          <a href="${escapeHtml(link.url)}" target="_blank" rel="noopener">${escapeHtml(link.label)}<span class="typeset-attachment-kind">${escapeHtml(link.kind)}</span> ↗</a>
-        `).join("")}
-      </span>
+      ${attachments.length ? `
+        <div class="typeset-resource-group">
+          <strong>${attachmentHeading}</strong>
+          <span class="typeset-attachment-list">
+            ${attachments.map((link) => `
+              <a href="${escapeHtml(link.url)}" target="_blank" rel="noopener">${escapeHtml(link.label)}<span class="typeset-attachment-kind">${escapeHtml(link.kind)}</span> ↗</a>
+            `).join("")}
+          </span>
+        </div>
+      ` : ""}
+      ${externalLinks.length ? `
+        <div class="typeset-resource-group">
+          <strong>${linkHeading}</strong>
+          <span class="typeset-attachment-list">
+            ${externalLinks.map((link) => `
+              <a href="${escapeHtml(link.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(link.label)}${link.label !== link.url ? `<span class="typeset-attachment-kind">${escapeHtml(link.host)}</span>` : ""} ↗</a>
+            `).join("")}
+          </span>
+        </div>
+      ` : ""}
     </footer>
   `;
 }
@@ -4544,8 +4635,10 @@ function externalTypesetHeader(record, showLabel = true) {
 
 function renderFallback(record, message = "") {
   const note = message ? `<p class="typeset-error">${escapeHtml(message)}</p>` : "";
+  const hasResources = record.attachments?.length || record.externalLinks?.length;
+  const resourceClass = hasResources ? " has-resources" : "";
   return `
-    <div class="typeset-fallback">
+    <div class="typeset-fallback${resourceClass}">
       ${note}
       <div class="message-body">${renderMarkdown(record.text || "")}</div>
     </div>
@@ -4573,7 +4666,7 @@ function renderRecord(record, index, records) {
         ${debugBar}
         ${externalHeader}
         ${body}
-        ${attachmentLinks(record)}
+        ${resourceLinks(record)}
       </section>
     `;
   }

@@ -26,6 +26,8 @@ Examples:
   codex-tools search "stored sessions" --context-turns 2 --matches 3
   codex-tools search "JSONDecodeError" --include-tools --role tool
   codex-tools search "sidescribe price" --since 2026-09-01 --role user
+  codex-tools search "render failure" --here
+  codex-tools search --list --work-dir ~/projects/codex-tools
   codex-tools search --list --limit 20
   codex-tools diagnose
 
@@ -203,6 +205,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--until",
         help="Only include sessions with records at or before this date/time.",
+    )
+    work_dir_group = parser.add_mutually_exclusive_group()
+    work_dir_group.add_argument(
+        "--here",
+        action="store_true",
+        help="Only include conversations started from the current directory.",
+    )
+    work_dir_group.add_argument(
+        "--work-dir",
+        type=Path,
+        metavar="PATH",
+        help="Only include conversations started from this directory.",
     )
     parser.add_argument(
         "--list",
@@ -941,6 +955,28 @@ def session_updated_at(session: Session) -> str:
 
 def session_sort_key(session: Session) -> str:
     return session_updated_at(session) or session.created_at or session.path.name
+
+
+def canonical_work_dir(path: Path) -> Path:
+    return path.expanduser().resolve(strict=False)
+
+
+def selected_work_dir(
+    args: argparse.Namespace, current_dir: Path | None = None
+) -> Path | None:
+    if args.here:
+        return canonical_work_dir(current_dir or Path.cwd())
+    if args.work_dir is not None:
+        return canonical_work_dir(args.work_dir)
+    return None
+
+
+def session_matches_work_dir(session: Session, work_dir: Path | None) -> bool:
+    if work_dir is None:
+        return True
+    if not session.cwd:
+        return False
+    return canonical_work_dir(Path(session.cwd)) == work_dir
 
 
 def use_color(args: argparse.Namespace) -> bool:
@@ -1688,9 +1724,17 @@ def main(argv: list[str] | None = None) -> int:
     if not args.query and not args.list:
         print("error: provide a query, or use --list", file=sys.stderr)
         return 2
+    if args.source == "sqlite" and (args.here or args.work_dir is not None):
+        print(
+            "error: --here and --work-dir require the default JSONL source; "
+            "SQLite thread history does not contain working-directory metadata",
+            file=sys.stderr,
+        )
+        return 2
 
     use_jsonl = args.source == "jsonl"
     use_sqlite = args.source == "sqlite"
+    work_dir = selected_work_dir(args)
 
     paths = list(iter_jsonl_paths(args.sessions_root)) if use_jsonl else []
     if use_jsonl and args.include_archive:
@@ -1715,6 +1759,8 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     for session in all_sessions:
+        if not session_matches_work_dir(session, work_dir):
+            continue
         if not session_in_date_range(session, since, until):
             continue
         resolve_session_title(session, titles)
