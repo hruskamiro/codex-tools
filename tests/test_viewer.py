@@ -185,11 +185,24 @@ class ViewerCommandTests(unittest.TestCase):
         self.assertIn('token.startsWith("“")', viewer.VIEW_JS)
         self.assertIn('token.startsWith("‘")', viewer.VIEW_JS)
 
-    def test_message_navigation_keeps_a_cursor_near_the_page_end(self) -> None:
+    def test_message_navigation_is_bounded_by_one_viewport(self) -> None:
         for script in (viewer.VIEW_JS, viewer.TYPESET_JS):
             self.assertIn("let messageNavigationIndex = -1", script)
-            self.assertIn("cursorIsVisible", script)
-            self.assertIn("messageNavigationIndex = nextIndex", script)
+            self.assertIn("function directionalMessageIndex", script)
+            self.assertIn("const pageDistance = Math.max(1, window.innerHeight)", script)
+            self.assertIn("Math.abs(targetDistance) <= pageDistance", script)
+            self.assertIn(
+                "direction * Math.min(Math.abs(targetDistance), pageDistance)",
+                script,
+            )
+            self.assertIn(
+                'window.scrollBy({ top: movement, left: 0, behavior: "auto" })',
+                script,
+            )
+            self.assertIn(
+                "window.scrollBy({ top: direction * pageDistance", script
+            )
+            self.assertNotIn("cursorIsVisible", script)
 
     def test_refresh_reports_progress_and_preserves_the_visible_message(self) -> None:
         for html in (viewer.VIEW_HTML, viewer.TYPESET_HTML):
@@ -586,7 +599,7 @@ https://fenced.example/ignored
             self.assertIn("function setNavigationCurrent(message)", script)
             self.assertIn('classList.add("is-navigation-current")', script)
             self.assertIn('setAttribute("aria-current", "true")', script)
-            self.assertIn("setNavigationCurrent(messages[nextIndex])", script)
+            self.assertIn("messageNavigationIndex = targetIndex", script)
             self.assertIn("setNavigationCurrent(target)", script)
 
         self.assertIn(".message.is-navigation-current::before", viewer.APP_CSS)

@@ -76,7 +76,8 @@ between Markdown and the LaTeX view. In the LaTeX view, local attachments and
 external links from each assistant answer are collected in a footer below it.
 Hold `Shift` briefly to reveal `[1]`–`[9]` hints for footer links currently in
 the viewport, then press the corresponding digit while still holding `Shift`
-to open one in a new tab.
+to open one in a new tab. The left and right arrows move toward the previous or
+next message boundary, but never farther than one viewport per press.
 
 ![Codex Viewer showing the symmetry of Riemann zeta zeros](docs/assets/codex-viewer-riemann-symmetry.png)
 

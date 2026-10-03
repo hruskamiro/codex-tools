@@ -1909,8 +1909,8 @@ VIEW_HTML = """<!doctype html>
     <nav id="viewStatusbar" class="view-statusbar" aria-label="Conversation navigation">
       <button id="statusbarToggle" class="statusbar-toggle" type="button" title="Show navigation" aria-label="Show navigation" aria-expanded="false" aria-controls="statusbarActions">/</button>
       <div id="statusbarActions" class="statusbar-actions">
-        <button id="jumpPrevious" class="status-button icon-status-button" type="button" title="Previous block (Left Arrow)" aria-label="Previous block, Left Arrow shortcut">←</button>
-        <button id="jumpNext" class="status-button icon-status-button" type="button" title="Next block (Right Arrow)" aria-label="Next block, Right Arrow shortcut">→</button>
+        <button id="jumpPrevious" class="status-button icon-status-button" type="button" title="Previous block or page (Left Arrow)" aria-label="Previous block or page, Left Arrow shortcut">←</button>
+        <button id="jumpNext" class="status-button icon-status-button" type="button" title="Next block or page (Right Arrow)" aria-label="Next block or page, Right Arrow shortcut">→</button>
         <button id="jumpTop" class="status-button" type="button">Up <kbd>U</kbd></button>
         <button id="jumpLatest" class="status-button" type="button">Latest <kbd>L</kbd></button>
         <button id="loadEarlier" class="status-button" type="button">Earlier <kbd>E</kbd></button>
@@ -1961,8 +1961,8 @@ TYPESET_HTML = """<!doctype html>
     <nav id="viewStatusbar" class="view-statusbar" aria-label="Typeset conversation navigation">
       <button id="statusbarToggle" class="statusbar-toggle" type="button" title="Show navigation" aria-label="Show navigation" aria-expanded="false" aria-controls="statusbarActions">/</button>
       <div id="statusbarActions" class="statusbar-actions">
-        <button id="jumpPrevious" class="status-button icon-status-button" type="button" title="Previous block (Left Arrow)" aria-label="Previous block, Left Arrow shortcut">←</button>
-        <button id="jumpNext" class="status-button icon-status-button" type="button" title="Next block (Right Arrow)" aria-label="Next block, Right Arrow shortcut">→</button>
+        <button id="jumpPrevious" class="status-button icon-status-button" type="button" title="Previous block or page (Left Arrow)" aria-label="Previous block or page, Left Arrow shortcut">←</button>
+        <button id="jumpNext" class="status-button icon-status-button" type="button" title="Next block or page (Right Arrow)" aria-label="Next block or page, Right Arrow shortcut">→</button>
         <button id="jumpTop" class="status-button" type="button">Up <kbd>U</kbd></button>
         <button id="jumpLatest" class="status-button" type="button">Latest <kbd>L</kbd></button>
         <button id="loadEarlier" class="status-button" type="button">Earlier <kbd>E</kbd></button>
@@ -4059,27 +4059,51 @@ function scrollToMessageLine(lineNo) {
   return true;
 }
 
-function activeMessageIndex() {
-  const messages = Array.from(els.conversation.querySelectorAll(".message"));
-  if (!messages.length) return -1;
-  const current = firstVisibleMessage();
-  const index = messages.indexOf(current);
-  return index >= 0 ? index : 0;
+function messageScrollMargin(message) {
+  const margin = Number.parseFloat(window.getComputedStyle(message).scrollMarginTop);
+  return Number.isFinite(margin) ? margin : 0;
+}
+
+function directionalMessageIndex(messages, direction, anchorTop) {
+  const tolerance = 2;
+  if (direction > 0) {
+    return messages.findIndex(
+      (message) => message.getBoundingClientRect().top > anchorTop + tolerance,
+    );
+  }
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].getBoundingClientRect().top < anchorTop - tolerance) return index;
+  }
+  return -1;
 }
 
 function jumpMessage(delta) {
   const messages = Array.from(els.conversation.querySelectorAll(".message"));
   if (!messages.length) return;
-  const cursor = messages[messageNavigationIndex];
-  const cursorRect = cursor?.getBoundingClientRect();
-  const cursorIsVisible = Boolean(
-    cursorRect && cursorRect.bottom > 8 && cursorRect.top < window.innerHeight,
-  );
-  const baseIndex = cursorIsVisible ? messageNavigationIndex : activeMessageIndex();
-  const nextIndex = Math.max(0, Math.min(messages.length - 1, baseIndex + delta));
-  messageNavigationIndex = nextIndex;
-  setNavigationCurrent(messages[nextIndex]);
-  messages[nextIndex].scrollIntoView({ block: "start" });
+  const direction = delta < 0 ? -1 : 1;
+  const anchorTop = messageScrollMargin(messages[0]);
+  const targetIndex = directionalMessageIndex(messages, direction, anchorTop);
+  const pageDistance = Math.max(1, window.innerHeight);
+  if (targetIndex < 0) {
+    messageNavigationIndex = -1;
+    setNavigationCurrent(null);
+    window.scrollBy({ top: direction * pageDistance, left: 0, behavior: "auto" });
+    return;
+  }
+
+  const target = messages[targetIndex];
+  const targetDistance = target.getBoundingClientRect().top - messageScrollMargin(target);
+  if (Math.abs(targetDistance) <= pageDistance) {
+    messageNavigationIndex = targetIndex;
+    setNavigationCurrent(target);
+    target.scrollIntoView({ block: "start" });
+    return;
+  }
+
+  messageNavigationIndex = -1;
+  setNavigationCurrent(null);
+  const movement = direction * Math.min(Math.abs(targetDistance), pageDistance);
+  window.scrollBy({ top: movement, left: 0, behavior: "auto" });
 }
 
 function updateLoadButtons(data) {
@@ -4993,27 +5017,51 @@ function scrollToMessageLine(lineNo) {
   return true;
 }
 
-function activeMessageIndex() {
-  const messages = Array.from(els.conversation.querySelectorAll(".message"));
-  if (!messages.length) return -1;
-  const current = firstVisibleMessage();
-  const index = messages.indexOf(current);
-  return index >= 0 ? index : 0;
+function messageScrollMargin(message) {
+  const margin = Number.parseFloat(window.getComputedStyle(message).scrollMarginTop);
+  return Number.isFinite(margin) ? margin : 0;
+}
+
+function directionalMessageIndex(messages, direction, anchorTop) {
+  const tolerance = 2;
+  if (direction > 0) {
+    return messages.findIndex(
+      (message) => message.getBoundingClientRect().top > anchorTop + tolerance,
+    );
+  }
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].getBoundingClientRect().top < anchorTop - tolerance) return index;
+  }
+  return -1;
 }
 
 function jumpMessage(delta) {
   const messages = Array.from(els.conversation.querySelectorAll(".message"));
   if (!messages.length) return;
-  const cursor = messages[messageNavigationIndex];
-  const cursorRect = cursor?.getBoundingClientRect();
-  const cursorIsVisible = Boolean(
-    cursorRect && cursorRect.bottom > 8 && cursorRect.top < window.innerHeight,
-  );
-  const baseIndex = cursorIsVisible ? messageNavigationIndex : activeMessageIndex();
-  const nextIndex = Math.max(0, Math.min(messages.length - 1, baseIndex + delta));
-  messageNavigationIndex = nextIndex;
-  setNavigationCurrent(messages[nextIndex]);
-  messages[nextIndex].scrollIntoView({ block: "start" });
+  const direction = delta < 0 ? -1 : 1;
+  const anchorTop = messageScrollMargin(messages[0]);
+  const targetIndex = directionalMessageIndex(messages, direction, anchorTop);
+  const pageDistance = Math.max(1, window.innerHeight);
+  if (targetIndex < 0) {
+    messageNavigationIndex = -1;
+    setNavigationCurrent(null);
+    window.scrollBy({ top: direction * pageDistance, left: 0, behavior: "auto" });
+    return;
+  }
+
+  const target = messages[targetIndex];
+  const targetDistance = target.getBoundingClientRect().top - messageScrollMargin(target);
+  if (Math.abs(targetDistance) <= pageDistance) {
+    messageNavigationIndex = targetIndex;
+    setNavigationCurrent(target);
+    target.scrollIntoView({ block: "start" });
+    return;
+  }
+
+  messageNavigationIndex = -1;
+  setNavigationCurrent(null);
+  const movement = direction * Math.min(Math.abs(targetDistance), pageDistance);
+  window.scrollBy({ top: movement, left: 0, behavior: "auto" });
 }
 
 function scrollToLatestAssistant() {
