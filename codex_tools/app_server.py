@@ -616,7 +616,10 @@ def run_structured_task(
     try:
         request(
             "initialize",
-            {"clientInfo": {"name": APP_NAME, "title": APP_NAME, "version": __version__}},
+            {
+                "clientInfo": {"name": APP_NAME, "title": APP_NAME, "version": __version__},
+                "capabilities": {"experimentalApi": True},
+            },
         )
         send({"method": "initialized", "params": {}})
         thread = request(

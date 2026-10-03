@@ -31,6 +31,7 @@ for line in sys.stdin:
     message = json.loads(line)
     method = message.get("method")
     if method == "initialize":
+        assert message["params"]["capabilities"]["experimentalApi"] is True
         print(json.dumps({"id": message["id"], "result": {}}), flush=True)
     elif method == "thread/start":
         print(json.dumps({"id": message["id"], "result": {
