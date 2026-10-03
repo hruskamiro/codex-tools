@@ -76,6 +76,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     batch.add_argument("--codex-bin", default="codex", help="Codex executable.")
     add_backend_arguments(batch)
+    batch.add_argument(
+        "--usage-codex-home", type=Path,
+        default=app_server.DEFAULT_USAGE_CODEX_HOME,
+        help=("Authenticated Codex home used for account-wide usage snapshots. "
+              f"Default: {app_server.DEFAULT_USAGE_CODEX_HOME}"),
+    )
     check = commands.add_parser(
         "check", help="Verify an individual run or complete batch directory."
     )
@@ -464,6 +470,7 @@ def run_batch(
     default_home: Path = manager.DEFAULT_CODEX_HOME,
     connection_root: Path = app_server.DEFAULT_ROOT,
     app_server_home: Path = app_server.DEFAULT_CODEX_HOME,
+    usage_codex_home: Path = app_server.DEFAULT_USAGE_CODEX_HOME,
 ) -> dict:
     if jobs <= 0:
         raise ValueError("--jobs must be a positive integer")
@@ -505,6 +512,14 @@ def run_batch(
     tasks_dir = batch_dir / "tasks"
     stored_manifest_path = batch_dir / "manifest.json"
     summary_path = batch_dir / "summary.json"
+    previous_subscription = None
+    if summary_path.exists():
+        try:
+            previous_summary = load_json(summary_path)
+            if isinstance(previous_summary, dict):
+                previous_subscription = previous_summary.get("subscription_usage")
+        except (json.JSONDecodeError, OSError):
+            pass
 
     if stored_manifest_path.exists():
         stored_manifest = load_json(stored_manifest_path)
@@ -594,9 +609,42 @@ def run_batch(
                 "usage": usage,
             }
 
+    subscription_before = None
+    subscription_after = None
+    subscription_errors = []
+    if backend == "app-server" and pending:
+        try:
+            subscription_before = app_server.rate_limits(
+                min(timeout_override or 120, 120), codex_bin, usage_codex_home,
+            )
+        except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
+            subscription_errors.append(f"before: {exc}")
+
+    def subscription_usage() -> dict | None:
+        if backend != "app-server":
+            return None
+        if not pending and isinstance(previous_subscription, dict) and previous_subscription.get(
+            "measured"
+        ):
+            return {**previous_subscription, "preserved_from_previous_run": True}
+        return {
+            "attempted": bool(pending),
+            "measured": (
+                isinstance(subscription_before, dict)
+                and isinstance(subscription_after, dict)
+            ),
+            "before": subscription_before,
+            "after": subscription_after,
+            "delta": app_server.rate_limit_delta(
+                subscription_before, subscription_after
+            ),
+            "errors": subscription_errors,
+            "precision_note": "Usage percentages are integer-rounded account snapshots.",
+        }
+
     def build_summary(status: str) -> dict:
         ordered_records = [records[task["id"]] for task in tasks]
-        return {
+        summary = {
             "status": status,
             "started_at": started_at,
             "finished_at": utc_now() if status != "running" else None,
@@ -636,6 +684,9 @@ def run_batch(
             ),
             "tasks": ordered_records,
         }
+        if backend == "app-server":
+            summary["subscription_usage"] = subscription_usage()
+        return summary
 
     atomic_write_json(summary_path, build_summary("running"))
     with ThreadPoolExecutor(max_workers=jobs) as executor:
@@ -644,6 +695,14 @@ def run_batch(
             task_id, update = future.result()
             records[task_id].update(update)
             atomic_write_json(summary_path, build_summary("running"))
+
+    if backend == "app-server" and pending:
+        try:
+            subscription_after = app_server.rate_limits(
+                min(timeout_override or 120, 120), codex_bin, usage_codex_home,
+            )
+        except (OSError, RuntimeError, TimeoutError, ValueError) as exc:
+            subscription_errors.append(f"after: {exc}")
 
     selected_successful = all(
         records[task["id"]]["status"] in {"success", "skipped"}
@@ -760,6 +819,7 @@ def check_path(path: Path) -> dict:
             }
         reports = [check_run(path / "tasks" / task_id) for task_id in task_ids]
         errors = []
+        summary = None
         summary_path = path / "summary.json"
         if not summary_path.is_file():
             errors.append("missing summary.json")
@@ -784,6 +844,10 @@ def check_path(path: Path) -> dict:
             "ok": not errors and all(report["ok"] for report in reports),
             "errors": errors,
             "usage": summed_usage(reports),
+            "subscription_usage": (
+                summary.get("subscription_usage")
+                if isinstance(summary, dict) else None
+            ),
             "tasks": reports,
         }
     return check_run(path)
@@ -831,6 +895,7 @@ def main(argv: list[str] | None = None) -> int:
                 default_home=args.default_home,
                 connection_root=args.connection_root,
                 app_server_home=args.app_server_home,
+                usage_codex_home=args.usage_codex_home,
             )
             if result["status"] != "success":
                 exit_code = 1

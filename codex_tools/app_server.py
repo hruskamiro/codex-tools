@@ -39,6 +39,7 @@ SCOPES = "openid profile email offline_access resource.invoke chatgpt.tokens.use
 SHARING_SCOPE = "chatgpt.tokens.use.direct"
 DEFAULT_ROOT = paths.user_config_dir() / "app-server"
 DEFAULT_CODEX_HOME = paths.user_state_dir() / "app-server" / "codex-home"
+DEFAULT_USAGE_CODEX_HOME = Path("~/.codex").expanduser()
 BASE_INSTRUCTIONS = "Complete the requested structured task. Do not use tools. Return only the schema-conforming result."
 TOKEN_EXPIRY_MARGIN_SECONDS = 60
 
@@ -489,6 +490,198 @@ def app_server_command(codex_bin: str = "codex") -> list[str]:
     ]
 
 
+def initialize_params() -> dict[str, Any]:
+    return {
+        "clientInfo": {"name": APP_NAME, "title": APP_NAME, "version": __version__},
+        "capabilities": {"experimentalApi": True},
+    }
+
+
+def request_app_server(
+    *, method: str, params: dict[str, Any], access_token_value: str | None,
+    timeout: int = 120, codex_bin: str = "codex",
+    codex_home: Path = DEFAULT_CODEX_HOME,
+    isolated: bool = True,
+) -> dict[str, Any]:
+    codex_home = codex_home.expanduser().resolve()
+    if isolated:
+        paths.ensure_private_dir(codex_home)
+        runtime = tempfile.TemporaryDirectory(prefix="runtime-", dir=codex_home)
+        runtime_home = Path(runtime.name)
+        workspace = runtime_home / "workspace"
+        paths.ensure_private_dir(workspace)
+    else:
+        if not codex_home.is_dir():
+            raise FileNotFoundError(f"Codex home does not exist: {codex_home}")
+        runtime = tempfile.TemporaryDirectory(prefix="codex-tools-usage-")
+        runtime_home = codex_home
+        workspace = Path(runtime.name)
+    env = dict(os.environ)
+    if access_token_value is not None:
+        env["ACCESS_TOKEN"] = access_token_value
+    else:
+        env.pop("ACCESS_TOKEN", None)
+    env["CODEX_HOME"] = str(runtime_home)
+    process = subprocess.Popen(
+        app_server_command(codex_bin), cwd=workspace, env=env,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, bufsize=1,
+    )
+    assert process.stdin is not None and process.stdout is not None and process.stderr is not None
+    stderr_parts: list[str] = []
+    stderr_thread = threading.Thread(
+        target=lambda: stderr_parts.extend(process.stderr.readlines()), daemon=True
+    )
+    stderr_thread.start()
+    stdout_lines: Queue[str | None] = Queue()
+
+    def read_stdout() -> None:
+        for line in process.stdout:
+            stdout_lines.put(line)
+        stdout_lines.put(None)
+
+    stdout_thread = threading.Thread(target=read_stdout, daemon=True)
+    stdout_thread.start()
+    deadline = time.monotonic() + timeout
+
+    def send(payload: dict[str, Any]) -> None:
+        process.stdin.write(json.dumps(payload, separators=(",", ":")) + "\n")
+        process.stdin.flush()
+
+    def request(request_id: int, request_method: str, request_params: dict[str, Any]) -> dict[str, Any]:
+        send({"method": request_method, "id": request_id, "params": request_params})
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(app_server_command(codex_bin), timeout)
+            try:
+                line = stdout_lines.get(timeout=remaining)
+            except Empty as exc:
+                raise subprocess.TimeoutExpired(app_server_command(codex_bin), timeout) from exc
+            if line is None:
+                detail = "".join(stderr_parts).strip()
+                raise RuntimeError(
+                    f"codex app-server exited with status {process.poll()}"
+                    + (f": {detail}" if detail else "")
+                )
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if message.get("id") != request_id:
+                continue
+            if message.get("error"):
+                raise RuntimeError(
+                    f"app-server {request_method} failed: {message['error']}"
+                )
+            result = message.get("result")
+            return result if isinstance(result, dict) else {}
+
+    try:
+        request(1, "initialize", initialize_params())
+        send({"method": "initialized", "params": {}})
+        return request(2, method, params)
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        stdout_thread.join(timeout=2)
+        stderr_thread.join(timeout=2)
+        process.stdin.close()
+        process.stdout.close()
+        process.stderr.close()
+        runtime.cleanup()
+
+
+def _rate_limit_window(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict) or not isinstance(value.get("usedPercent"), int):
+        return None
+    resets_at = value.get("resetsAt")
+    return {
+        "used_percent": value["usedPercent"],
+        "remaining_percent": max(0, 100 - value["usedPercent"]),
+        "window_duration_minutes": value.get("windowDurationMins"),
+        "resets_at": resets_at,
+        "resets_at_utc": (
+            datetime.fromtimestamp(resets_at, timezone.utc).isoformat()
+            if isinstance(resets_at, int) else None
+        ),
+    }
+
+
+def public_rate_limits(response: dict[str, Any]) -> dict[str, Any]:
+    raw_limits = response.get("rateLimitsByLimitId")
+    if not isinstance(raw_limits, dict):
+        single = response.get("rateLimits")
+        raw_limits = {"codex": single} if isinstance(single, dict) else {}
+    limits = {}
+    for limit_id, raw in raw_limits.items():
+        if not isinstance(raw, dict):
+            continue
+        limits[str(limit_id)] = {
+            "limit_name": raw.get("limitName"),
+            "normal_model_slug": raw.get("normalModelSlug"),
+            "plan_type": raw.get("planType"),
+            "primary": _rate_limit_window(raw.get("primary")),
+            "secondary": _rate_limit_window(raw.get("secondary")),
+            "credits": raw.get("credits"),
+            "spend_control_reached": raw.get("spendControlReached"),
+            "rate_limit_reached_type": raw.get("rateLimitReachedType"),
+        }
+    reset_credits = response.get("rateLimitResetCredits")
+    return {
+        "captured_at": utc_now(),
+        "ordinary_usage_allowed": response.get("ordinaryUsageAllowed"),
+        "limits": limits,
+        "reset_credits_available": (
+            reset_credits.get("availableCount")
+            if isinstance(reset_credits, dict) else None
+        ),
+    }
+
+
+def rate_limits(
+    timeout: int = 120, codex_bin: str = "codex",
+    codex_home: Path = DEFAULT_USAGE_CODEX_HOME,
+) -> dict[str, Any]:
+    codex_home = codex_home.expanduser().resolve()
+    response = request_app_server(
+        method="account/rateLimits/read",
+        params={"excludeResetCreditDetails": True, "supportsLunaReserve": False},
+        access_token_value=None, timeout=timeout, codex_bin=codex_bin,
+        codex_home=codex_home, isolated=False,
+    )
+    return {
+        **public_rate_limits(response),
+        "source": {"kind": "codex-home", "path": str(codex_home)},
+    }
+
+
+def rate_limit_delta(before: Any, after: Any) -> dict[str, Any]:
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return {}
+    before_limits = before.get("limits", {})
+    after_limits = after.get("limits", {})
+    deltas = {}
+    for limit_id in sorted(set(before_limits) & set(after_limits)):
+        first = before_limits[limit_id].get("primary")
+        last = after_limits[limit_id].get("primary")
+        if not isinstance(first, dict) or not isinstance(last, dict):
+            continue
+        same_window = first.get("resets_at") == last.get("resets_at")
+        deltas[limit_id] = {
+            "same_window": same_window,
+            "used_percentage_points": (
+                last["used_percent"] - first["used_percent"] if same_window else None
+            ),
+        }
+    return deltas
+
+
 @dataclass
 class AppServerResult:
     returncode: int
@@ -616,10 +809,7 @@ def run_structured_task(
     try:
         request(
             "initialize",
-            {
-                "clientInfo": {"name": APP_NAME, "title": APP_NAME, "version": __version__},
-                "capabilities": {"experimentalApi": True},
-            },
+            initialize_params(),
         )
         send({"method": "initialized", "params": {}})
         thread = request(
@@ -695,6 +885,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     login.add_argument("--timeout", type=int, default=600)
     status = commands.add_parser("status", help="Show a saved connection.")
     status.add_argument("--connection", type=valid_name, default="default")
+    usage = commands.add_parser("usage", help="Show current ChatGPT-plan usage windows.")
+    usage.add_argument("--timeout", type=int, default=120)
+    usage.add_argument("--codex-bin", default="codex")
+    usage.add_argument(
+        "--codex-home", type=Path, default=DEFAULT_USAGE_CODEX_HOME,
+        help=f"Authenticated Codex home. Default: {DEFAULT_USAGE_CODEX_HOME}",
+    )
     commands.add_parser("list", help="List saved connections.")
     logout = commands.add_parser("logout", help="Revoke a connection's renewable session.")
     logout.add_argument("--connection", type=valid_name, default="default")
@@ -722,6 +919,10 @@ def main(argv: list[str] | None = None) -> int:
                     f"app-server connection does not exist: {args.connection}"
                 )
             result = public_connection(connection)
+        elif args.command == "usage":
+            result = rate_limits(
+                args.timeout, args.codex_bin, args.codex_home,
+            )
         elif args.command == "list":
             saved = load_connections(args.root)["connections"]
             result = [public_connection(saved[name]) for name in sorted(saved)]

@@ -31,6 +31,7 @@ Examples:
   codex-tools viewer
   codex-tools manager list
   codex-tools app-server status
+  codex-tools app-server usage
   codex-tools alias install
   codex-tools structured run --prompt prompt.txt --schema schema.json --run-dir run --model gpt-5.6-sol
   codex-tools structured batch batch.json --batch-dir runs/batch-001 --jobs 4

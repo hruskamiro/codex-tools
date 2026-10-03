@@ -88,7 +88,7 @@ class AliasTests(unittest.TestCase):
             "today yesterday day week model site clean",
             "serve start restart stop status open pick doctor",
             "new rename export import list run install uninstall remove rm delete path doctor repair",
-            "login status list logout test",
+            "login status usage list logout test",
             "install remove list",
             "run batch check",
             "show path edit validate set unset",

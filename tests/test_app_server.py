@@ -33,6 +33,15 @@ for line in sys.stdin:
     if method == "initialize":
         assert message["params"]["capabilities"]["experimentalApi"] is True
         print(json.dumps({"id": message["id"], "result": {}}), flush=True)
+    elif method == "account/rateLimits/read":
+        print(json.dumps({"id": message["id"], "result": {
+            "ordinaryUsageAllowed": True,
+            "rateLimits": {
+                "limitId": "codex", "planType": "prolite",
+                "primary": {"usedPercent": 18, "windowDurationMins": 10080,
+                            "resetsAt": 1791621434}
+            }
+        }}), flush=True)
     elif method == "thread/start":
         print(json.dumps({"id": message["id"], "result": {
             "thread": {"id": "app-thread"}
@@ -211,6 +220,7 @@ for line in sys.stdin:
             }
             manifest_path = root / "batch.json"
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            (root / "usage-home").mkdir()
             with patch.object(app_server, "access_token", return_value="plan-token"):
                 summary = structured.run_batch(
                     manifest=manifest, manifest_path=manifest_path,
@@ -219,12 +229,22 @@ for line in sys.stdin:
                     backend="app-server", connection="work",
                     connection_root=root / "connections",
                     app_server_home=root / "app-home",
+                    usage_codex_home=root / "usage-home",
                 )
 
             self.assertEqual(summary["status"], "success")
             self.assertEqual(summary["counts"]["success"], 2)
             self.assertEqual(summary["usage"]["input_tokens"], 16)
             self.assertEqual(summary["connection"], "work")
+            subscription = summary["subscription_usage"]
+            self.assertTrue(subscription["measured"])
+            self.assertEqual(
+                subscription["before"]["limits"]["codex"]["primary"]["used_percent"],
+                18,
+            )
+            self.assertEqual(
+                subscription["delta"]["codex"]["used_percentage_points"], 0
+            )
             self.assertEqual(list((root / "app-home").glob("runtime-*")), [])
             for record in summary["tasks"]:
                 metadata = json.loads(
@@ -232,6 +252,36 @@ for line in sys.stdin:
                 )
                 self.assertEqual(metadata["backend"], "app-server")
                 self.assertEqual(metadata["connection"], "work")
+
+            with patch.object(app_server, "access_token", return_value="plan-token"):
+                repeated = structured.run_batch(
+                    manifest=manifest, manifest_path=manifest_path,
+                    batch_dir=root / "batch", jobs=2,
+                    codex_bin=str(self.make_fake_codex(root)),
+                    backend="app-server", connection="work",
+                    connection_root=root / "connections",
+                    app_server_home=root / "app-home",
+                    usage_codex_home=root / "usage-home",
+                )
+            self.assertTrue(repeated["subscription_usage"]["measured"])
+            self.assertTrue(
+                repeated["subscription_usage"]["preserved_from_previous_run"]
+            )
+
+    def test_rate_limits_returns_public_normalized_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "usage-home").mkdir()
+            snapshot = app_server.rate_limits(
+                30, str(self.make_fake_codex(root)), root / "usage-home",
+            )
+
+            primary = snapshot["limits"]["codex"]["primary"]
+            self.assertEqual(primary["used_percent"], 18)
+            self.assertEqual(primary["remaining_percent"], 82)
+            self.assertEqual(primary["window_duration_minutes"], 10080)
+            self.assertNotIn("account_id", snapshot)
+            self.assertEqual(snapshot["source"]["kind"], "codex-home")
 
     def test_backend_specific_selectors_are_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "--connection"):

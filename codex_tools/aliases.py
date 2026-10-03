@@ -24,7 +24,7 @@ _codex_tools_completion() {
   local summary_commands="today yesterday day week model site clean"
   local viewer_commands="serve start restart stop status open pick doctor"
   local manager_commands="new rename export import list run install uninstall remove rm delete path doctor repair"
-  local app_server_commands="login status list logout test"
+  local app_server_commands="login status usage list logout test"
   local alias_commands="install remove list"
   local structured_commands="run batch check"
   local config_commands="show path edit validate set unset"

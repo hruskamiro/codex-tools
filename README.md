@@ -244,6 +244,7 @@ select the saved connection on each run or batch:
 ```bash
 ct app-server login --connection default
 ct app-server status --connection default
+ct app-server usage
 
 ct structured run \
   --backend app-server \
@@ -263,6 +264,12 @@ codex-manager profiles.
 tool, supplies no dynamic tools or environments, uses an empty read-only
 workspace, and rejects any unexpected tool event. Prompts, schemas, events,
 results, hashes, settings, and token usage are retained in the run directory.
+
+App-server batches also save account usage snapshots immediately before and
+after execution, including the integer percentage-point change for each usage
+window. These snapshots come from the authenticated `~/.codex` account by
+default and can be redirected with `--usage-codex-home`; they are independent
+of the app-server task connection.
 
 ## Configuration and diagnostics
 
