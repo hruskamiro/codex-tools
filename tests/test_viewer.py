@@ -399,6 +399,44 @@ https://fenced.example/ignored
             ],
         )
 
+    def test_typeset_resource_link_hints_use_delayed_shift_and_visible_digits(self) -> None:
+        script = viewer.TYPESET_JS
+
+        self.assertIn("const LINK_HINT_DELAY_MS = 200", script)
+        self.assertIn('event.key === "Shift"', script)
+        self.assertIn("scheduleLinkHints()", script)
+        self.assertIn(
+            'document.querySelectorAll(".typeset-attachments a[href]")', script
+        )
+        self.assertIn(".filter(resourceLinkIsVisible).slice(0, 9)", script)
+        self.assertIn("link.dataset.linkHint = String(index + 1)", script)
+        self.assertIn("/^(?:Digit|Numpad)([1-9])$/", script)
+        self.assertIn("if (link?.isConnected) link.click()", script)
+        self.assertIn("window.addEventListener(\"blur\", clearLinkHints)", script)
+        self.assertIn("window.addEventListener(\"scroll\", refreshVisibleLinkHints", script)
+        self.assertIn('a[data-link-hint]::before', viewer.APP_CSS)
+        self.assertIn("content: attr(data-link-hint)", viewer.APP_CSS)
+        self.assertIn("position: absolute", viewer.APP_CSS)
+        self.assertIn("left: -9px", viewer.APP_CSS)
+        self.assertIn("transform: translate(-100%, -50%)", viewer.APP_CSS)
+        self.assertIn("border-bottom-width: 2px", viewer.APP_CSS)
+        self.assertNotIn('content: "[" attr(data-link-hint)', viewer.APP_CSS)
+
+    def test_link_hint_handler_precedes_existing_shift_refresh_handler(self) -> None:
+        script = viewer.TYPESET_JS
+
+        hint_handler = script.index(
+            'window.addEventListener("keydown", handleLinkHintKeyDown, true)'
+        )
+        refresh_handler = script.index(
+            'window.addEventListener("keydown", (event) => {', hint_handler
+        )
+        self.assertLess(hint_handler, refresh_handler)
+        self.assertIn(
+            "if (linkHintsActive || linkHintTimer !== null) clearLinkHints()",
+            script,
+        )
+
     def test_local_attachments_are_derived_from_the_assistant_markdown(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

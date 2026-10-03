@@ -2717,11 +2717,46 @@ h2 {
 }
 
 .typeset-attachments a {
+  position: relative;
   min-width: 0;
   overflow-wrap: anywhere;
   color: #8b570b;
   font-weight: 750;
   text-underline-offset: 2px;
+}
+
+.typeset-attachments a[data-link-hint] {
+  border-radius: 3px;
+  background: var(--accent-soft);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.typeset-attachments a[data-link-hint]::before {
+  content: attr(data-link-hint);
+  position: absolute;
+  top: 50%;
+  left: -9px;
+  z-index: 2;
+  display: inline-grid;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  transform: translate(-100%, -50%);
+  border: 1px solid #a66d16;
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: #fff8e8;
+  box-shadow: 0 2px 3px rgb(61 38 6 / 22%), inset 0 1px rgb(255 255 255 / 85%);
+  color: var(--accent-dark);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+  pointer-events: none;
+  text-decoration: none;
 }
 
 .typeset-attachment-kind {
@@ -4268,6 +4303,7 @@ loadConversation().catch((error) => {
 TYPESET_JS = r"""
 const params = new URLSearchParams(location.search);
 const TYPESET_PDF_RENDER_SCALE = 1.6;
+const LINK_HINT_DELAY_MS = 200;
 const CODE_COPY_ORIGIN = "https://codex-tools.invalid";
 const WEB_ASSETS = document.body.dataset.webAssets || "bundled";
 const PDFJS_MODULE_URL = WEB_ASSETS === "cdn"
@@ -4283,6 +4319,10 @@ let lastConversationData = null;
 let typesetDebugEnabled = false;
 let typesetHeaderMode = "external";
 let messageNavigationIndex = -1;
+let linkHintTimer = null;
+let linkHintFrame = null;
+let linkHintsActive = false;
+let hintedResourceLinks = [];
 let refreshStatusTimer = 0;
 const els = {
   conversation: document.getElementById("conversation"),
@@ -4600,6 +4640,78 @@ function resourceLinks(record) {
       ` : ""}
     </footer>
   `;
+}
+
+function resourceLinkIsVisible(link) {
+  const rect = link.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return false;
+  if (rect.bottom <= 0 || rect.top >= window.innerHeight) return false;
+  if (rect.right <= 0 || rect.left >= window.innerWidth) return false;
+  const style = window.getComputedStyle(link);
+  return style.visibility !== "hidden" && style.display !== "none";
+}
+
+function removeLinkHintLabels() {
+  for (const link of hintedResourceLinks) delete link.dataset.linkHint;
+  hintedResourceLinks = [];
+}
+
+function assignVisibleLinkHints() {
+  removeLinkHintLabels();
+  hintedResourceLinks = Array.from(
+    document.querySelectorAll(".typeset-attachments a[href]"),
+  ).filter(resourceLinkIsVisible).slice(0, 9);
+  hintedResourceLinks.forEach((link, index) => {
+    link.dataset.linkHint = String(index + 1);
+  });
+  linkHintsActive = true;
+}
+
+function clearLinkHints() {
+  if (linkHintTimer !== null) window.clearTimeout(linkHintTimer);
+  if (linkHintFrame !== null) window.cancelAnimationFrame(linkHintFrame);
+  linkHintTimer = null;
+  linkHintFrame = null;
+  linkHintsActive = false;
+  removeLinkHintLabels();
+}
+
+function scheduleLinkHints() {
+  if (linkHintsActive || linkHintTimer !== null) return;
+  linkHintTimer = window.setTimeout(() => {
+    linkHintTimer = null;
+    assignVisibleLinkHints();
+  }, LINK_HINT_DELAY_MS);
+}
+
+function refreshVisibleLinkHints() {
+  if (!linkHintsActive || linkHintFrame !== null) return;
+  linkHintFrame = window.requestAnimationFrame(() => {
+    linkHintFrame = null;
+    if (linkHintsActive) assignVisibleLinkHints();
+  });
+}
+
+function linkHintEditableTarget(target) {
+  return Boolean(target?.closest?.("input, textarea, select, [contenteditable='true']"));
+}
+
+function handleLinkHintKeyDown(event) {
+  if (event.key === "Shift") {
+    if (!event.repeat && !linkHintEditableTarget(event.target)) scheduleLinkHints();
+    return;
+  }
+
+  const digitMatch = event.code?.match(/^(?:Digit|Numpad)([1-9])$/);
+  if (linkHintsActive && event.shiftKey && digitMatch) {
+    const link = hintedResourceLinks[Number(digitMatch[1]) - 1];
+    event.preventDefault();
+    clearLinkHints();
+    if (link?.isConnected) link.click();
+    return;
+  }
+
+  if (linkHintsActive || linkHintTimer !== null) clearLinkHints();
 }
 
 function copyMarkdownButton(record) {
@@ -5217,6 +5329,17 @@ els.loadEarlier?.addEventListener("click", () => {
 });
 els.loadAll?.addEventListener("click", () => {
   loadAllConversation().catch((error) => setStatus(error.message, "error"));
+});
+
+window.addEventListener("keydown", handleLinkHintKeyDown, true);
+window.addEventListener("keyup", (event) => {
+  if (event.key === "Shift" && !event.getModifierState("Shift")) clearLinkHints();
+}, true);
+window.addEventListener("blur", clearLinkHints);
+window.addEventListener("resize", refreshVisibleLinkHints);
+window.addEventListener("scroll", refreshVisibleLinkHints, true);
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) clearLinkHints();
 });
 
 window.addEventListener("keydown", (event) => {

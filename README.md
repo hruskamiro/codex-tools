@@ -74,6 +74,9 @@ codex-viewer stop         # stop it
 **Markdown is the portable default.** Press `T` inside a conversation to switch
 between Markdown and the LaTeX view. In the LaTeX view, local attachments and
 external links from each assistant answer are collected in a footer below it.
+Hold `Shift` briefly to reveal `[1]`–`[9]` hints for footer links currently in
+the viewport, then press the corresponding digit while still holding `Shift`
+to open one in a new tab.
 
 ![Codex Viewer showing the symmetry of Riemann zeta zeros](docs/assets/codex-viewer-riemann-symmetry.png)
 
