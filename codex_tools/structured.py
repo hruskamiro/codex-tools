@@ -15,7 +15,10 @@ from typing import Any
 
 from jsonschema import SchemaError, ValidationError, validators
 
-from codex_tools import codex_exec, manager
+from codex_tools import app_server, codex_exec, manager
+
+
+BACKENDS = ("exec", "app-server")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -41,7 +44,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     run.add_argument("--timeout", type=int, default=1800, help="Timeout in seconds.")
     run.add_argument("--codex-bin", default="codex", help="Codex executable.")
-    add_profile_arguments(run)
+    add_backend_arguments(run)
     batch = commands.add_parser(
         "batch", help="Run independent structured tasks, optionally in parallel."
     )
@@ -72,7 +75,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Override the timeout in seconds for all selected tasks.",
     )
     batch.add_argument("--codex-bin", default="codex", help="Codex executable.")
-    add_profile_arguments(batch)
+    add_backend_arguments(batch)
     check = commands.add_parser(
         "check", help="Verify an individual run or complete batch directory."
     )
@@ -80,12 +83,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def add_profile_arguments(parser: argparse.ArgumentParser) -> None:
+def add_backend_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--backend", choices=BACKENDS, default="exec",
+        help="Execution backend. Default: exec.",
+    )
     parser.add_argument(
         "--profile",
         type=manager.valid_name,
-        default="default",
-        help="codex-manager profile used for authentication. Default: default.",
+        help="codex-manager profile for the exec backend. Default: default.",
+    )
+    parser.add_argument(
+        "--connection",
+        type=app_server.valid_name,
+        help="ChatGPT connection for the app-server backend. Default: default.",
     )
     parser.add_argument(
         "--manager-root",
@@ -99,6 +110,32 @@ def add_profile_arguments(parser: argparse.ArgumentParser) -> None:
         default=manager.DEFAULT_CODEX_HOME,
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--connection-root",
+        type=Path,
+        default=app_server.DEFAULT_ROOT,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--app-server-home",
+        type=Path,
+        default=app_server.DEFAULT_CODEX_HOME,
+        help=argparse.SUPPRESS,
+    )
+
+
+def resolve_backend_auth(
+    backend: str, profile: str | None, connection: str | None
+) -> tuple[str | None, str | None]:
+    if backend == "exec":
+        if connection is not None:
+            raise ValueError("--connection is only valid with --backend app-server")
+        return profile or "default", None
+    if backend == "app-server":
+        if profile is not None:
+            raise ValueError("--profile is only valid with --backend exec")
+        return None, connection or "default"
+    raise ValueError(f"unsupported structured backend: {backend}")
 
 
 def utc_now() -> str:
@@ -146,9 +183,13 @@ def run_task(
     reasoning_effort: str = "medium",
     timeout: int = 1800,
     codex_bin: str = "codex",
-    profile: str = "default",
+    backend: str = "exec",
+    profile: str | None = None,
+    connection: str | None = None,
     manager_root: Path = manager.DEFAULT_MANAGER_ROOT,
     default_home: Path = manager.DEFAULT_CODEX_HOME,
+    connection_root: Path = app_server.DEFAULT_ROOT,
+    app_server_home: Path = app_server.DEFAULT_CODEX_HOME,
 ) -> dict:
     validator_class = validators.validator_for(schema)
     validator_class.check_schema(schema)
@@ -160,23 +201,31 @@ def run_task(
     stderr_path = run_dir / "stderr.log"
     result_path = run_dir / "result.json"
     run_path = run_dir / "run.json"
-    codex_home = manager.resolve_profile_home(profile, manager_root, default_home)
+    profile, connection = resolve_backend_auth(backend, profile, connection)
+    codex_home = (
+        manager.resolve_profile_home(profile, manager_root, default_home)
+        if backend == "exec"
+        else app_server_home.expanduser().resolve()
+    )
 
     atomic_write_text(prompt_path, prompt)
     atomic_write_json(schema_path, schema)
-    command = codex_exec.build_command(
-        codex_bin=codex_bin,
-        model=model,
-        reasoning_effort=reasoning_effort,
-        schema_path=schema_path,
-        response_path=response_path,
+    command = (
+        codex_exec.build_command(
+            codex_bin=codex_bin, model=model,
+            reasoning_effort=reasoning_effort, schema_path=schema_path,
+            response_path=response_path,
+        )
+        if backend == "exec"
+        else app_server.app_server_command(codex_bin)
     )
     metadata = {
         "status": "running",
+        "backend": backend,
         "model": model,
         "reasoning_effort": reasoning_effort,
         "timeout": timeout,
-        "profile": profile,
+        **({"profile": profile} if profile is not None else {"connection": connection}),
         "codex_home": str(codex_home),
         "prompt_sha256": sha256_text(prompt),
         "schema_sha256": sha256_text(canonical_json(schema)),
@@ -186,30 +235,52 @@ def run_task(
     atomic_write_json(run_path, metadata)
 
     try:
-        execution = codex_exec.run_exec(
-            prompt=prompt,
-            command=command,
-            cwd=run_dir,
-            events_path=events_path,
-            stderr_path=stderr_path,
-            timeout=timeout,
-            env=manager.profile_environment(
-                profile, manager_root, default_home
-            ),
-        )
+        if backend == "exec":
+            execution = codex_exec.run_exec(
+                prompt=prompt, command=command, cwd=run_dir,
+                events_path=events_path, stderr_path=stderr_path, timeout=timeout,
+                env=manager.profile_environment(profile, manager_root, default_home),
+            )
+            usage = codex_exec.event_usage(execution.events)
+            thread_id = codex_exec.event_thread_id(execution.events)
+            event_parse_errors = execution.event_parse_errors
+            tool_events = codex_exec.tool_events(execution.events)
+        else:
+            token = app_server.access_token(
+                connection,
+                connection_root,
+                timeout + app_server.TOKEN_EXPIRY_MARGIN_SECONDS,
+            )
+            app_execution = app_server.run_structured_task(
+                prompt=prompt, schema=schema, model=model,
+                reasoning_effort=reasoning_effort, timeout=timeout,
+                access_token_value=token, codex_bin=codex_bin,
+                codex_home=app_server_home,
+            )
+            atomic_write_text(
+                events_path,
+                "".join(json.dumps(event, ensure_ascii=False) + "\n" for event in app_execution.events),
+            )
+            atomic_write_text(stderr_path, app_execution.stderr)
+            atomic_write_text(response_path, app_execution.response_text)
+            execution = app_execution
+            usage = app_execution.usage
+            thread_id = app_execution.thread_id
+            event_parse_errors = app_execution.parse_errors
+            tool_events = app_server.app_server_tool_events(app_execution.events)
         metadata.update(
             {
                 "returncode": execution.returncode,
                 "duration_s": execution.duration_s,
-                "usage": codex_exec.event_usage(execution.events),
-                "thread_id": codex_exec.event_thread_id(execution.events),
-                "event_parse_errors": execution.event_parse_errors,
-                "tool_events": codex_exec.tool_events(execution.events),
+                "usage": usage,
+                "thread_id": thread_id,
+                "event_parse_errors": event_parse_errors,
+                "tool_events": tool_events,
             }
         )
         if execution.returncode != 0:
             raise RuntimeError(f"codex exec exited with status {execution.returncode}")
-        if execution.event_parse_errors:
+        if event_parse_errors:
             raise RuntimeError("Codex emitted non-JSON event output")
         if metadata["tool_events"]:
             raise RuntimeError("structured task attempted to use tools")
@@ -351,9 +422,11 @@ def reusable_success(run_dir: Path, task: dict) -> bool:
         return False
     metadata_matches = (
         metadata.get("status") == "success"
+        and metadata.get("backend") == task["backend"]
         and metadata.get("model") == task["model"]
         and metadata.get("reasoning_effort") == task["reasoning_effort"]
-        and metadata.get("profile") == task["profile"]
+        and metadata.get("profile") == task.get("profile")
+        and metadata.get("connection") == task.get("connection")
         and metadata.get("prompt_sha256") == sha256_text(task["prompt"])
         and metadata.get("schema_sha256")
         == sha256_text(canonical_json(task["schema"]))
@@ -384,9 +457,13 @@ def run_batch(
     reasoning_effort_override: str | None = None,
     timeout_override: int | None = None,
     codex_bin: str = "codex",
-    profile: str = "default",
+    backend: str = "exec",
+    profile: str | None = None,
+    connection: str | None = None,
     manager_root: Path = manager.DEFAULT_MANAGER_ROOT,
     default_home: Path = manager.DEFAULT_CODEX_HOME,
+    connection_root: Path = app_server.DEFAULT_ROOT,
+    app_server_home: Path = app_server.DEFAULT_CODEX_HOME,
 ) -> dict:
     if jobs <= 0:
         raise ValueError("--jobs must be a positive integer")
@@ -402,9 +479,15 @@ def run_batch(
         reasoning_effort_override=reasoning_effort_override,
         timeout_override=timeout_override,
     )
-    manager.resolve_profile_home(profile, manager_root, default_home)
+    profile, connection = resolve_backend_auth(backend, profile, connection)
+    if backend == "exec":
+        manager.resolve_profile_home(profile, manager_root, default_home)
+    else:
+        app_server.access_token(connection, connection_root)
     for task in tasks:
+        task["backend"] = backend
         task["profile"] = profile
+        task["connection"] = connection
     if idxs is None:
         selection_start, selection_stop = 0, len(tasks)
     else:
@@ -451,7 +534,8 @@ def run_batch(
             "run_dir": str(task_dir.relative_to(batch_dir)),
             "model": task["model"],
             "reasoning_effort": task["reasoning_effort"],
-            "profile": profile,
+            "backend": backend,
+            **({"profile": profile} if profile is not None else {"connection": connection}),
         }
         if task["metadata"] is not None:
             record["metadata"] = task["metadata"]
@@ -480,9 +564,13 @@ def run_batch(
                 reasoning_effort=task["reasoning_effort"],
                 timeout=task["timeout"],
                 codex_bin=codex_bin,
+                backend=backend,
                 profile=profile,
+                connection=connection,
                 manager_root=manager_root,
                 default_home=default_home,
+                connection_root=connection_root,
+                app_server_home=app_server_home,
             )
             run_metadata = load_json(task_dir / "run.json")
             return task_id, {
@@ -514,7 +602,8 @@ def run_batch(
             "finished_at": utc_now() if status != "running" else None,
             "jobs": jobs,
             "task_count": len(tasks),
-            "profile": profile,
+            "backend": backend,
+            **({"profile": profile} if profile is not None else {"connection": connection}),
             "overrides": {
                 "model": model_override,
                 "reasoning_effort": reasoning_effort_override,
@@ -619,9 +708,15 @@ def check_run(run_dir: Path) -> dict:
             errors.append("schema hash mismatch")
         events, event_errors = read_events(run_dir / "events.jsonl")
         errors.extend(event_errors)
-        tools = codex_exec.tool_events(events)
+        tools = (
+            app_server.app_server_tool_events(events)
+            if metadata.get("backend") == "app-server"
+            else codex_exec.tool_events(events)
+        )
         if tools:
             errors.append(f"tool events found: {tools}")
+        if metadata.get("tool_events"):
+            errors.append("run metadata records tool events")
         if metadata.get("event_parse_errors"):
             errors.append("run metadata records event parse errors")
     except (json.JSONDecodeError, OSError, SchemaError, ValidationError) as exc:
@@ -709,9 +804,13 @@ def main(argv: list[str] | None = None) -> int:
                 reasoning_effort=args.reasoning_effort,
                 timeout=args.timeout,
                 codex_bin=args.codex_bin,
+                backend=args.backend,
                 profile=args.profile,
+                connection=args.connection,
                 manager_root=args.manager_root,
                 default_home=args.default_home,
+                connection_root=args.connection_root,
+                app_server_home=args.app_server_home,
             )
         elif args.structured_command == "batch":
             manifest = load_json(args.manifest.expanduser())
@@ -725,9 +824,13 @@ def main(argv: list[str] | None = None) -> int:
                 reasoning_effort_override=args.reasoning_effort,
                 timeout_override=args.timeout,
                 codex_bin=args.codex_bin,
+                backend=args.backend,
                 profile=args.profile,
+                connection=args.connection,
                 manager_root=args.manager_root,
                 default_home=args.default_home,
+                connection_root=args.connection_root,
+                app_server_home=args.app_server_home,
             )
             if result["status"] != "success":
                 exit_code = 1

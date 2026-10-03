@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 
-from codex_tools import aliases, config, manager, search, structured, summary, viewer
+from codex_tools import app_server, aliases, config, manager, search, structured, summary, viewer
 
 
 def help_text() -> str:
@@ -16,6 +16,7 @@ Commands:
   summary     Build daily/weekly summaries or a static summary site.
   viewer      Run the local conversation viewer.
   manager     Manage isolated Codex profiles.
+  app-server  Manage ChatGPT-plan app-server connections.
   alias       Install or remove the short ct alias.
   structured  Run reproducible schema-constrained Codex tasks.
   config      Inspect or change per-user defaults.
@@ -29,6 +30,7 @@ Examples:
   codex-tools summary site
   codex-tools viewer
   codex-tools manager list
+  codex-tools app-server status
   codex-tools alias install
   codex-tools structured run --prompt prompt.txt --schema schema.json --run-dir run --model gpt-5.6-sol
   codex-tools structured batch batch.json --batch-dir runs/batch-001 --jobs 4
@@ -56,6 +58,8 @@ def main(argv: list[str] | None = None) -> int:
         return viewer.main(rest, prog="codex-tools viewer")
     if command == "manager":
         return manager.main(rest, prog="codex-tools manager")
+    if command == "app-server":
+        return app_server.main(rest)
     if command == "alias":
         return aliases.main(rest)
     if command == "structured":

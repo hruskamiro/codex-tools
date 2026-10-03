@@ -84,10 +84,11 @@ class AliasTests(unittest.TestCase):
 
     def test_completion_covers_current_command_groups(self) -> None:
         expected = {
-            "search summary viewer manager alias structured config diagnose",
+            "search summary viewer manager app-server alias structured config diagnose",
             "today yesterday day week model site clean",
             "serve start restart stop status open pick doctor",
             "new rename export import list run install uninstall remove rm delete path doctor repair",
+            "login status list logout test",
             "install remove list",
             "run batch check",
             "show path edit validate set unset",

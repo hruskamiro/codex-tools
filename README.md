@@ -16,11 +16,14 @@ OpenAI.
 - **Keep multiple Codex logins separate** while optionally sharing conversations.
 - **Move a login to another machine** with passphrase-encrypted profile exports.
 - **Run schema-constrained tasks** with saved prompts, results, and token usage.
+- **Run structured tasks through a ChatGPT-plan app-server connection.**
 
 ## Quick start
 
 **Requirements:** Linux and Python 3.10 or newer. Model-backed summaries and
-structured tasks also require an installed and authenticated Codex CLI.
+structured tasks also require an installed Codex CLI. The default `exec`
+backend uses its Codex login; the optional app-server backend uses a separate
+ChatGPT-plan connection.
 
 Codex Tools is not yet published on PyPI. Install it directly from GitHub:
 
@@ -206,6 +209,8 @@ ct config set summary.weekly.words 400
 
 ## Structured tasks
 
+The default backend runs an isolated `codex exec` under a codex-manager profile:
+
 Run a prompt under a strict JSON Schema and retain reproducibility artifacts:
 
 ```bash
@@ -223,7 +228,30 @@ ct structured batch batch.json --batch-dir runs/batch-001 --jobs 4
 ct structured check runs/batch-001
 ```
 
-**Structured runs are isolated and tool-free.** Prompts, schemas, events,
+To use the lower-overhead app-server backend, authorize Codex Tools once and
+select the saved connection on each run or batch:
+
+```bash
+ct app-server login --connection default
+ct app-server status --connection default
+
+ct structured run \
+  --backend app-server \
+  --connection default \
+  --prompt prompt.txt \
+  --schema response.schema.json \
+  --run-dir runs/example-app-server \
+  --model MODEL
+```
+
+`--profile` belongs to the `exec` backend; `--connection` belongs to the
+`app-server` backend. App-server credentials are stored in a private file under
+`~/.config/codex-tools/app-server/`, independently of Codex homes and
+codex-manager profiles.
+
+**Structured runs are isolated and tool-free.** Codex Tools disables the shell
+tool, supplies no dynamic tools or environments, uses an empty read-only
+workspace, and rejects any unexpected tool event. Prompts, schemas, events,
 results, hashes, settings, and token usage are retained in the run directory.
 
 ## Configuration and diagnostics
