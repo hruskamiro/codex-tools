@@ -15,6 +15,7 @@ from pathlib import Path
 
 BROWSER_CANDIDATES = (
     "brave-browser",
+    "brave-browser-stable",
     "brave",
     "google-chrome",
     "google-chrome-stable",
@@ -26,6 +27,7 @@ SYSTEM_OPENERS = (
     ("xdg-open",),
     ("gio", "open"),
 )
+DESKTOP_FIELD_CODES = frozenset("fFuUdDnNickvm")
 
 
 def add_browser_args(
@@ -63,10 +65,75 @@ def browser_command(configured_browser: str | None = None) -> list[str] | None:
     )
     if configured:
         return shlex.split(configured)
+    desktop_command = default_desktop_browser_command()
+    if desktop_command and supports_new_window(desktop_command):
+        return desktop_command
     for opener in SYSTEM_OPENERS:
         found = shutil.which(opener[0])
         if found:
             return [found, *opener[1:]]
+    return None
+
+
+def desktop_entry_paths(desktop_id: str) -> list[Path]:
+    if not desktop_id.endswith(".desktop") or Path(desktop_id).name != desktop_id:
+        return []
+    data_home = Path(
+        os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")
+    )
+    data_dirs = os.environ.get("XDG_DATA_DIRS", "/usr/local/share:/usr/share")
+    roots = [data_home, *(Path(value) for value in data_dirs.split(":") if value)]
+    return [root / "applications" / desktop_id for root in roots]
+
+
+def desktop_entry_command(path: Path) -> list[str] | None:
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    in_desktop_entry = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            in_desktop_entry = stripped == "[Desktop Entry]"
+            continue
+        if not in_desktop_entry or not stripped.startswith("Exec="):
+            continue
+        try:
+            parts = shlex.split(stripped.removeprefix("Exec="))
+        except ValueError:
+            return None
+        command = []
+        for part in parts:
+            if len(part) == 2 and part[0] == "%" and part[1] in DESKTOP_FIELD_CODES:
+                continue
+            command.append(part.replace("%%", "%"))
+        return command or None
+    return None
+
+
+def default_desktop_browser_command() -> list[str] | None:
+    xdg_settings = shutil.which("xdg-settings")
+    if not xdg_settings:
+        return None
+    try:
+        result = subprocess.run(
+            [xdg_settings, "get", "default-web-browser"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=1,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    desktop_id = result.stdout.strip()
+    for path in desktop_entry_paths(desktop_id):
+        command = desktop_entry_command(path)
+        if command:
+            return command
     return None
 
 

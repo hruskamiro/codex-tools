@@ -93,9 +93,11 @@ codex-viewer status       # check the background server
 codex-viewer stop         # stop it
 ```
 
-The viewer uses the desktop's default browser. Diagnose startup, port, browser,
-and optional LaTeX support with `ct viewer doctor`. To override browser
-selection, use `ct viewer open --browser firefox` or set
+The viewer resolves the desktop's default browser and asks known browsers to
+open a new window. It falls back to the desktop URL opener when the browser
+cannot be resolved. Diagnose startup, port, browser, and optional LaTeX support
+with `ct viewer doctor`. To override browser selection, use
+`ct viewer open --browser firefox` or set
 `viewer.browser` in the user configuration:
 
 ```bash
