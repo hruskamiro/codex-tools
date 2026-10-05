@@ -56,7 +56,6 @@ LATEX_FILES = (
     "enumitem.sty",
     "tabularx.sty",
     "colortbl.sty",
-    "soul.sty",
 )
 LATEX_FONTS = ("TeX Gyre Pagella", "TeX Gyre Heros", "PT Mono")
 VENDOR_DIR = Path(__file__).with_name("vendor")

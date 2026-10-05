@@ -25,7 +25,7 @@ except ImportError:  # Pygments is optional when running directly from a checkou
     ClassNotFound = LookupError
 
 
-RENDERER_VERSION = "typeset-v44"
+RENDERER_VERSION = "typeset-v45"
 DEFAULT_PARAGRAPH_MODE = "spaced"
 DEFAULT_HEADER_MODE = "external"
 BODY_LINE_STRETCH = "1.08"
@@ -158,17 +158,27 @@ INLINE_CODE_BREAK_AFTER = frozenset("-/_.:\\")
 def render_inline_code(value: str) -> str:
     """Render one continuous highlight with useful code/path breakpoints."""
     rendered: list[str] = []
+    chunk: list[str] = []
+
+    def flush_chunk() -> None:
+        if chunk:
+            rendered.append(r"\CodexInlineCodeChunk{" + "".join(chunk) + "}")
+            chunk.clear()
+
     previous_was_space = False
     for char in value:
         if char.isspace():
             if not previous_was_space:
-                rendered.append(" ")
+                flush_chunk()
+                rendered.append(r"\CodexInlineCodeSpace{}")
             previous_was_space = True
             continue
         previous_was_space = False
-        rendered.append(latex_escape(char))
+        chunk.append(latex_escape(char))
         if char in INLINE_CODE_BREAK_AFTER:
+            flush_chunk()
             rendered.append(r"\CodexInlineCodeBreak{}")
+    flush_chunk()
     return r"\CodexInlineCode{" + "".join(rendered) + "}"
 
 
@@ -753,7 +763,6 @@ def document_for(
 \usepackage{{enumitem}}
 \usepackage{{tabularx}}
 \usepackage{{colortbl}}
-\usepackage{{soul}}
 \setmainfont{{TeX Gyre Pagella}}
 \setsansfont{{TeX Gyre Heros}}
 \setmonofont[Scale=MatchLowercase]{{PT Mono}}
@@ -791,10 +800,10 @@ def document_for(
 \newcommand{{\CodexNumber}}[1]{{{{\color{{CodexNumberColor}}#1}}}}
 \newcommand{{\CodexString}}[1]{{{{\color{{CodexStringColor}}#1}}}}
 \newcommand{{\CodexInlineCodeBreak}}{{\allowbreak}}
-\soulregister\CodexInlineCodeBreak0
-\soulregister\textbackslash0
-\soulregister\textasciitilde0
-\soulregister\textasciicircum0
+\newcommand{{\CodexInlineCodeChunk}}[1]{{\colorbox{{CodexCode}}{{\strut\ttfamily #1}}}}
+\newcommand{{\CodexInlineCodeSpace}}{{%
+  \colorbox{{CodexCode}}{{\strut\hspace{{0.55em}}}}\allowbreak%
+}}
 \newenvironment{{CodexQuote}}{{%
   \begin{{list}}{{}}{{%
     \setlength{{\leftmargin}}{{2.5em}}%
@@ -818,7 +827,7 @@ def document_for(
   \addvspace{{\CodexQuoteAfterSep}}%
 }}
 \newcommand{{\CodexInlineCode}}[1]{{%
-  {{\ttfamily\sethlcolor{{CodexCode}}\hl{{#1}}}}%
+  {{\begingroup\setlength{{\fboxsep}}{{0pt}}#1\endgroup}}%
 }}
 \RecustomVerbatimEnvironment{{Verbatim}}{{Verbatim}}{{%
   frame=lines,

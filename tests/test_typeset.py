@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-import unittest
+import shutil
+import subprocess
 import tempfile
+import unittest
 from pathlib import Path
 from unittest.mock import patch
 
@@ -36,9 +38,11 @@ class TypesetTests(unittest.TestCase):
             r"\newcommand{\CodexString}[1]{{\color{CodexStringColor}#1}}",
             document,
         )
-        self.assertIn(r"\usepackage{soul}", document)
-        self.assertIn(r"\ttfamily\sethlcolor{CodexCode}\hl{#1}", document)
-        self.assertIn(r"\soulregister\CodexInlineCodeBreak0", document)
+        self.assertNotIn(r"\usepackage{soulutf8}", document)
+        self.assertNotIn(r"\usepackage{soul}", document)
+        self.assertIn(r"\newcommand{\CodexInlineCodeChunk}", document)
+        self.assertIn(r"\newcommand{\CodexInlineCodeSpace}", document)
+        self.assertIn(r"\hspace{0.55em}", document)
         self.assertNotIn(r"rounded corners", document)
         self.assertNotIn(r"\CodexInlineCodeBox", document)
         self.assertNotIn(r"\raisebox{0pt}[\ht\strutbox][\dp\strutbox]", document)
@@ -204,7 +208,8 @@ class TypesetTests(unittest.TestCase):
         self.assertNotIn(r"v\CodexNumber{25}", latex)
         self.assertNotIn(r"item\_\CodexNumber{2}", latex)
         self.assertIn(
-            r"\CodexInlineCode{code42 99}",
+            r"\CodexInlineCode{\CodexInlineCodeChunk{code42}"
+            r"\CodexInlineCodeSpace{}\CodexInlineCodeChunk{99}}",
             latex,
         )
 
@@ -220,7 +225,8 @@ class TypesetTests(unittest.TestCase):
         self.assertIn(r"\CodexString{‘curly single’}", latex)
         self.assertIn("Don't color", latex)
         self.assertIn(
-            r'\CodexInlineCode{"quoted code"}',
+            r'\CodexInlineCode{\CodexInlineCodeChunk{"quoted}'
+            r'\CodexInlineCodeSpace{}\CodexInlineCodeChunk{code"}}',
             latex,
         )
         self.assertNotIn(r'\CodexInlineCode{\CodexString', latex)
@@ -230,12 +236,54 @@ class TypesetTests(unittest.TestCase):
 
         self.assertEqual(
             latex,
-            r"\CodexInlineCode{alpha-\CodexInlineCodeBreak{}"
-            r"beta/\CodexInlineCodeBreak{}"
-            r"gamma\_\CodexInlineCodeBreak{}"
-            r"delta.\CodexInlineCodeBreak{}"
-            r"py:\CodexInlineCodeBreak{}"
-            r"value\textbackslash{}\CodexInlineCodeBreak{}path}",
+            r"\CodexInlineCode{\CodexInlineCodeChunk{alpha-}"
+            r"\CodexInlineCodeBreak{}\CodexInlineCodeChunk{beta/}"
+            r"\CodexInlineCodeBreak{}\CodexInlineCodeChunk{gamma\_}"
+            r"\CodexInlineCodeBreak{}\CodexInlineCodeChunk{delta.}"
+            r"\CodexInlineCodeBreak{}\CodexInlineCodeChunk{py:}"
+            r"\CodexInlineCodeBreak{}\CodexInlineCodeChunk{value\textbackslash{}}"
+            r"\CodexInlineCodeBreak{}\CodexInlineCodeChunk{path}}",
+        )
+
+    @unittest.skipUnless(
+        shutil.which("xelatex") and shutil.which("pdftotext"),
+        "XeLaTeX and pdftotext are required for the Unicode PDF regression test",
+    )
+    def test_inline_code_preserves_unicode_in_rendered_pdf(self) -> None:
+        markdown = (
+            "Inline: `Podeliť sa o citát` and `Poslať pozvánku`.\n\n"
+            "Characters: `ľščžýáíéôäňďť`."
+        )
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(
+            "os.environ", {"XDG_CACHE_HOME": temporary}
+        ):
+            result = typeset.render_pdf(markdown, force=True)
+
+            self.assertTrue(result.ok, result.error)
+            assert result.pdf_path is not None
+            extracted = subprocess.run(
+                ["pdftotext", "-layout", str(result.pdf_path), "-"],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            ).stdout
+
+        self.assertIn("Podeliť sa o citát", extracted)
+        self.assertIn("Poslať pozvánku", extracted)
+        self.assertIn("ľščžýáíéôäňďť", extracted)
+
+    def test_inline_code_keeps_unicode_in_background_chunks(self) -> None:
+        latex = typeset.render_inline("`Podeliť sa o citát — ľščžňď`")
+
+        self.assertEqual(
+            latex,
+            r"\CodexInlineCode{\CodexInlineCodeChunk{Podeliť}"
+            r"\CodexInlineCodeSpace{}\CodexInlineCodeChunk{sa}"
+            r"\CodexInlineCodeSpace{}\CodexInlineCodeChunk{o}"
+            r"\CodexInlineCodeSpace{}\CodexInlineCodeChunk{citát}"
+            r"\CodexInlineCodeSpace{}\CodexInlineCodeChunk{—}"
+            r"\CodexInlineCodeSpace{}\CodexInlineCodeChunk{ľščžňď}}",
         )
 
     def test_inline_latex_math_is_preserved_outside_code(self) -> None:
@@ -246,8 +294,9 @@ class TypesetTests(unittest.TestCase):
         self.assertIn(r"\(d=0.95\)", latex)
         self.assertIn(r"\(10^{-2}\)–\(10^{-1}\)", latex)
         self.assertIn(
-            r"\CodexInlineCode{\textbackslash{}\CodexInlineCodeBreak{}"
-            r"(literal\textbackslash{}\CodexInlineCodeBreak{})}",
+            r"\CodexInlineCode{\CodexInlineCodeChunk{\textbackslash{}}"
+            r"\CodexInlineCodeBreak{}\CodexInlineCodeChunk{(literal\textbackslash{}}"
+            r"\CodexInlineCodeBreak{}\CodexInlineCodeChunk{)}}",
             latex,
         )
         self.assertNotIn(r"\textbackslash{}(d=0.95\textbackslash{})", latex)
@@ -349,8 +398,8 @@ class TypesetTests(unittest.TestCase):
         )
         self.assertIn(
             "\\begin{itemize}\n"
-            "\\item \\CodexInlineCode{snv}\n"
-            "\\item \\CodexInlineCode{score}\n"
+            "\\item \\CodexInlineCode{\\CodexInlineCodeChunk{snv}}\n"
+            "\\item \\CodexInlineCode{\\CodexInlineCodeChunk{score}}\n"
             "\\end{itemize}",
             latex,
         )
@@ -429,7 +478,9 @@ class TypesetTests(unittest.TestCase):
             "| `a|b` | one \\| two |"
         )
 
-        self.assertIn(r"\CodexInlineCode{a|b}", latex)
+        self.assertIn(
+            r"\CodexInlineCode{\CodexInlineCodeChunk{a|b}}", latex
+        )
         self.assertIn("one | two", latex)
 
     def test_plain_pipe_text_is_not_treated_as_a_table(self) -> None:
