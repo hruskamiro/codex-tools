@@ -33,6 +33,28 @@ pipx install git+https://github.com/hruskamiro/codex-tools.git
 
 You now have `codex-tools`, `codex-viewer`, and `codex-manager`.
 
+### Update an existing installation
+
+To reinstall the latest version from the original GitHub source:
+
+```bash
+pipx reinstall codex-tools
+```
+
+If you installed the optional `ct` alias, refresh its generated Bash
+completion after updating:
+
+```bash
+codex-tools alias install --force
+```
+
+The alias itself continues to work. If the conversation viewer is already
+running, restart it so the background process uses the updated code:
+
+```bash
+codex-viewer restart
+```
+
 ### Optional: install `ct` and completion
 
 The shorter `ct` command is convenient for everyday use. Its installer also
