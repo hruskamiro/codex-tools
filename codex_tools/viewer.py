@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -282,7 +283,7 @@ def parse_args(
     pick.set_defaults(func=command_pick)
 
     doctor = sub.add_parser(
-        "doctor", help="Check optional LaTeX viewer requirements."
+        "doctor", help="Check viewer startup and optional LaTeX requirements."
     )
     doctor.set_defaults(func=command_doctor)
     args = parser.parse_args(raw_args)
@@ -1172,7 +1173,11 @@ def run_server(args: argparse.Namespace) -> int:
         print("Self-reload is on; use --no-self-reload to disable it.")
     print("Press Ctrl-C to stop.")
     if args.open:
-        open_browser(url, args)
+        if not open_browser(url, args):
+            print(
+                "warning: viewer is running, but the browser could not be opened",
+                file=sys.stderr,
+            )
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -1230,15 +1235,40 @@ def running_daemon_state() -> dict[str, Any] | None:
     return None
 
 
+def viewer_health(url: str, timeout: float = 0.6) -> tuple[bool, str]:
+    endpoint = f"{url.rstrip('/')}/api/version"
+    try:
+        with urlopen(endpoint, timeout=timeout) as response:
+            if response.status != HTTPStatus.OK:
+                return False, f"HTTP {response.status} from {endpoint}"
+            payload = json.load(response)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return False, str(exc)
+    viewer = payload.get("viewer") if isinstance(payload, dict) else None
+    if not isinstance(viewer, dict) or not isinstance(viewer.get("path"), str):
+        return False, f"unexpected response from {endpoint}"
+    return True, "responding"
+
+
 def wait_for_url(url: str, timeout: float = 5.0) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
-        try:
-            with urlopen(f"{url.rstrip('/')}/api/version", timeout=0.4) as response:
-                return 200 <= response.status < 500
-        except OSError:
-            time.sleep(0.1)
+        healthy, _ = viewer_health(url, timeout=0.4)
+        if healthy:
+            return True
+        time.sleep(0.1)
     return False
+
+
+def stop_spawned_process(process: subprocess.Popen[Any]) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=2)
 
 
 def daemon_command(args: argparse.Namespace) -> list[str]:
@@ -1275,20 +1305,38 @@ def command_start(args: argparse.Namespace) -> int:
         return 2
     current = running_daemon_state()
     if current:
-        print(f"Viewer already running: {current.get('url')}")
+        url = str(current.get("url") or "")
+        healthy, detail = viewer_health(url)
+        if not healthy:
+            print(
+                f"error: viewer process {current.get('pid')} is running but "
+                f"not responding: {detail}",
+                file=sys.stderr,
+            )
+            print(f"Log: {current.get('log')}", file=sys.stderr)
+            print("Run `codex-tools viewer restart` to recover.", file=sys.stderr)
+            return 1
+        print(f"Viewer already running: {url}")
         if args.open:
-            open_browser(str(current.get("url")), args)
+            if not open_browser(url, args):
+                return 1
         return 0
 
     paths.ensure_private_dir(paths.VIEWER_STATE_DIR)
     log_handle = VIEWER_LOG_FILE.open("a", encoding="utf-8")
     VIEWER_LOG_FILE.chmod(0o600)
-    process = subprocess.Popen(
-        daemon_command(args),
-        stdout=log_handle,
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-    )
+    try:
+        process = subprocess.Popen(
+            daemon_command(args),
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        print(f"error: could not start viewer: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        log_handle.close()
     url = viewer_url(args.host, args.port)
     write_daemon_state(
         {
@@ -1302,11 +1350,24 @@ def command_start(args: argparse.Namespace) -> int:
             "webAssets": args.web_assets,
         }
     )
-    if not wait_for_url(url):
-        print(f"warning: viewer did not respond yet; see {VIEWER_LOG_FILE}", file=sys.stderr)
+    ready = wait_for_url(url)
+    return_code = process.poll()
+    if not ready or return_code is not None:
+        stop_spawned_process(process)
+        remove_daemon_state()
+        reason = (
+            f"process exited with status {return_code}"
+            if return_code is not None
+            else "server did not become ready within 5 seconds"
+        )
+        print(f"error: viewer failed to start: {reason}", file=sys.stderr)
+        print(f"Log: {VIEWER_LOG_FILE}", file=sys.stderr)
+        return 1
     print(f"Started viewer: {url}")
     if args.open:
-        open_browser(url, args)
+        if not open_browser(url, args):
+            print("Viewer remains available at the URL above.", file=sys.stderr)
+            return 1
     return 0
 
 
@@ -1339,7 +1400,14 @@ def command_status(args: argparse.Namespace) -> int:
     if not state:
         print("Viewer is not running.")
         return 1
-    print(f"Viewer running: {state.get('url')}")
+    url = str(state.get("url") or "")
+    healthy, detail = viewer_health(url)
+    if not healthy:
+        print(f"Viewer process is running but unhealthy: {detail}")
+        print(f"PID: {state.get('pid')}")
+        print(f"Log: {state.get('log')}")
+        return 1
+    print(f"Viewer running: {url}")
     print(f"PID: {state.get('pid')}")
     print(f"Log: {state.get('log')}")
     return 0
@@ -1387,23 +1455,78 @@ def latex_requirement_checks() -> list[tuple[str, bool, str]]:
     return checks
 
 
+def viewer_startup_checks() -> list[tuple[str, bool, str]]:
+    checks: list[tuple[str, bool, str]] = []
+    command = browser_command()
+    checks.append(
+        (
+            "browser launcher",
+            command is not None,
+            " ".join(command) if command else "not found; use --browser COMMAND",
+        )
+    )
+
+    display = os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")
+    checks.append(
+        (
+            "graphical session",
+            bool(display),
+            display or "DISPLAY and WAYLAND_DISPLAY are unset",
+        )
+    )
+
+    state = running_daemon_state()
+    if state:
+        url = str(state.get("url") or "")
+        healthy, detail = viewer_health(url)
+        checks.append(("viewer server", healthy, f"{url} ({detail})"))
+    else:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                probe.bind((DEFAULT_HOST, DEFAULT_PORT))
+        except OSError as exc:
+            checks.append(
+                (
+                    f"port {DEFAULT_PORT}",
+                    False,
+                    f"unavailable while viewer is stopped: {exc}",
+                )
+            )
+        else:
+            checks.append(
+                (f"port {DEFAULT_PORT}", True, "available for viewer startup")
+            )
+    return checks
+
+
 def command_doctor(args: argparse.Namespace) -> int:
-    checks = latex_requirement_checks()
-    print("LaTeX viewer requirements:")
-    for name, ok, detail in checks:
+    startup_checks = viewer_startup_checks()
+    print("Viewer startup:")
+    for name, ok, detail in startup_checks:
+        print(f"  [{'ok' if ok else 'problem'}] {name}: {detail}")
+    startup_ok = all(ok for _, ok, _ in startup_checks)
+    print("Markdown viewer is ready." if startup_ok else "Viewer startup has problems.")
+
+    latex_checks = latex_requirement_checks()
+    print()
+    print("Optional LaTeX view:")
+    for name, ok, detail in latex_checks:
         print(f"  [{'ok' if ok else 'missing'}] {name}: {detail}")
-    print(f"Default viewer mode: {read_default_view()}")
-    if all(ok for _, ok, _ in checks):
+    default_view = read_default_view()
+    print(f"Default viewer mode: {default_view}")
+    latex_ok = all(ok for _, ok, _ in latex_checks)
+    if latex_ok:
         print("LaTeX viewer is ready.")
         print("Set it as the default with: codex-tools viewer --set-default-latex")
-        return 0
-    print()
-    print("Ubuntu/Debian install hint:")
-    print(
-        "  sudo apt install texlive-xetex texlive-latex-extra "
-        "fonts-texgyre fonts-paratype"
-    )
-    return 1
+    else:
+        print("LaTeX is unavailable; the Markdown viewer still works.")
+        print()
+        print("Ubuntu/Debian install hint:")
+        print(
+            "  sudo apt install texlive-xetex texlive-latex-extra "
+            "fonts-texgyre fonts-paratype"
+        )
+    return 0 if startup_ok and (default_view != "latex" or latex_ok) else 1
 
 
 def default_server_args() -> argparse.Namespace:
@@ -1450,7 +1573,14 @@ def command_open(args: argparse.Namespace) -> int:
     if not state:
         print("error: viewer is not running", file=sys.stderr)
         return 1
-    open_browser(str(state["url"]), args)
+    url = str(state["url"])
+    healthy, detail = viewer_health(url)
+    if not healthy:
+        print(f"error: viewer is not responding: {detail}", file=sys.stderr)
+        print("Run `codex-tools viewer restart` to recover.", file=sys.stderr)
+        return 1
+    if not open_browser(url, args):
+        return 1
     print(f"Opened {state['url']}")
     return 0
 
@@ -1811,7 +1941,9 @@ def command_pick(args: argparse.Namespace) -> int:
         preferred_session_id(item),
         read_default_view(),
     )
-    open_browser(url, args)
+    if not open_browser(url, args):
+        print(f"Viewer remains available at {url}", file=sys.stderr)
+        return 1
     print(f"Opened {url}")
     return 0
 

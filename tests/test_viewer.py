@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+import json
 import tempfile
 import unittest
 from io import StringIO
@@ -11,6 +13,11 @@ from codex_tools import config, search, typeset, viewer
 
 
 class ViewerCommandTests(unittest.TestCase):
+    class FakeResponse(io.BytesIO):
+        def __init__(self, payload: object, status: int = 200) -> None:
+            super().__init__(json.dumps(payload).encode("utf-8"))
+            self.status = status
+
     def test_unified_viewer_help_uses_the_unified_command_name(self) -> None:
         with patch("sys.stdout", new_callable=StringIO) as stdout:
             with self.assertRaises(SystemExit) as raised:
@@ -28,12 +35,38 @@ class ViewerCommandTests(unittest.TestCase):
 
     def test_viewer_doctor_reports_ready_and_missing_requirements(self) -> None:
         args = viewer.parse_args(["doctor"])
+        startup = [("browser launcher", True, "/usr/bin/xdg-open")]
         ready = [("xelatex", True, "/usr/bin/xelatex")]
         missing = [("xelatex", False, "not found on PATH")]
 
-        with patch.object(viewer, "latex_requirement_checks", return_value=ready):
+        with (
+            patch.object(viewer, "viewer_startup_checks", return_value=startup),
+            patch.object(viewer, "latex_requirement_checks", return_value=ready),
+            patch.object(viewer, "read_default_view", return_value="markdown"),
+        ):
             self.assertEqual(args.func(args), 0)
-        with patch.object(viewer, "latex_requirement_checks", return_value=missing):
+        with (
+            patch.object(viewer, "viewer_startup_checks", return_value=startup),
+            patch.object(viewer, "latex_requirement_checks", return_value=missing),
+            patch.object(viewer, "read_default_view", return_value="markdown"),
+        ):
+            self.assertEqual(args.func(args), 0)
+        with (
+            patch.object(viewer, "viewer_startup_checks", return_value=startup),
+            patch.object(viewer, "latex_requirement_checks", return_value=missing),
+            patch.object(viewer, "read_default_view", return_value="latex"),
+        ):
+            self.assertEqual(args.func(args), 1)
+
+    def test_viewer_doctor_fails_for_startup_problem(self) -> None:
+        args = viewer.parse_args(["doctor"])
+        startup = [("port 8765", False, "already in use")]
+
+        with (
+            patch.object(viewer, "viewer_startup_checks", return_value=startup),
+            patch.object(viewer, "latex_requirement_checks", return_value=[]),
+            patch.object(viewer, "read_default_view", return_value="markdown"),
+        ):
             self.assertEqual(args.func(args), 1)
 
     def test_default_view_preference_is_private_and_round_trips(self) -> None:
@@ -533,6 +566,70 @@ https://fenced.example/ignored
         self.assertEqual(result, 0)
         stop.assert_called_once_with(args)
         start.assert_called_once_with(args)
+
+    def test_status_rejects_live_but_unhealthy_process(self) -> None:
+        args = viewer.parse_args(["status"])
+        state = {"pid": 42, "url": "http://127.0.0.1:8765/", "log": "viewer.log"}
+
+        with (
+            patch.object(viewer, "running_daemon_state", return_value=state),
+            patch.object(
+                viewer, "viewer_health", return_value=(False, "connection refused")
+            ),
+        ):
+            self.assertEqual(args.func(args), 1)
+
+    def test_viewer_health_requires_a_viewer_identity(self) -> None:
+        valid = self.FakeResponse({"viewer": {"path": "/tmp/viewer.py"}})
+        with patch.object(viewer, "urlopen", return_value=valid):
+            self.assertEqual(
+                viewer.viewer_health("http://127.0.0.1:8765/"),
+                (True, "responding"),
+            )
+
+        unrelated = self.FakeResponse({"status": "ok"})
+        with patch.object(viewer, "urlopen", return_value=unrelated):
+            healthy, detail = viewer.viewer_health("http://127.0.0.1:8765/")
+
+        self.assertFalse(healthy)
+        self.assertIn("unexpected response", detail)
+
+    def test_start_does_not_open_browser_when_server_fails_readiness(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            args = viewer.parse_args(["start", "--open"])
+            process = SimpleNamespace(
+                pid=42,
+                poll=lambda: None,
+                terminate=lambda: None,
+                wait=lambda timeout: 0,
+                kill=lambda: None,
+            )
+
+            with (
+                patch.object(viewer.paths, "VIEWER_STATE_DIR", root),
+                patch.object(viewer, "VIEWER_PID_FILE", root / "viewer.json"),
+                patch.object(viewer, "VIEWER_LOG_FILE", root / "viewer.log"),
+                patch.object(viewer, "running_daemon_state", return_value=None),
+                patch.object(viewer.subprocess, "Popen", return_value=process),
+                patch.object(viewer, "wait_for_url", return_value=False),
+                patch.object(viewer, "open_browser") as open_browser,
+            ):
+                result = viewer.command_start(args)
+
+        self.assertEqual(result, 1)
+        open_browser.assert_not_called()
+
+    def test_start_reports_browser_failure_for_healthy_existing_viewer(self) -> None:
+        args = viewer.parse_args(["start", "--open"])
+        state = {"pid": 42, "url": "http://127.0.0.1:8765/", "log": "viewer.log"}
+
+        with (
+            patch.object(viewer, "running_daemon_state", return_value=state),
+            patch.object(viewer, "viewer_health", return_value=(True, "responding")),
+            patch.object(viewer, "open_browser", return_value=False),
+        ):
+            self.assertEqual(viewer.command_start(args), 1)
 
     def test_statusbar_is_collapsed_behind_slash_toggle(self) -> None:
         for html in (viewer.VIEW_HTML, viewer.TYPESET_HTML):

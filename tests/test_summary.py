@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 import tempfile
 import unittest
 from datetime import date
@@ -92,8 +93,12 @@ class SummaryCommandTests(unittest.TestCase):
             patch.object(browser, "browser_command", return_value=["google-chrome"]),
             patch.object(browser.subprocess, "Popen") as popen,
         ):
-            browser.open_browser("file:///tmp/summary.html", args)
+            popen.return_value.wait.side_effect = subprocess.TimeoutExpired(
+                "google-chrome", 0.5
+            )
+            opened = browser.open_browser("file:///tmp/summary.html", args)
 
+        self.assertTrue(opened)
         self.assertEqual(
             popen.call_args.args[0],
             ["google-chrome", "--new-window", "file:///tmp/summary.html"],

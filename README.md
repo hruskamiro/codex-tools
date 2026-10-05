@@ -71,6 +71,13 @@ codex-viewer status       # check the background server
 codex-viewer stop         # stop it
 ```
 
+The viewer uses the desktop's default browser. Diagnose startup, port, browser,
+and optional LaTeX support with `ct viewer doctor`. To override browser
+selection, use `ct viewer open --browser firefox` or set
+`CODEX_TOOLS_BROWSER`. Background-server failures report the private log path
+under `~/.local/state/codex-tools/viewer/` instead of claiming startup
+succeeded.
+
 **Markdown is the portable default.** Press `T` inside a conversation to switch
 between Markdown and the LaTeX view. In the LaTeX view, local attachments and
 external links from each assistant answer are collected in a footer below it.
