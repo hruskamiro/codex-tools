@@ -142,6 +142,17 @@ def configured_typeset_code_mode() -> tuple[str, str]:
     return str(selected), source
 
 
+def configured_browser() -> tuple[str | None, str]:
+    selected, source = config.resolve("viewer.browser")
+    command = None if selected == "default" else str(selected)
+    return command, f"{selected} ({source})"
+
+
+def add_viewer_browser_args(parser: argparse.ArgumentParser) -> None:
+    command, label = configured_browser()
+    add_browser_args(parser, default=command, default_label=label)
+
+
 def add_server_args(parser: argparse.ArgumentParser) -> None:
     configured_code_mode, code_mode_source = configured_typeset_code_mode()
     parser.add_argument(
@@ -188,7 +199,7 @@ def add_server_args(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Open the viewer in the default browser after starting.",
     )
-    add_browser_args(parser)
+    add_viewer_browser_args(parser)
     parser.add_argument(
         "--no-self-reload",
         action="store_true",
@@ -271,7 +282,7 @@ def parse_args(
     status.set_defaults(func=command_status)
 
     open_cmd = sub.add_parser("open", help="Open the viewer in a browser.")
-    add_browser_args(open_cmd)
+    add_viewer_browser_args(open_cmd)
     open_cmd.set_defaults(func=command_open)
 
     pick = sub.add_parser("pick", help="Choose a conversation and open it in a browser.")
@@ -1457,12 +1468,17 @@ def latex_requirement_checks() -> list[tuple[str, bool, str]]:
 
 def viewer_startup_checks() -> list[tuple[str, bool, str]]:
     checks: list[tuple[str, bool, str]] = []
-    command = browser_command()
+    configured, configured_label = configured_browser()
+    command = browser_command(configured)
     checks.append(
         (
             "browser launcher",
             command is not None,
-            " ".join(command) if command else "not found; use --browser COMMAND",
+            (
+                f"{' '.join(command)}; setting: {configured_label}"
+                if command
+                else f"not found; setting: {configured_label}"
+            ),
         )
     )
 
@@ -1531,6 +1547,7 @@ def command_doctor(args: argparse.Namespace) -> int:
 
 def default_server_args() -> argparse.Namespace:
     code_mode, _ = configured_typeset_code_mode()
+    selected_browser, _ = configured_browser()
     return argparse.Namespace(
         sessions_root=DEFAULT_SESSIONS_ROOT,
         include_archive=False,
@@ -1540,7 +1557,7 @@ def default_server_args() -> argparse.Namespace:
         allow_remote=False,
         port=DEFAULT_PORT,
         open=False,
-        browser=None,
+        browser=selected_browser,
         same_window=False,
         no_self_reload=True,
         typeset_debug=False,

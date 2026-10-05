@@ -74,7 +74,15 @@ codex-viewer stop         # stop it
 The viewer uses the desktop's default browser. Diagnose startup, port, browser,
 and optional LaTeX support with `ct viewer doctor`. To override browser
 selection, use `ct viewer open --browser firefox` or set
-`CODEX_TOOLS_BROWSER`. Background-server failures report the private log path
+`viewer.browser` in the user configuration:
+
+```bash
+ct config set viewer.browser firefox
+ct config unset viewer.browser       # restore the desktop default
+```
+
+`CODEX_TOOLS_BROWSER` remains available when the setting is `default`.
+Background-server failures report the private log path
 under `~/.local/state/codex-tools/viewer/` instead of claiming startup
 succeeded.
 

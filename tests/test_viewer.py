@@ -33,6 +33,30 @@ class ViewerCommandTests(unittest.TestCase):
         self.assertEqual(result, 0)
         pick.assert_called_once()
 
+    def test_viewer_browser_config_becomes_command_default(self) -> None:
+        with patch.object(
+            viewer.config,
+            "resolve",
+            side_effect=lambda key: (
+                ("firefox --private-window", "user config")
+                if key == "viewer.browser"
+                else ("auto", "built-in")
+            ),
+        ):
+            args = viewer.parse_args(["open"])
+
+        self.assertEqual(args.browser, "firefox --private-window")
+
+    def test_browser_flag_overrides_viewer_browser_config(self) -> None:
+        with patch.object(
+            viewer.config,
+            "resolve",
+            return_value=("firefox", "user config"),
+        ):
+            args = viewer.parse_args(["open", "--browser", "brave-browser"])
+
+        self.assertEqual(args.browser, "brave-browser")
+
     def test_viewer_doctor_reports_ready_and_missing_requirements(self) -> None:
         args = viewer.parse_args(["doctor"])
         startup = [("browser launcher", True, "/usr/bin/xdg-open")]

@@ -119,6 +119,12 @@ SETTINGS = {
             ("markdown", "latex"),
         ),
         Setting(
+            "viewer.browser",
+            "str",
+            "default",
+            "Browser command; 'default' uses the desktop default browser.",
+        ),
+        Setting(
             "viewer.typeset_code_mode",
             "str",
             "auto",

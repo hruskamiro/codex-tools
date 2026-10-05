@@ -28,13 +28,24 @@ SYSTEM_OPENERS = (
 )
 
 
-def add_browser_args(parser: argparse.ArgumentParser) -> None:
+def add_browser_args(
+    parser: argparse.ArgumentParser,
+    *,
+    default: str | None = None,
+    default_label: str | None = None,
+) -> None:
+    default_help = (
+        f"Effective default: {default_label}."
+        if default_label
+        else (
+            "Default: CODEX_TOOLS_BROWSER, then CODEX_VIEWER_BROWSER, BROWSER, "
+            "then the desktop default browser."
+        )
+    )
     parser.add_argument(
         "--browser",
-        help=(
-            "Browser command. Default: CODEX_TOOLS_BROWSER, then "
-            "CODEX_VIEWER_BROWSER, BROWSER, then the desktop default browser."
-        ),
+        default=default,
+        help=f"Browser command. {default_help}",
     )
     parser.add_argument(
         "--same-window",

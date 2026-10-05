@@ -26,9 +26,13 @@ class ConfigTests(unittest.TestCase):
 
             config.set_value("summary.daily.words", "275", path)
             config.set_value("summary.weekly.model", "test-model", path)
+            config.set_value("viewer.browser", "firefox --private-window", path)
 
             self.assertEqual(config.value("summary.daily.words", path), 275)
             self.assertEqual(config.value("summary.weekly.model", path), "test-model")
+            self.assertEqual(
+                config.value("viewer.browser", path), "firefox --private-window"
+            )
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700)
 
@@ -55,6 +59,7 @@ class ConfigTests(unittest.TestCase):
             self.assertIn("[summary.daily]", rendered)
             self.assertIn("# words = 200", rendered)
             self.assertIn("[viewer]", rendered)
+            self.assertIn('# browser = "default"', rendered)
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             output.assert_called_once_with(f"Configuration is valid: {path}")
 
