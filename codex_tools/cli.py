@@ -4,7 +4,17 @@ from __future__ import annotations
 
 import sys
 
-from codex_tools import app_server, aliases, config, manager, search, structured, summary, viewer
+from codex_tools import (
+    activity,
+    app_server,
+    aliases,
+    config,
+    manager,
+    search,
+    structured,
+    summary,
+    viewer,
+)
 
 
 def help_text() -> str:
@@ -12,6 +22,7 @@ def help_text() -> str:
 usage: codex-tools <command> [options]
 
 Commands:
+  activity    List conversations active within a local time range.
   search      Search local Codex conversations and thread history.
   summary     Build daily/weekly summaries or a static summary site.
   viewer      Run the local conversation viewer.
@@ -23,6 +34,7 @@ Commands:
   diagnose    Inspect local Codex source health.
 
 Examples:
+  codex-tools activity --from yesterday
   codex-tools search "sqlite history"
   codex-tools summary today --show-context
   codex-tools summary day 2026-09-11
@@ -51,6 +63,8 @@ def main(argv: list[str] | None = None) -> int:
 
     command = args[0]
     rest = args[1:]
+    if command == "activity":
+        return activity.main(rest)
     if command == "search":
         return search.main(rest)
     if command == "summary":

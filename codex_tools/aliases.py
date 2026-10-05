@@ -20,7 +20,7 @@ _codex_tools_completion() {
   local cur prev words cword
   _init_completion -n : || return
 
-  local commands="search summary viewer manager app-server alias structured config diagnose"
+  local commands="activity search summary viewer manager app-server alias structured config diagnose"
   local summary_commands="today yesterday day week model site clean"
   local viewer_commands="serve start restart stop status open pick doctor"
   local manager_commands="new rename export import list run install uninstall remove rm delete path doctor repair"
