@@ -183,6 +183,26 @@ class ViewerCommandTests(unittest.TestCase):
         self.assertEqual(summary["title"], "Indexed title")
         self.assertEqual(summary["titleSource"], search.TITLE_SOURCE_SESSION_INDEX)
 
+    def test_viewer_state_refreshes_titles_when_session_index_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            index = root / "session_index.jsonl"
+            index.write_text(
+                json.dumps({"id": "thread-1", "thread_name": "Old title"}) + "\n",
+                encoding="utf-8",
+            )
+            state = viewer.ViewerState(root, root / "archive", False, index)
+
+            self.assertEqual(state.titles["thread-1"].text, "Old title")
+
+            index.write_text(
+                json.dumps({"id": "thread-1", "thread_name": "Current title"})
+                + "\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(state.titles["thread-1"].text, "Current title")
+
     def test_session_deduplication_prefers_the_codex_cli_thread_rollout(self) -> None:
         items = [
             {

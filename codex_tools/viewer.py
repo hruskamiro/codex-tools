@@ -449,7 +449,30 @@ class ViewerState:
         self.typeset_debug = typeset_debug
         self.typeset_code_mode = typeset_code_mode
         self.web_assets = web_assets
-        self.titles = load_session_index_titles(session_index)
+        self.session_index = session_index.expanduser().resolve()
+        self._titles_lock = threading.Lock()
+        self._titles_signature = self._session_index_signature()
+        self._titles = load_session_index_titles(self.session_index)
+
+    def _session_index_signature(self) -> tuple[int, int] | None:
+        try:
+            stat = self.session_index.stat()
+        except OSError:
+            return None
+        return (stat.st_mtime_ns, stat.st_size)
+
+    @property
+    def titles(self) -> dict[str, SessionTitle]:
+        """Return titles refreshed when Codex changes its session index."""
+        signature = self._session_index_signature()
+        if signature == self._titles_signature:
+            return self._titles
+        with self._titles_lock:
+            signature = self._session_index_signature()
+            if signature != self._titles_signature:
+                self._titles = load_session_index_titles(self.session_index)
+                self._titles_signature = signature
+        return self._titles
 
     def allowed_roots(self) -> list[Path]:
         roots = [self.sessions_root]
