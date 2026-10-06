@@ -57,7 +57,12 @@ LATEX_FILES = (
     "tabularx.sty",
     "colortbl.sty",
 )
-LATEX_FONTS = ("TeX Gyre Pagella", "TeX Gyre Heros", "PT Mono")
+LATEX_FONTS = (
+    "TeX Gyre Pagella",
+    "TeX Gyre Heros",
+    "PT Mono",
+    "DejaVu Sans Mono",
+)
 VENDOR_DIR = Path(__file__).with_name("vendor")
 SUMMARY_HEAD_LINES = 80
 SUMMARY_TAIL_LINES = 80
@@ -1562,7 +1567,7 @@ def command_doctor(args: argparse.Namespace) -> int:
         print("Ubuntu/Debian install hint:")
         print(
             "  sudo apt install texlive-xetex texlive-latex-extra "
-            "fonts-texgyre fonts-paratype"
+            "fonts-texgyre fonts-paratype fonts-dejavu-core"
         )
     return 0 if startup_ok and (default_view != "latex" or latex_ok) else 1
 

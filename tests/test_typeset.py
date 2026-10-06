@@ -19,6 +19,11 @@ class TypesetTests(unittest.TestCase):
         self.assertIn(r"\usepackage{enumitem}", document)
         self.assertNotIn(r"\usepackage{fancyvrb}", document)
         self.assertIn(r"\setmonofont[Scale=MatchLowercase]{PT Mono}", document)
+        self.assertIn(
+            r"\newfontfamily\CodexFallbackMono[Scale=MatchLowercase]{DejaVu Sans Mono}",
+            document,
+        )
+        self.assertIn(r"\iffontchar\font`#1", document)
         self.assertIn(r"\linespread{1.08}", document)
         self.assertNotIn(r"\usepackage{tikz}", document)
         self.assertNotIn(r"\usepackage{varwidth}", document)
@@ -245,6 +250,13 @@ class TypesetTests(unittest.TestCase):
             r"\CodexInlineCodeBreak{}\CodexInlineCodeChunk{path}}",
         )
 
+    def test_inline_code_routes_unicode_through_font_fallback(self) -> None:
+        latex = typeset.render_inline("`E ≤ 10⁻⁴; ρ ≈ ∑ x → ∞`")
+
+        for character in "≤⁻⁴ρ≈∑→∞":
+            self.assertIn(r"\CodexInlineCodeUnicode{" + character + "}", latex)
+        self.assertNotIn(r"\ensuremath", latex)
+
     @unittest.skipUnless(
         shutil.which("xelatex") and shutil.which("pdftotext"),
         "XeLaTeX and pdftotext are required for the Unicode PDF regression test",
@@ -252,7 +264,8 @@ class TypesetTests(unittest.TestCase):
     def test_inline_code_preserves_unicode_in_rendered_pdf(self) -> None:
         markdown = (
             "Inline: `Podeliť sa o citát` and `Poslať pozvánku`.\n\n"
-            "Characters: `ľščžýáíéôäňďť`."
+            "Characters: `ľščžýáíéôäňďť`.\n\n"
+            "Threshold: `E ≤ 10⁻⁴`."
         )
         with tempfile.TemporaryDirectory() as temporary, patch.dict(
             "os.environ", {"XDG_CACHE_HOME": temporary}
@@ -272,18 +285,19 @@ class TypesetTests(unittest.TestCase):
         self.assertIn("Podeliť sa o citát", extracted)
         self.assertIn("Poslať pozvánku", extracted)
         self.assertIn("ľščžýáíéôäňďť", extracted)
+        self.assertIn("E ≤ 10⁻⁴", extracted)
 
     def test_inline_code_keeps_unicode_in_background_chunks(self) -> None:
-        latex = typeset.render_inline("`Podeliť sa o citát — ľščžňď`")
+        latex = typeset.render_inline("`citát — ľ`")
 
         self.assertEqual(
             latex,
-            r"\CodexInlineCode{\CodexInlineCodeChunk{Podeliť}"
-            r"\CodexInlineCodeSpace{}\CodexInlineCodeChunk{sa}"
-            r"\CodexInlineCodeSpace{}\CodexInlineCodeChunk{o}"
-            r"\CodexInlineCodeSpace{}\CodexInlineCodeChunk{citát}"
-            r"\CodexInlineCodeSpace{}\CodexInlineCodeChunk{—}"
-            r"\CodexInlineCodeSpace{}\CodexInlineCodeChunk{ľščžňď}}",
+            r"\CodexInlineCode{\CodexInlineCodeChunk{cit"
+            r"\CodexInlineCodeUnicode{á}t}"
+            r"\CodexInlineCodeSpace{}\CodexInlineCodeChunk{"
+            r"\CodexInlineCodeUnicode{—}}"
+            r"\CodexInlineCodeSpace{}\CodexInlineCodeChunk{"
+            r"\CodexInlineCodeUnicode{ľ}}}",
         )
 
     def test_inline_latex_math_is_preserved_outside_code(self) -> None:

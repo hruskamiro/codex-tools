@@ -25,7 +25,7 @@ except ImportError:  # Pygments is optional when running directly from a checkou
     ClassNotFound = LookupError
 
 
-RENDERER_VERSION = "typeset-v45"
+RENDERER_VERSION = "typeset-v47"
 DEFAULT_PARAGRAPH_MODE = "spaced"
 DEFAULT_HEADER_MODE = "external"
 BODY_LINE_STRETCH = "1.08"
@@ -174,7 +174,10 @@ def render_inline_code(value: str) -> str:
             previous_was_space = True
             continue
         previous_was_space = False
-        chunk.append(latex_escape(char))
+        escaped = latex_escape(char)
+        if ord(char) > 127:
+            escaped = r"\CodexInlineCodeUnicode{" + escaped + "}"
+        chunk.append(escaped)
         if char in INLINE_CODE_BREAK_AFTER:
             flush_chunk()
             rendered.append(r"\CodexInlineCodeBreak{}")
@@ -766,6 +769,7 @@ def document_for(
 \setmainfont{{TeX Gyre Pagella}}
 \setsansfont{{TeX Gyre Heros}}
 \setmonofont[Scale=MatchLowercase]{{PT Mono}}
+\newfontfamily\CodexFallbackMono[Scale=MatchLowercase]{{DejaVu Sans Mono}}
 \linespread{{{BODY_LINE_STRETCH}}}
 \definecolor{{CodexInk}}{{HTML}}{{282B27}}
 \definecolor{{CodexAccent}}{{HTML}}{{5E673B}}
@@ -800,6 +804,9 @@ def document_for(
 \newcommand{{\CodexNumber}}[1]{{{{\color{{CodexNumberColor}}#1}}}}
 \newcommand{{\CodexString}}[1]{{{{\color{{CodexStringColor}}#1}}}}
 \newcommand{{\CodexInlineCodeBreak}}{{\allowbreak}}
+\newcommand{{\CodexInlineCodeUnicode}}[1]{{%
+  \iffontchar\font`#1#1\else{{\CodexFallbackMono #1}}\fi%
+}}
 \newcommand{{\CodexInlineCodeChunk}}[1]{{\colorbox{{CodexCode}}{{\strut\ttfamily #1}}}}
 \newcommand{{\CodexInlineCodeSpace}}{{%
   \colorbox{{CodexCode}}{{\strut\hspace{{0.55em}}}}\allowbreak%

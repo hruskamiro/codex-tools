@@ -129,7 +129,7 @@ For high-quality equations, tables, prose, and highlighted code, install the
 optional typesetting dependencies:
 
 ```bash
-sudo apt install texlive-xetex texlive-latex-extra fonts-texgyre fonts-paratype
+sudo apt install texlive-xetex texlive-latex-extra fonts-texgyre fonts-paratype fonts-dejavu-core
 ct viewer doctor
 ct viewer --set-default-latex
 ```
