@@ -20,10 +20,13 @@ _codex_tools_completion() {
   local cur prev words cword
   _init_completion -n : || return
 
-  local commands="activity search summary viewer manager alias structured config diagnose"
+  local commands="activity agents search summary viewer manager relay alias structured config diagnose"
+  local agents_commands="list show send ui"
   local summary_commands="today yesterday day week model site clean"
   local viewer_commands="serve start restart stop status open pick doctor"
   local manager_commands="new rename export import list run install uninstall remove rm delete path doctor repair"
+  local relay_commands="cache"
+  local relay_cache_commands="refresh status"
   local alias_commands="install remove list"
   local structured_commands="run batch check connection"
   local structured_connection_commands="login status usage list logout test"
@@ -35,6 +38,9 @@ _codex_tools_completion() {
   fi
 
   case "${words[1]}" in
+    agents)
+      [[ ${cword} -eq 2 ]] && COMPREPLY=( $(compgen -W "${agents_commands}" -- "${cur}") )
+      ;;
     summary)
       [[ ${cword} -eq 2 ]] && COMPREPLY=( $(compgen -W "${summary_commands}" -- "${cur}") )
       ;;
@@ -43,6 +49,10 @@ _codex_tools_completion() {
       ;;
     manager)
       [[ ${cword} -eq 2 ]] && COMPREPLY=( $(compgen -W "${manager_commands}" -- "${cur}") )
+      ;;
+    relay)
+      [[ ${cword} -eq 2 ]] && COMPREPLY=( $(compgen -W "${relay_commands}" -- "${cur}") )
+      [[ ${cword} -eq 3 && "${words[2]}" == "cache" ]] && COMPREPLY=( $(compgen -W "${relay_cache_commands}" -- "${cur}") )
       ;;
     alias)
       [[ ${cword} -eq 2 ]] && COMPREPLY=( $(compgen -W "${alias_commands}" -- "${cur}") )

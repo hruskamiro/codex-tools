@@ -87,6 +87,37 @@ Without the alias, use `codex-tools viewer` instead.
 The viewer reads local Codex sessions and presents them in a searchable,
 keyboard-friendly browser interface.
 
+Inspect the Codex sessions currently loaded on this machine, read their latest
+exchange, or queue a message using the same session names and IDs:
+
+```bash
+ct agents
+ct agents show SESSION
+ct agents send SESSION "Check the tests and report back."
+ct agents ui
+```
+
+`ct agents` reads the managed Codex daemon's loaded-thread list, so it shows
+only sessions that Codex currently reports as Working or Ready—not archived
+transcript history. It uses `codex queue` for message delivery. `ct agents ui`
+refreshes the local relay cache and opens the terminal **Agent Console**,
+styled after the Codex CLI. You can switch among cached local or remote agents,
+read their recent messages, search, scroll, and send or queue a message without
+leaving the terminal. Use Left/Right to select a pane, Up/Down or the mouse
+wheel to navigate, `i` to compose, `/` to search, and `r` to refresh. Press
+Ctrl-C twice to quit.
+
+The relay foundation keeps normalized sessions, messages, synchronization
+cursors, and an idempotent outgoing-message queue in a private local SQLite
+cache. Populate or inspect the local-machine snapshot with:
+
+```bash
+ct relay cache refresh
+ct relay cache status
+```
+
+The cache is transport-neutral; it does not configure or depend on a VPN.
+
 ```bash
 ct viewer                 # choose and open a conversation
 codex-viewer status       # check the background server

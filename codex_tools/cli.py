@@ -6,9 +6,11 @@ import sys
 
 from codex_tools import (
     activity,
+    agents,
     aliases,
     config,
     manager,
+    relay,
     search,
     structured,
     summary,
@@ -22,10 +24,12 @@ usage: codex-tools <command> [options]
 
 Commands:
   activity    List conversations active within a local time range.
+  agents      Inspect and message local Codex agent sessions.
   search      Search local Codex conversations and thread history.
   summary     Build daily/weekly summaries or a static summary site.
   viewer      Run the local conversation viewer.
   manager     Manage isolated Codex profiles.
+  relay       Manage resilient agent synchronization and its local cache.
   alias       Install or remove the short ct alias.
   structured  Run structured tasks and manage their connections.
   config      Inspect or change per-user defaults.
@@ -33,6 +37,8 @@ Commands:
 
 Examples:
   codex-tools activity --from yesterday
+  codex-tools agents
+  codex-tools agents show SESSION
   codex-tools search "sqlite history"
   codex-tools summary today --show-context
   codex-tools summary day 2026-09-11
@@ -40,6 +46,7 @@ Examples:
   codex-tools summary site
   codex-tools viewer
   codex-tools manager list
+  codex-tools relay cache status
   codex-tools alias install
   codex-tools structured connection status
   codex-tools structured connection usage
@@ -63,6 +70,8 @@ def main(argv: list[str] | None = None) -> int:
     rest = args[1:]
     if command == "activity":
         return activity.main(rest)
+    if command == "agents":
+        return agents.main(rest)
     if command == "search":
         return search.main(rest)
     if command == "summary":
@@ -71,6 +80,8 @@ def main(argv: list[str] | None = None) -> int:
         return viewer.main(rest, prog="codex-tools viewer")
     if command == "manager":
         return manager.main(rest, prog="codex-tools manager")
+    if command == "relay":
+        return relay.main(rest)
     if command == "app-server":
         print(
             "error: `codex-tools app-server` was renamed to "
