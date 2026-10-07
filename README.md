@@ -16,7 +16,7 @@ OpenAI.
 - **Keep multiple Codex logins separate** while optionally sharing conversations.
 - **Move a login to another machine** with passphrase-encrypted profile exports.
 - **Run schema-constrained tasks** with saved prompts, results, and token usage.
-- **Run structured tasks through a ChatGPT-plan app-server connection.**
+- **Run structured tasks through a separately authenticated ChatGPT-plan connection.**
 
 ## Quick start
 
@@ -306,9 +306,9 @@ To use the lower-overhead app-server backend, authorize Codex Tools once and
 select the saved connection on each run or batch:
 
 ```bash
-ct app-server login --connection default
-ct app-server status --connection default
-ct app-server usage
+ct structured connection login --connection default
+ct structured connection status --connection default
+ct structured connection usage
 
 ct structured run \
   --backend app-server \

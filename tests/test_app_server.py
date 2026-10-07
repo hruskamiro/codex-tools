@@ -195,7 +195,7 @@ for line in sys.stdin:
             self.assertTrue(structured.check_run(run_dir)["ok"])
 
     def test_app_server_uses_the_package_version(self) -> None:
-        self.assertEqual(__version__, "0.5.0")
+        self.assertEqual(__version__, "0.6.0")
         self.assertIn("attr: codex_tools.__version__", Path("setup.cfg").read_text())
 
     def test_app_server_disables_shell_tools(self) -> None:

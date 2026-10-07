@@ -84,13 +84,13 @@ class AliasTests(unittest.TestCase):
 
     def test_completion_covers_current_command_groups(self) -> None:
         expected = {
-            "activity search summary viewer manager app-server alias structured config diagnose",
+            "activity search summary viewer manager alias structured config diagnose",
             "today yesterday day week model site clean",
             "serve start restart stop status open pick doctor",
             "new rename export import list run install uninstall remove rm delete path doctor repair",
             "login status usage list logout test",
             "install remove list",
-            "run batch check",
+            "run batch check connection",
             "show path edit validate set unset",
         }
 
@@ -98,6 +98,10 @@ class AliasTests(unittest.TestCase):
             self.assertIn(f'="{commands}"', aliases.COMPLETION_SCRIPT)
         self.assertIn(
             "complete -F _codex_tools_completion ct codex-tools",
+            aliases.COMPLETION_SCRIPT,
+        )
+        self.assertIn(
+            'structured_connection_commands="login status usage list logout test"',
             aliases.COMPLETION_SCRIPT,
         )
 

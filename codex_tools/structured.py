@@ -27,6 +27,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Run reproducible, schema-constrained Codex tasks.",
     )
     commands = parser.add_subparsers(dest="structured_command", required=True)
+    commands.add_parser(
+        "connection",
+        add_help=False,
+        help="Manage ChatGPT-plan connections for the app-server backend.",
+    )
     run = commands.add_parser("run", help="Run one prompt under a JSON Schema.")
     run.add_argument("--prompt", required=True, help="Prompt file, or '-' for stdin.")
     run.add_argument("--schema", required=True, type=Path, help="JSON Schema file.")
@@ -854,7 +859,12 @@ def check_path(path: Path) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
+    raw_args = list(sys.argv[1:] if argv is None else argv)
+    if raw_args and raw_args[0] == "connection":
+        return app_server.main(
+            raw_args[1:], prog="codex-tools structured connection"
+        )
+    args = parse_args(raw_args)
     exit_code = 0
     try:
         if args.structured_command == "run":

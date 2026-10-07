@@ -20,13 +20,13 @@ _codex_tools_completion() {
   local cur prev words cword
   _init_completion -n : || return
 
-  local commands="activity search summary viewer manager app-server alias structured config diagnose"
+  local commands="activity search summary viewer manager alias structured config diagnose"
   local summary_commands="today yesterday day week model site clean"
   local viewer_commands="serve start restart stop status open pick doctor"
   local manager_commands="new rename export import list run install uninstall remove rm delete path doctor repair"
-  local app_server_commands="login status usage list logout test"
   local alias_commands="install remove list"
-  local structured_commands="run batch check"
+  local structured_commands="run batch check connection"
+  local structured_connection_commands="login status usage list logout test"
   local config_commands="show path edit validate set unset"
 
   if [[ ${cword} -eq 1 ]]; then
@@ -44,14 +44,12 @@ _codex_tools_completion() {
     manager)
       [[ ${cword} -eq 2 ]] && COMPREPLY=( $(compgen -W "${manager_commands}" -- "${cur}") )
       ;;
-    app-server)
-      [[ ${cword} -eq 2 ]] && COMPREPLY=( $(compgen -W "${app_server_commands}" -- "${cur}") )
-      ;;
     alias)
       [[ ${cword} -eq 2 ]] && COMPREPLY=( $(compgen -W "${alias_commands}" -- "${cur}") )
       ;;
     structured)
       [[ ${cword} -eq 2 ]] && COMPREPLY=( $(compgen -W "${structured_commands}" -- "${cur}") )
+      [[ ${cword} -eq 3 && "${words[2]}" == "connection" ]] && COMPREPLY=( $(compgen -W "${structured_connection_commands}" -- "${cur}") )
       ;;
     config)
       [[ ${cword} -eq 2 ]] && COMPREPLY=( $(compgen -W "${config_commands}" -- "${cur}") )

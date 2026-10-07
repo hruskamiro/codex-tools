@@ -873,9 +873,13 @@ def run_structured_task(
     )
 
 
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+def parse_args(
+    argv: list[str] | None = None,
+    *,
+    prog: str = "codex-tools structured connection",
+) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        prog="codex-tools app-server",
+        prog=prog,
         description="Manage ChatGPT-plan connections for the app-server backend.",
     )
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT, help=argparse.SUPPRESS)
@@ -905,8 +909,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
+def main(
+    argv: list[str] | None = None,
+    *,
+    prog: str = "codex-tools structured connection",
+) -> int:
+    args = parse_args(argv, prog=prog)
     try:
         if args.command == "login":
             result = public_connection(
