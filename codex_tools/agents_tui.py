@@ -104,16 +104,21 @@ def transcript_lines(
                 and "|" in paragraph
                 and TABLE_SEPARATOR_RE.match(paragraphs[index + 1])
             ):
-                lines.append(("  " + paragraph.strip(), "table_header"))
-                lines.append(
-                    ("  " + paragraphs[index + 1].strip(), "table_separator")
-                )
+                header = split_table_row(paragraph)
+                separator = split_table_row(paragraphs[index + 1])
                 index += 2
+                rows: list[list[str]] = []
                 while index < len(paragraphs) and "|" in paragraphs[index]:
-                    lines.append(
-                        ("  " + paragraphs[index].strip(), "table_row")
-                    )
+                    rows.append(split_table_row(paragraphs[index]))
                     index += 1
+                lines.extend(
+                    format_terminal_table(
+                        header,
+                        separator,
+                        rows,
+                        content_width + 2,
+                    )
+                )
                 continue
             wrapped = textwrap.wrap(
                 paragraph,
@@ -127,6 +132,129 @@ def transcript_lines(
             index += 1
         lines.append(("", f"{role}_gap"))
     return lines
+
+
+def split_table_row(line: str) -> list[str]:
+    cells: list[str] = []
+    current: list[str] = []
+    escaped = False
+    in_code = False
+    for char in line.strip():
+        if escaped:
+            if char != "|":
+                current.append("\\")
+            current.append(char)
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif char == "`":
+            in_code = not in_code
+            current.append(char)
+        elif char == "|" and not in_code:
+            cells.append("".join(current).strip())
+            current = []
+        else:
+            current.append(char)
+    if escaped:
+        current.append("\\")
+    cells.append("".join(current).strip())
+    if cells and not cells[0]:
+        cells.pop(0)
+    if cells and not cells[-1]:
+        cells.pop()
+    return cells
+
+
+def terminal_table_widths(rows: list[list[str]], width: int) -> list[int]:
+    column_count = max((len(row) for row in rows), default=0)
+    if not column_count:
+        return []
+    inner_width = max(column_count, width - (3 * column_count + 3))
+    natural = [
+        max((len(row[index]) if index < len(row) else 0 for row in rows), default=1)
+        for index in range(column_count)
+    ]
+    minimum = [min(max(3, value), 12) for value in natural]
+    while sum(minimum) > inner_width and any(value > 1 for value in minimum):
+        widest = max(range(column_count), key=minimum.__getitem__)
+        minimum[widest] -= 1
+    widths = [max(floor, value) for floor, value in zip(minimum, natural)]
+    while sum(widths) > inner_width:
+        candidates = [
+            index for index, value in enumerate(widths) if value > minimum[index]
+        ]
+        if not candidates:
+            break
+        widest = max(candidates, key=widths.__getitem__)
+        widths[widest] -= 1
+    return widths
+
+
+def format_terminal_table(
+    header: list[str],
+    separator: list[str],
+    rows: list[list[str]],
+    width: int,
+) -> list[tuple[str, str]]:
+    column_count = max(len(header), len(separator), *(len(row) for row in rows))
+    normalized = [
+        (row + [""] * column_count)[:column_count]
+        for row in [header, *rows]
+    ]
+    widths = terminal_table_widths(normalized, width)
+    if not widths:
+        return []
+    alignments = [
+        (
+            "center"
+            if cell.startswith(":") and cell.endswith(":")
+            else "right" if cell.endswith(":") else "left"
+        )
+        for cell in (separator + ["---"] * column_count)[:column_count]
+    ]
+
+    def border(left: str, middle: str, right: str) -> str:
+        return "  " + left + middle.join("─" * (value + 2) for value in widths) + right
+
+    def rendered_row(cells: list[str], style: str) -> list[tuple[str, str]]:
+        wrapped = [
+            textwrap.wrap(
+                cell,
+                width=max(1, column_width),
+                break_long_words=True,
+                break_on_hyphens=True,
+            )
+            or [""]
+            for cell, column_width in zip(cells, widths)
+        ]
+        height = max(len(cell_lines) for cell_lines in wrapped)
+        result = []
+        for row_index in range(height):
+            pieces = []
+            for column_index, column_width in enumerate(widths):
+                value = (
+                    wrapped[column_index][row_index]
+                    if row_index < len(wrapped[column_index])
+                    else ""
+                )
+                alignment = alignments[column_index]
+                if alignment == "right":
+                    value = value.rjust(column_width)
+                elif alignment == "center":
+                    value = value.center(column_width)
+                else:
+                    value = value.ljust(column_width)
+                pieces.append(value)
+            result.append(("  │ " + " │ ".join(pieces) + " │", style))
+        return result
+
+    output = [(border("┌", "┬", "┐"), "table_separator")]
+    output.extend(rendered_row(normalized[0], "table_header"))
+    output.append((border("├", "┼", "┤"), "table_separator"))
+    for row in normalized[1:]:
+        output.extend(rendered_row(row, "table_row"))
+    output.append((border("└", "┴", "┘"), "table_separator"))
+    return output
 
 
 def add_text(window: Any, y: int, x: int, text: str, width: int, attr: int = 0) -> None:
@@ -160,8 +288,8 @@ def display_markdown_links(text: str) -> str:
 
 def table_spans(text: str) -> list[tuple[str, str | None]]:
     spans: list[tuple[str, str | None]] = []
-    for part in re.split(r"(\|)", text):
-        if part == "|":
+    for part in re.split(r"([|│├┼┤┌┬┐└┴┘])", text):
+        if part and part in "|│├┼┤┌┬┐└┴┘":
             spans.append((part, "table_border"))
         elif part:
             spans.extend(semantic_spans(part))
@@ -229,6 +357,22 @@ def mouse_scroll_delta(button_state: int, amount: int = 3) -> int:
     if button_state & curses.BUTTON5_PRESSED:
         return -amount
     return 0
+
+
+def change_pane(
+    focus: str, maximized: bool, key: int
+) -> tuple[str, bool]:
+    if key == curses.KEY_LEFT:
+        if maximized:
+            return "conversation", False
+        return "agents", False
+    if key == curses.KEY_RIGHT:
+        if focus == "agents":
+            return "conversation", False
+        return "conversation", True
+    if key == ord("m"):
+        return "conversation", not maximized
+    return focus, maximized
 
 
 def colors() -> dict[str, int]:
@@ -355,6 +499,7 @@ def run_console(
         selected = 0
         scroll = 0
         focus = "agents"
+        maximized = False
         status = ""
         interrupt_armed = False
 
@@ -385,56 +530,57 @@ def run_console(
                     status = "Press Ctrl-C again to quit."
                 continue
 
-            sidebar = min(36, max(25, width // 3))
-            main_x = sidebar + 1
+            sidebar = 0 if maximized else min(36, max(25, width // 3))
+            main_x = 0 if maximized else sidebar + 1
             main_width = width - main_x
-            sidebar_heading = palette["focus"] if focus == "agents" else palette["header"]
-            add_text(stdscr, 0, 1, "Agent Console", sidebar - 2, sidebar_heading)
-            working = sum(item.agent.get("status") == "active" for item in items)
-            ready = sum(item.agent.get("status") == "idle" for item in items)
-            add_text(
-                stdscr, 1, 1, f"{working} working · {ready} ready",
-                sidebar - 2, palette["muted"],
-            )
-            if query:
-                add_text(stdscr, 2, 1, f"filter: {query}", sidebar - 2, palette["status"])
-            try:
-                stdscr.vline(0, sidebar, curses.ACS_VLINE, height - 1)
-            except curses.error:
-                pass
-
-            row = 3
-            previous_host = None
-            visible_start = max(0, selected - max(0, (height - 6) // 2))
-            for index, item in enumerate(shown[visible_start:], visible_start):
-                if row >= height - 2:
-                    break
-                if item.host_id != previous_host:
-                    add_text(stdscr, row, 1, compact(item.host_name, sidebar - 3), sidebar - 2, palette["muted"] | curses.A_BOLD)
-                    row += 1
-                    previous_host = item.host_id
-                if row >= height - 2:
-                    break
-                selected_marker = "›" if index == selected else " "
-                if index == selected:
-                    attr = (
-                        palette["selected"]
-                        if focus == "agents"
-                        else palette["header"]
-                    )
-                else:
-                    attr = palette["normal"]
-                title = str(item.agent.get("title") or item.agent.get("agent_id") or "unnamed")
-                marker = "●" if item.agent.get("status") == "active" else "○"
+            if not maximized:
+                sidebar_heading = palette["focus"] if focus == "agents" else palette["header"]
+                add_text(stdscr, 0, 1, "Agent Console", sidebar - 2, sidebar_heading)
+                working = sum(item.agent.get("status") == "active" for item in items)
+                ready = sum(item.agent.get("status") == "idle" for item in items)
                 add_text(
-                    stdscr,
-                    row,
-                    1,
-                    f"{selected_marker}{marker} " + compact(title, sidebar - 6),
-                    sidebar - 2,
-                    attr,
+                    stdscr, 1, 1, f"{working} working · {ready} ready",
+                    sidebar - 2, palette["muted"],
                 )
-                row += 1
+                if query:
+                    add_text(stdscr, 2, 1, f"filter: {query}", sidebar - 2, palette["status"])
+                try:
+                    stdscr.vline(0, sidebar, curses.ACS_VLINE, height - 1)
+                except curses.error:
+                    pass
+
+                row = 3
+                previous_host = None
+                visible_start = max(0, selected - max(0, (height - 6) // 2))
+                for index, item in enumerate(shown[visible_start:], visible_start):
+                    if row >= height - 2:
+                        break
+                    if item.host_id != previous_host:
+                        add_text(stdscr, row, 1, compact(item.host_name, sidebar - 3), sidebar - 2, palette["muted"] | curses.A_BOLD)
+                        row += 1
+                        previous_host = item.host_id
+                    if row >= height - 2:
+                        break
+                    selected_marker = "›" if index == selected else " "
+                    if index == selected:
+                        attr = (
+                            palette["selected"]
+                            if focus == "agents"
+                            else palette["header"]
+                        )
+                    else:
+                        attr = palette["normal"]
+                    title = str(item.agent.get("title") or item.agent.get("agent_id") or "unnamed")
+                    marker = "●" if item.agent.get("status") == "active" else "○"
+                    add_text(
+                        stdscr,
+                        row,
+                        1,
+                        f"{selected_marker}{marker} " + compact(title, sidebar - 6),
+                        sidebar - 2,
+                        attr,
+                    )
+                    row += 1
 
             if current:
                 agent = current.agent
@@ -501,7 +647,8 @@ def run_console(
             else:
                 add_text(stdscr, 3, main_x + 2, "No cached agents.", main_width - 4, palette["muted"])
 
-            footer = status or "←→ pane  ↑↓/wheel scroll  PgUp/Dn page  i msg  / find  r refresh  ^C×2 quit"
+            layout_action = "restore" if maximized else "max"
+            footer = status or f"←→ pane  ↑↓/wheel scroll  m {layout_action}  i msg  / find  r refresh  ^C×2 quit"
             add_text(stdscr, height - 1, 1, footer, width - 2, palette["status"])
             stdscr.refresh()
             status = ""
@@ -514,10 +661,8 @@ def run_console(
             if key == 3:
                 status = "Press Ctrl-C again to quit."
                 continue
-            if key == curses.KEY_LEFT:
-                focus = "agents"
-            elif key == curses.KEY_RIGHT:
-                focus = "conversation"
+            if key in {curses.KEY_LEFT, curses.KEY_RIGHT, ord("m")}:
+                focus, maximized = change_pane(focus, maximized, key)
             elif key == curses.KEY_MOUSE and shown:
                 try:
                     _, _, _, _, button_state = curses.getmouse()

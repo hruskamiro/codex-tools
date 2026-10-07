@@ -6,6 +6,37 @@ from codex_tools import agents_tui
 
 
 class AgentTuiTests(unittest.TestCase):
+    def test_pane_navigation_can_maximize_and_restore_conversation(self) -> None:
+        focus, maximized = agents_tui.change_pane(
+            "agents", False, agents_tui.curses.KEY_RIGHT
+        )
+        self.assertEqual((focus, maximized), ("conversation", False))
+
+        focus, maximized = agents_tui.change_pane(
+            focus, maximized, agents_tui.curses.KEY_RIGHT
+        )
+        self.assertEqual((focus, maximized), ("conversation", True))
+
+        focus, maximized = agents_tui.change_pane(
+            focus, maximized, agents_tui.curses.KEY_LEFT
+        )
+        self.assertEqual((focus, maximized), ("conversation", False))
+
+        focus, maximized = agents_tui.change_pane(
+            focus, maximized, agents_tui.curses.KEY_LEFT
+        )
+        self.assertEqual((focus, maximized), ("agents", False))
+
+    def test_m_toggles_maximized_conversation(self) -> None:
+        self.assertEqual(
+            agents_tui.change_pane("agents", False, ord("m")),
+            ("conversation", True),
+        )
+        self.assertEqual(
+            agents_tui.change_pane("conversation", True, ord("m")),
+            ("conversation", False),
+        )
+
     def test_mouse_wheel_maps_to_conversation_scroll(self) -> None:
         self.assertEqual(
             agents_tui.mouse_scroll_delta(agents_tui.curses.BUTTON4_PRESSED),
@@ -57,11 +88,25 @@ class AgentTuiTests(unittest.TestCase):
 
         lines = agents_tui.transcript_lines(records, 18)
 
-        self.assertIn(("  | Name | Count |", "table_header"), lines)
-        self.assertIn(("  | --- | ---: |", "table_separator"), lines)
-        self.assertIn(("  | alpha | 12 |", "table_row"), lines)
+        self.assertTrue(any(line.startswith("  ┌") for line, _ in lines))
+        self.assertTrue(any(style == "table_header" for _, style in lines))
+        self.assertTrue(any(style == "table_row" for _, style in lines))
         self.assertIn(("|", "table_border"), agents_tui.table_spans("| 12 |"))
         self.assertIn(("12", "number"), agents_tui.table_spans("| 12 |"))
+
+    def test_terminal_table_wraps_long_cells_to_pane_width(self) -> None:
+        table = agents_tui.format_terminal_table(
+            ["Family", "Guardrail"],
+            ["---", "---"],
+            [["Folk-modern", "A long description that must wrap cleanly"]],
+            38,
+        )
+
+        self.assertTrue(all(len(line) <= 38 for line, _ in table))
+        self.assertGreater(
+            sum(style == "table_row" for _, style in table),
+            1,
+        )
 
     def test_show_status_repaints_and_flushes_footer(self) -> None:
         class Window:
