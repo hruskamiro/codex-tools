@@ -116,7 +116,33 @@ ct relay cache refresh
 ct relay cache status
 ```
 
-The cache is transport-neutral; it does not configure or depend on a VPN.
+To expose one machine and pull its read-only snapshot from another:
+
+```bash
+# On the machine running Codex:
+ct relay init --name desktop
+ct relay token                         # transfer this key privately
+ct relay serve --host 0.0.0.0 --tls-cert relay.crt --tls-key relay.key
+
+# On the client machine:
+ct relay init --name laptop
+ct relay pair desktop https://desktop.example:8780 --ca-file relay.crt
+ct relay sync desktop
+ct agents ui
+```
+
+`ct relay pair` prompts for the remote machine's key without echoing it.
+`ct relay peers` lists configured connections without exposing their keys. Each
+sync refreshes the serving machine's currently loaded Codex sessions before it
+returns the snapshot, then stores the result in the client's private cache for
+offline viewing.
+
+Plain HTTP is accepted only on loopback by default. When an address is already
+protected by a VPN or an encrypted tunnel, explicitly opt in on both ends with
+`--allow-insecure-http`; the relay itself does not configure or depend on a
+particular VPN. Use HTTPS for an otherwise untrusted network. This first
+transport slice is pull-only: queued message delivery and remote agent control
+remain local until the authenticated write protocol is added.
 
 ```bash
 ct viewer                 # choose and open a conversation
