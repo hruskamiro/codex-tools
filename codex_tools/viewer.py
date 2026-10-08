@@ -23,10 +23,11 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 from urllib.request import urlopen
 
-from codex_tools import config, paths, typeset
+from codex_tools import config, paths, relay_cache, relay_transport, typeset
 from codex_tools.browser import add_browser_args, browser_command, open_browser
 from codex_tools.search import (
     DEFAULT_ARCHIVE_ROOT,
@@ -45,6 +46,7 @@ from codex_tools.search import (
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 DEFAULT_VIEW_MODE = "markdown"
+VIEWER_PROTOCOL_VERSION = 2
 VIEW_MODES = {"markdown", "latex"}
 WEB_ASSET_MODES = {"bundled", "cdn"}
 LATEX_FILES = (
@@ -229,6 +231,18 @@ def add_server_args(parser: argparse.ArgumentParser) -> None:
         default="bundled",
         help="Browser dependency source. Default: bundled.",
     )
+    parser.add_argument(
+        "--relay-cache-file",
+        type=Path,
+        default=relay_cache.DEFAULT_CACHE_PATH,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--relay-config",
+        type=Path,
+        default=paths.RELAY_CONFIG_FILE,
+        help=argparse.SUPPRESS,
+    )
 
 
 def parse_args(
@@ -364,6 +378,12 @@ def viewer_signature() -> dict[str, int | str]:
     return file_signature(Path(__file__).resolve())
 
 
+# Keep the signature of the code this process actually loaded.  Reading the
+# file metadata for every request makes an old daemon appear current as soon
+# as its source file is replaced underneath it.
+VIEWER_RUNTIME_SIGNATURE = viewer_signature()
+
+
 def read_tail_lines(path: Path, limit: int) -> list[str]:
     if limit <= 0:
         return []
@@ -446,6 +466,8 @@ class ViewerState:
         typeset_debug: bool = False,
         typeset_code_mode: str = typeset.DEFAULT_CODE_MODE,
         web_assets: str = "bundled",
+        relay_cache_file: Path = relay_cache.DEFAULT_CACHE_PATH,
+        relay_config: Path = paths.RELAY_CONFIG_FILE,
     ) -> None:
         self.sessions_root = sessions_root.expanduser().resolve()
         self.archive_root = archive_root.expanduser().resolve()
@@ -454,6 +476,8 @@ class ViewerState:
         self.typeset_code_mode = typeset_code_mode
         self.web_assets = web_assets
         self.session_index = session_index.expanduser().resolve()
+        self.relay_cache = relay_cache.RelayCache(relay_cache_file)
+        self.relay_config = relay_config.expanduser()
         self._titles_lock = threading.Lock()
         self._titles_signature = self._session_index_signature()
         self._titles = load_session_index_titles(self.session_index)
@@ -627,7 +651,12 @@ def records_for_view(
             (
                 index
                 for index, record in enumerate(records)
-                if record.line_no == anchor_line
+                if (
+                    record.get("line_no")
+                    if isinstance(record, dict)
+                    else record.line_no
+                )
+                == anchor_line
             ),
             start,
         )
@@ -636,6 +665,8 @@ def records_for_view(
 
 
 def handle_session(state: ViewerState, query: dict[str, list[str]]) -> dict[str, Any]:
+    if query.get("source", [""])[0] == "relay":
+        return handle_relay_session(state, query)
     path = resolve_session_path(state, query)
     include_tools = query.get("tools", ["0"])[0] == "1"
     all_records = query.get("all", ["0"])[0] == "1"
@@ -662,6 +693,112 @@ def handle_session(state: ViewerState, query: dict[str, list[str]]) -> dict[str,
     }
 
 
+def relay_peer_for_host(
+    state: ViewerState, host_id: str
+) -> tuple[str, dict[str, Any]]:
+    host = next(
+        (item for item in state.relay_cache.hosts() if item["host_id"] == host_id),
+        None,
+    )
+    if host is None:
+        raise FileNotFoundError(f"cached relay host not found: {host_id}")
+    base_url = str(host.get("base_url") or "").rstrip("/")
+    config = relay_transport.load_config(state.relay_config)
+    for name, peer in config["peers"].items():
+        if (
+            isinstance(peer, dict)
+            and str(peer.get("url") or "").rstrip("/") == base_url
+        ):
+            return str(name), peer
+    raise FileNotFoundError(f"no configured peer matches {host['name']}")
+
+
+def refresh_relay_agent(
+    state: ViewerState, host_id: str, agent_id: str
+) -> str | None:
+    _, peer = relay_peer_for_host(state, host_id)
+    try:
+        payload = relay_transport.fetch_agent(peer, agent_id)
+    except HTTPError as exc:
+        if exc.code == HTTPStatus.NOT_FOUND:
+            return "Remote session is no longer active; showing cached copy"
+        raise
+    relay_transport.apply_agent_snapshot(
+        state.relay_cache,
+        payload,
+        base_url=str(peer["url"]),
+    )
+    return None
+
+
+def relay_session_snapshot(
+    state: ViewerState, query: dict[str, list[str]]
+) -> tuple[dict[str, Any], list[dict[str, Any]], str | None]:
+    host_id = query.get("host", [""])[0]
+    agent_id = query.get("agent", [""])[0]
+    if not host_id or not agent_id:
+        raise ValueError("relay host and agent are required")
+    refresh_warning = None
+    if query.get("refresh", ["0"])[0] == "1":
+        refresh_warning = refresh_relay_agent(state, host_id, agent_id)
+    host = next(
+        (item for item in state.relay_cache.hosts() if item["host_id"] == host_id),
+        None,
+    )
+    agent = next(
+        (
+            item
+            for item in state.relay_cache.agents(host_id)
+            if item["agent_id"] == agent_id
+        ),
+        None,
+    )
+    if host is None or agent is None:
+        raise FileNotFoundError("cached relay conversation not found")
+    records = state.relay_cache.records(host_id, agent_id)
+    session = {
+        "id": agent_id,
+        "title": agent["title"],
+        "titleSource": agent["title_source"],
+        "createdAt": agent["created_at"],
+        "createdLabel": format_time(agent["created_at"]),
+        "lastAt": agent["updated_at"],
+        "lastLabel": format_time(agent["updated_at"]),
+        "cwd": agent["cwd"],
+        "source": agent["source"],
+        "sessionId": agent["session_id"],
+        "threadId": agent["thread_id"],
+        "rolloutId": agent["rollout_id"],
+        "path": "",
+        "hostId": host_id,
+        "hostName": host["name"],
+    }
+    return session, records, refresh_warning
+
+
+def handle_relay_session(
+    state: ViewerState, query: dict[str, list[str]]
+) -> dict[str, Any]:
+    session, records, refresh_warning = relay_session_snapshot(state, query)
+    tail = safe_int(query.get("tail", [None])[0], 24, 1, 500)
+    all_records = query.get("all", ["0"])[0] == "1"
+    shown = records if all_records else records[-tail:]
+    return {
+        "session": session,
+        "tail": tail,
+        "all": all_records,
+        "includeTools": False,
+        "typesetDebug": False,
+        "shownCount": len(shown),
+        "totalCount": len(records),
+        "records": [
+            {**record, "timeLabel": format_time(str(record["timestamp"]))}
+            for record in shown
+        ],
+        "refreshWarning": refresh_warning,
+    }
+
+
 def handle_typeset(
     state: ViewerState,
     query: dict[str, list[str]],
@@ -669,7 +806,7 @@ def handle_typeset(
     isolated: bool = False,
     force: bool = False,
 ) -> dict[str, Any]:
-    path = resolve_session_path(state, query)
+    is_relay = query.get("source", [""])[0] == "relay"
     include_tools = query.get("tools", ["0"])[0] == "1"
     all_records = query.get("all", ["0"])[0] == "1"
     tail = safe_int(query.get("tail", [None])[0], 8, 1, 100)
@@ -681,8 +818,19 @@ def handle_typeset(
     default_code_mode = getattr(state, "typeset_code_mode", typeset.DEFAULT_CODE_MODE)
     code_mode = query.get("code", [default_code_mode])[0]
     effective_code_mode = typeset.resolved_code_mode(code_mode)
-    session = read_session(path, include_tools=include_tools, include_system=False)
-    resolve_session_title(session, state.titles)
+    path: Path | None = None
+    refresh_warning = None
+    if is_relay:
+        session_payload, session_records, refresh_warning = relay_session_snapshot(
+            state, query
+        )
+        include_tools = False
+    else:
+        path = resolve_session_path(state, query)
+        session = read_session(path, include_tools=include_tools, include_system=False)
+        resolve_session_title(session, state.titles)
+        session_payload = None
+        session_records = session.records
     isolated_line_raw = query.get("line", [""])[0].strip()
     isolated_line: int | None = None
     if isolated_line_raw:
@@ -695,27 +843,50 @@ def handle_typeset(
         isolated_line = int(isolated_line_raw)
         matching = [
             record
-            for record in session.records
-            if record.role == "assistant" and record.line_no == isolated_line
+            for record in session_records
+            if (
+                (record.get("role") if isinstance(record, dict) else record.role)
+                == "assistant"
+                and (
+                    record.get("line_no")
+                    if isinstance(record, dict)
+                    else record.line_no
+                )
+                == isolated_line
+            )
         ]
         if not matching:
             raise FileNotFoundError(f"assistant bubble not found at line {isolated_line}")
         records = [matching[-1]]
     else:
-        records = records_for_view(session.records, tail, all_records, anchor_line)
+        records = records_for_view(session_records, tail, all_records, anchor_line)
+    if session_payload is None and path is not None:
+        session_payload = session_summary(path, state.titles)
     payload_records = []
     assistant_jobs: list[tuple[int, str, str]] = []
     for index, record in enumerate(records):
+        if isinstance(record, dict):
+            item = dict(record)
+            role = str(record.get("role") or "")
+            text = str(record.get("text") or "")
+            timestamp = str(record.get("timestamp") or "")
+        else:
+            item = asdict(record)
+            role = record.role
+            text = record.text
+            timestamp = record.timestamp
         item = {
-            **asdict(record),
-            "timeLabel": format_time(record.timestamp),
+            **item,
+            "timeLabel": format_time(timestamp),
         }
-        if record.role == "assistant":
-            time_label = format_time(record.timestamp)
+        if role == "assistant":
+            time_label = format_time(timestamp)
             title = f"Assistant answer · {time_label}" if time_label else "Assistant answer"
-            assistant_jobs.append((index, record.text, title))
-            item["attachments"] = attachment_link_payload(path, record)
-            item["externalLinks"] = external_link_payload(record.text)
+            assistant_jobs.append((index, text, title))
+            item["attachments"] = (
+                [] if is_relay or path is None else attachment_link_payload(path, record)
+            )
+            item["externalLinks"] = external_link_payload(text)
         payload_records.append(item)
 
     def attach_result(index: int, result: typeset.TypesetResult) -> None:
@@ -748,20 +919,21 @@ def handle_typeset(
                 attach_result(futures[future], future.result())
 
     return {
-        "session": session_summary(path, state.titles),
+        "session": session_payload,
         "tail": tail,
         "all": all_records,
         "includeTools": include_tools,
         "typesetWorkers": workers,
-        "typesetDebug": state.typeset_debug,
+        "typesetDebug": state.typeset_debug and not is_relay,
         "typesetHeaderMode": header_mode,
         "typesetCodeMode": effective_code_mode,
         "isolatedLine": isolated_line,
         "debugLine": isolated_line if force else None,
         "typesetFresh": force,
         "shownCount": len(records),
-        "totalCount": len(session.records),
+        "totalCount": len(session_records),
         "records": payload_records,
+        "refreshWarning": refresh_warning,
     }
 
 
@@ -920,7 +1092,11 @@ def resolve_linked_attachment(
 
 
 def handle_version(state: ViewerState, query: dict[str, list[str]]) -> dict[str, Any]:
-    payload: dict[str, Any] = {"viewer": viewer_signature()}
+    payload: dict[str, Any] = {
+        "service": "codex-tools-viewer",
+        "protocolVersion": VIEWER_PROTOCOL_VERSION,
+        "viewer": VIEWER_RUNTIME_SIGNATURE,
+    }
     if query.get("path", [""])[0] or query.get("id", [""])[0]:
         path = resolve_session_path(state, query)
         payload["sessionFile"] = file_signature(path)
@@ -1058,15 +1234,18 @@ def make_handler(state: ViewerState) -> type[BaseHTTPRequestHandler]:
                         chooser_document(read_default_view()),
                         "text/html; charset=utf-8",
                     )
-                elif parsed.path == "/view" or parsed.path.startswith("/v/"):
+                elif parsed.path == "/v/local" or parsed.path.startswith(
+                    ("/v/local/", "/v/relay/")
+                ):
                     text_response(
                         self,
                         viewer_document(VIEW_HTML, state.web_assets),
                         "text/html; charset=utf-8",
                     )
                 elif (
-                    parsed.path == "/typeset"
-                    or parsed.path.startswith("/t/")
+                    parsed.path == "/t/local"
+                    or parsed.path.startswith("/t/local/")
+                    or parsed.path.startswith("/t/relay/")
                     or parsed.path == "/debug/typeset"
                     or parsed.path.startswith("/debug/typeset/")
                 ):
@@ -1183,10 +1362,27 @@ def view_url(
     typeset = mode == "latex"
     if session_id:
         route = "t" if typeset else "v"
-        return f"{base_url.rstrip('/')}/{route}/{session_id}?{urlencode(params)}"
+        return (
+            f"{base_url.rstrip('/')}/{route}/local/"
+            f"{quote(session_id, safe='')}?{urlencode(params)}"
+        )
     params["path"] = path
-    route = "typeset" if typeset else "view"
-    return f"{base_url.rstrip('/')}/{route}?{urlencode(params)}"
+    route = "t" if typeset else "v"
+    return f"{base_url.rstrip('/')}/{route}/local?{urlencode(params)}"
+
+
+def relay_view_path(
+    host_id: str,
+    agent_id: str,
+    *,
+    mode: str = DEFAULT_VIEW_MODE,
+    tail: int = 24,
+) -> str:
+    route = "t" if mode == "latex" else "v"
+    return (
+        f"/{route}/relay/{quote(host_id, safe='')}/"
+        f"{quote(agent_id, safe='')}?{urlencode({'tail': str(tail)})}"
+    )
 
 
 def server_state_from_args(args: argparse.Namespace) -> ViewerState:
@@ -1198,6 +1394,8 @@ def server_state_from_args(args: argparse.Namespace) -> ViewerState:
         args.typeset_debug,
         args.typeset_code_mode,
         args.web_assets,
+        args.relay_cache_file,
+        args.relay_config,
     )
 
 
@@ -1288,6 +1486,23 @@ def viewer_health(url: str, timeout: float = 0.6) -> tuple[bool, str]:
     return True, "responding"
 
 
+def viewer_source_is_current(url: str, timeout: float = 0.6) -> bool:
+    endpoint = f"{url.rstrip('/')}/api/version"
+    try:
+        with urlopen(endpoint, timeout=timeout) as response:
+            if response.status != HTTPStatus.OK:
+                return False
+            payload = json.load(response)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+    return (
+        isinstance(payload, dict)
+        and payload.get("service") == "codex-tools-viewer"
+        and payload.get("protocolVersion") == VIEWER_PROTOCOL_VERSION
+        and payload.get("viewer") == viewer_signature()
+    )
+
+
 def wait_for_url(url: str, timeout: float = 5.0) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -1326,6 +1541,10 @@ def daemon_command(args: argparse.Namespace) -> list[str]:
         "--port",
         str(args.port),
         "--no-self-reload",
+        "--relay-cache-file",
+        str(args.relay_cache_file),
+        "--relay-config",
+        str(args.relay_config),
     ]
     if args.include_archive:
         command.append("--include-archive")
@@ -1590,6 +1809,8 @@ def default_server_args() -> argparse.Namespace:
         typeset_debug=False,
         typeset_code_mode=code_mode,
         web_assets="bundled",
+        relay_cache_file=relay_cache.DEFAULT_CACHE_PATH,
+        relay_config=paths.RELAY_CONFIG_FILE,
     )
 
 
@@ -2092,7 +2313,7 @@ VIEW_HTML = """<!doctype html>
         <button id="loadEarlier" class="status-button" type="button">Earlier <kbd>E</kbd></button>
         <button id="loadAll" class="status-button" type="button">All <kbd>A</kbd></button>
         <button id="statusRefresh" class="status-button icon-status-button" type="button" title="Refresh conversation (R); refresh and jump to latest (Shift+R)" aria-label="Refresh conversation with R; refresh and jump to latest with Shift+R"><span class="refresh-icon" aria-hidden="true">↻</span><kbd>R</kbd></button>
-        <a id="typesetViewLink" class="status-button" href="/typeset">LaTeX <kbd>T</kbd></a>
+        <a id="typesetViewLink" class="status-button" href="/t/local">LaTeX <kbd>T</kbd></a>
         <a class="status-button" href="/">Choose <kbd>C</kbd></a>
       </div>
     </nav>
@@ -2144,7 +2365,7 @@ TYPESET_HTML = """<!doctype html>
         <button id="loadEarlier" class="status-button" type="button">Earlier <kbd>E</kbd></button>
         <button id="loadAll" class="status-button" type="button">All <kbd>A</kbd></button>
         <button id="statusRefresh" class="status-button icon-status-button" type="button" title="Refresh typeset view (R); refresh and jump to latest (Shift+R)" aria-label="Refresh typeset view with R; refresh and jump to latest with Shift+R"><span class="refresh-icon" aria-hidden="true">↻</span><kbd>R</kbd></button>
-        <a id="normalViewLink" class="status-button" href="/view">Markdown <kbd>T</kbd></a>
+        <a id="normalViewLink" class="status-button" href="/v/local">Markdown <kbd>T</kbd></a>
         <a class="status-button" href="/">Choose <kbd>C</kbd></a>
       </div>
     </nav>
@@ -3633,11 +3854,11 @@ function viewHref(item) {
   if (els.includeTools.checked) params.set("tools", "1");
   if (id) {
     const route = state.defaultView === "latex" ? "t" : "v";
-    return `/${route}/${encodeURIComponent(id)}?${params}`;
+    return `/${route}/local/${encodeURIComponent(id)}?${params}`;
   }
   params.set("path", item.path);
-  const route = state.defaultView === "latex" ? "typeset" : "view";
-  return `/${route}?${params}`;
+  const route = state.defaultView === "latex" ? "t" : "v";
+  return `/${route}/local?${params}`;
 }
 
 function renderSessions() {
@@ -3791,8 +4012,11 @@ function setRefreshState(refreshing) {
 function showRefreshResult(previousTotal, failed = false) {
   if (!els.refreshStatus) return;
   const added = Math.max(0, Number(lastConversationData?.totalCount || 0) - previousTotal);
+  const warning = lastConversationData?.refreshWarning || "";
   els.refreshStatus.textContent = failed
     ? "Refresh failed"
+    : warning
+      ? warning
     : added
       ? `${added} new message${added === 1 ? "" : "s"}`
       : "Up to date";
@@ -3837,15 +4061,18 @@ function toggleStatusbar() {
   setStatusbarExpanded(!els.statusbar?.classList.contains("is-expanded"));
 }
 
-function routeId(prefix) {
-  const marker = `/${prefix}/`;
-  if (!location.pathname.startsWith(marker)) return "";
-  return decodeURIComponent(location.pathname.slice(marker.length));
-}
-
 function identityParams(prefix = "v") {
   const identity = new URLSearchParams();
-  const id = routeId(prefix) || params.get("id") || "";
+  const parts = location.pathname.split("/").filter(Boolean);
+  if (parts[0] === prefix && parts[1] === "relay" && parts.length >= 4) {
+    identity.set("source", "relay");
+    identity.set("host", decodeURIComponent(parts[2]));
+    identity.set("agent", decodeURIComponent(parts.slice(3).join("/")));
+    return identity;
+  }
+  const id = parts[0] === prefix && parts[1] === "local" && parts[2]
+    ? decodeURIComponent(parts.slice(2).join("/"))
+    : params.get("id") || "";
   const path = params.get("path") || "";
   if (id) identity.set("id", id);
   else if (path) identity.set("path", path);
@@ -3854,11 +4081,14 @@ function identityParams(prefix = "v") {
 
 function focusedTypesetUrl(record) {
   const identity = identityParams("v");
+  if (identity.get("source") === "relay") {
+    return `/t/relay/${encodeURIComponent(identity.get("host"))}/${encodeURIComponent(identity.get("agent"))}/${encodeURIComponent(record.line_no)}`;
+  }
   if (identity.has("id")) {
-    return `/t/${encodeURIComponent(identity.get("id"))}/${encodeURIComponent(record.line_no)}`;
+    return `/t/local/${encodeURIComponent(identity.get("id"))}/${encodeURIComponent(record.line_no)}`;
   }
   identity.set("line", String(record.line_no));
-  return `/typeset?${identity}`;
+  return `/t/local?${identity}`;
 }
 
 function normalizeLanguage(lang) {
@@ -4296,16 +4526,24 @@ function renderConversation(data, options = {}) {
   const session = data.session;
   document.title = session.title || "Codex Conversation";
   els.sessionTitle.textContent = session.title || "Untitled conversation";
-  els.sessionMeta.textContent = session.cwd || session.path;
+  els.sessionMeta.textContent = [session.hostName, session.cwd || session.path]
+    .filter(Boolean).join(" · ");
   const typesetParams = identityParams("v");
   typesetParams.set("tail", String(Math.min(currentTail, 8)));
   if (showAllRecords) typesetParams.set("all", "1");
-  if (typesetParams.has("id")) {
+  if (typesetParams.get("source") === "relay") {
+    const host = typesetParams.get("host");
+    const agent = typesetParams.get("agent");
+    typesetParams.delete("source");
+    typesetParams.delete("host");
+    typesetParams.delete("agent");
+    els.typesetViewLink.href = `/t/relay/${encodeURIComponent(host)}/${encodeURIComponent(agent)}?${typesetParams}`;
+  } else if (typesetParams.has("id")) {
     const id = typesetParams.get("id");
     typesetParams.delete("id");
-    els.typesetViewLink.href = `/t/${encodeURIComponent(id)}?${typesetParams}`;
+    els.typesetViewLink.href = `/t/local/${encodeURIComponent(id)}?${typesetParams}`;
   } else {
-    els.typesetViewLink.href = `/typeset?${typesetParams}`;
+    els.typesetViewLink.href = `/t/local?${typesetParams}`;
   }
   els.conversationInfo.textContent = [
     session.lastLabel ? `Last message ${session.lastLabel}` : "",
@@ -4381,6 +4619,9 @@ async function loadConversation(options = {}) {
   try {
     if (showAllRecords) apiParams.set("all", "1");
     if (params.get("tools") === "1") apiParams.set("tools", "1");
+    if (options.refreshRemote && apiParams.get("source") === "relay") {
+      apiParams.set("refresh", "1");
+    }
     const response = await fetch(`/api/session?${apiParams}`);
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "Could not load conversation");
@@ -4404,6 +4645,7 @@ async function refreshConversation(options = {}) {
     await loadConversation({
       preserveScroll: !jumpToLatest,
       avoidUnchangedRender: true,
+      refreshRemote: true,
     });
     if (jumpToLatest) scrollToLatestAssistant();
     showRefreshResult(previousTotal);
@@ -4585,8 +4827,11 @@ function setRefreshState(refreshing) {
 function showRefreshResult(previousTotal, failed = false) {
   if (!els.refreshStatus) return;
   const added = Math.max(0, Number(lastConversationData?.totalCount || 0) - previousTotal);
+  const warning = lastConversationData?.refreshWarning || "";
   els.refreshStatus.textContent = failed
     ? "Refresh failed"
+    : warning
+      ? warning
     : added
       ? `${added} new message${added === 1 ? "" : "s"}`
       : "Up to date";
@@ -4632,9 +4877,9 @@ function toggleStatusbar() {
 }
 
 function routeId(prefix) {
-  const marker = `/${prefix}/`;
-  if (!location.pathname.startsWith(marker)) return "";
-  return decodeURIComponent(location.pathname.slice(marker.length));
+  const parts = location.pathname.split("/").filter(Boolean);
+  if (parts[0] !== prefix || parts[1] !== "local" || !parts[2]) return "";
+  return decodeURIComponent(parts[2]);
 }
 
 function focusedRoute() {
@@ -4648,17 +4893,28 @@ function focusedRoute() {
     const id = decodeURIComponent(parts.join("/"));
     return { active: true, debug: true, id, line };
   }
-  if (location.pathname === "/typeset" && params.get("line")) {
+  if (location.pathname === "/t/local" && params.get("line")) {
     return { active: true, debug: false, id: "", line: params.get("line") || "" };
   }
-  const marker = "/t/";
-  if (location.pathname.startsWith(marker)) {
-    const parts = location.pathname.slice(marker.length).split("/");
-    if (parts.length >= 2) {
-      const line = decodeURIComponent(parts.pop() || "");
-      const id = decodeURIComponent(parts.join("/"));
-      return { active: true, debug: false, id, line };
-    }
+  const parts = location.pathname.split("/").filter(Boolean);
+  if (parts[0] === "t" && parts[1] === "relay" && parts.length >= 5) {
+    return {
+      active: true,
+      debug: false,
+      source: "relay",
+      host: decodeURIComponent(parts[2]),
+      agent: decodeURIComponent(parts[3]),
+      id: "",
+      line: decodeURIComponent(parts[4]),
+    };
+  }
+  if (parts[0] === "t" && parts[1] === "local" && parts.length >= 4) {
+    return {
+      active: true,
+      debug: false,
+      id: decodeURIComponent(parts[2]),
+      line: decodeURIComponent(parts[3]),
+    };
   }
   return { active: false, debug: false, id: "", line: "" };
 }
@@ -4666,6 +4922,19 @@ function focusedRoute() {
 function identityParams(prefix = "t") {
   const identity = new URLSearchParams();
   const route = focusedRoute();
+  const parts = location.pathname.split("/").filter(Boolean);
+  if (route.source === "relay") {
+    identity.set("source", "relay");
+    identity.set("host", route.host);
+    identity.set("agent", route.agent);
+    return identity;
+  }
+  if (parts[0] === prefix && parts[1] === "relay" && parts.length >= 4) {
+    identity.set("source", "relay");
+    identity.set("host", decodeURIComponent(parts[2]));
+    identity.set("agent", decodeURIComponent(parts[3]));
+    return identity;
+  }
   const id = route.id || routeId(prefix) || params.get("id") || "";
   const path = params.get("path") || "";
   if (id) identity.set("id", id);
@@ -4753,12 +5022,15 @@ function recordHeader(record) {
 
 function focusedTypesetUrl(record) {
   const identity = identityParams("t");
+  if (identity.get("source") === "relay") {
+    return `/t/relay/${encodeURIComponent(identity.get("host"))}/${encodeURIComponent(identity.get("agent"))}/${encodeURIComponent(record.line_no)}`;
+  }
   if (identity.has("id")) {
     const id = identity.get("id");
-    return `/t/${encodeURIComponent(id)}/${encodeURIComponent(record.line_no)}`;
+    return `/t/local/${encodeURIComponent(id)}/${encodeURIComponent(record.line_no)}`;
   }
   identity.set("line", String(record.line_no));
-  return `/typeset?${identity}`;
+  return `/t/local?${identity}`;
 }
 
 function debugTypesetUrl(record) {
@@ -5371,12 +5643,19 @@ async function renderConversation(data, options = {}) {
   const normalParams = identityParams("t");
   normalParams.set("tail", String(currentTail));
   if (showAllRecords) normalParams.set("all", "1");
-  if (normalParams.has("id")) {
+  if (normalParams.get("source") === "relay") {
+    const host = normalParams.get("host");
+    const agent = normalParams.get("agent");
+    normalParams.delete("source");
+    normalParams.delete("host");
+    normalParams.delete("agent");
+    els.normalViewLink.href = `/v/relay/${encodeURIComponent(host)}/${encodeURIComponent(agent)}?${normalParams}`;
+  } else if (normalParams.has("id")) {
     const id = normalParams.get("id");
     normalParams.delete("id");
-    els.normalViewLink.href = `/v/${encodeURIComponent(id)}?${normalParams}`;
+    els.normalViewLink.href = `/v/local/${encodeURIComponent(id)}?${normalParams}`;
   } else {
-    els.normalViewLink.href = `/view?${normalParams}`;
+    els.normalViewLink.href = `/v/local?${normalParams}`;
   }
   const isolated = data.isolatedLine !== null && data.isolatedLine !== undefined;
   els.conversationInfo.textContent = (isolated
@@ -5470,6 +5749,9 @@ async function loadConversation(options = {}) {
     if (params.get("tools") === "1") apiParams.set("tools", "1");
     if (params.get("header")) apiParams.set("header", params.get("header"));
     if (params.get("code")) apiParams.set("code", params.get("code"));
+    if (options.refreshRemote && apiParams.get("source") === "relay") {
+      apiParams.set("refresh", "1");
+    }
     if (route.line) apiParams.set("line", route.line);
     const apiPath = route.debug
       ? "/api/debug/typeset"
@@ -5503,6 +5785,7 @@ async function refreshConversation(options = {}) {
     await loadConversation({
       preserveScroll: !jumpToLatest,
       avoidUnchangedRender: true,
+      refreshRemote: true,
     });
     if (jumpToLatest) scrollToLatestAssistant();
     showRefreshResult(previousTotal);

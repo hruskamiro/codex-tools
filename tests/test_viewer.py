@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from codex_tools import config, search, typeset, viewer
+from codex_tools import config, relay_cache, search, typeset, viewer
 
 
 class ViewerCommandTests(unittest.TestCase):
@@ -132,11 +132,21 @@ class ViewerCommandTests(unittest.TestCase):
         self.assertIn('state.defaultView === "latex" ? "t" : "v"', viewer.APP_JS)
         self.assertEqual(
             viewer.view_url("http://localhost:8765", "/tmp/a.jsonl", 8, False, "abc", "latex"),
-            "http://localhost:8765/t/abc?tail=8",
+            "http://localhost:8765/t/local/abc?tail=8",
         )
         self.assertEqual(
             viewer.view_url("http://localhost:8765", "/tmp/a.jsonl", 8, False, mode="latex"),
-            "http://localhost:8765/typeset?tail=8&path=%2Ftmp%2Fa.jsonl",
+            "http://localhost:8765/t/local?tail=8&path=%2Ftmp%2Fa.jsonl",
+        )
+        self.assertEqual(
+            viewer.relay_view_path("host one", "agent/one"),
+            "/v/relay/host%20one/agent%2Fone?tail=24",
+        )
+        self.assertEqual(
+            viewer.relay_view_path(
+                "host one", "agent/one", mode="latex", tail=8
+            ),
+            "/t/relay/host%20one/agent%2Fone?tail=8",
         )
 
     def test_remote_bind_requires_explicit_acknowledgement(self) -> None:
@@ -202,6 +212,183 @@ class ViewerCommandTests(unittest.TestCase):
             )
 
             self.assertEqual(state.titles["thread-1"].text, "Current title")
+
+    def test_relay_view_reads_cached_remote_conversation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache_path = root / "relay.sqlite3"
+            cache = relay_cache.RelayCache(cache_path)
+            cached = relay_cache.CachedAgent(
+                agent_id="agent-1",
+                session_id="session-1",
+                thread_id="thread-1",
+                rollout_id="rollout-1",
+                title="Remote work",
+                title_source="relay",
+                cwd="/work/remote",
+                source="cli",
+                created_at="2026-10-07T10:00:00Z",
+                updated_at="2026-10-07T11:00:00Z",
+                origin_path="",
+                records=(
+                    relay_cache.CachedRecord(
+                        "2026-10-07T11:00:00Z",
+                        "assistant",
+                        "Remote answer",
+                        2,
+                        "message",
+                    ),
+                ),
+            )
+            cache.upsert_agent(
+                "remote-host",
+                "Desktop",
+                cached,
+                base_url="https://desktop:8780",
+            )
+            state = viewer.ViewerState(
+                root,
+                root / "archive",
+                False,
+                root / "index.jsonl",
+                relay_cache_file=cache_path,
+                relay_config=root / "relay.json",
+            )
+
+            payload = viewer.handle_relay_session(
+                state,
+                {
+                    "host": ["remote-host"],
+                    "agent": ["agent-1"],
+                    "tail": ["24"],
+                },
+            )
+
+            self.assertEqual(payload["session"]["hostName"], "Desktop")
+            self.assertEqual(payload["session"]["title"], "Remote work")
+            self.assertEqual(payload["records"][0]["text"], "Remote answer")
+
+    def test_relay_view_refreshes_only_when_requested(self) -> None:
+        state = SimpleNamespace()
+        query = {
+            "host": ["remote-host"],
+            "agent": ["agent-1"],
+            "refresh": ["1"],
+        }
+        with patch.object(viewer, "refresh_relay_agent") as refresh:
+            # Stop after proving dispatch; cache access is outside this assertion.
+            refresh.side_effect = RuntimeError("stop")
+            with self.assertRaisesRegex(RuntimeError, "stop"):
+                viewer.handle_relay_session(state, query)
+
+        refresh.assert_called_once_with(state, "remote-host", "agent-1")
+
+    def test_relay_refresh_404_keeps_cached_conversation_available(self) -> None:
+        state = SimpleNamespace(relay_cache=object())
+        peer = {"url": "https://desktop.example:8780", "token": "secret"}
+        not_found = viewer.HTTPError(
+            "https://desktop.example:8780/v1/agents/agent-1",
+            404,
+            "Not Found",
+            {},
+            None,
+        )
+
+        with (
+            patch.object(
+                viewer,
+                "relay_peer_for_host",
+                return_value=("desktop", peer),
+            ),
+            patch.object(
+                viewer.relay_transport,
+                "fetch_agent",
+                side_effect=not_found,
+            ),
+            patch.object(viewer.relay_transport, "apply_agent_snapshot") as apply,
+        ):
+            warning = viewer.refresh_relay_agent(
+                state, "remote-host", "agent-1"
+            )
+
+        self.assertEqual(
+            warning,
+            "Remote session is no longer active; showing cached copy",
+        )
+        apply.assert_not_called()
+
+    def test_relay_typeset_renders_cached_remote_conversation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache_path = root / "relay.sqlite3"
+            cache = relay_cache.RelayCache(cache_path)
+            cache.upsert_agent(
+                "remote-host",
+                "Desktop",
+                relay_cache.CachedAgent(
+                    agent_id="agent-1",
+                    session_id="session-1",
+                    thread_id="thread-1",
+                    rollout_id="rollout-1",
+                    title="Remote work",
+                    title_source="relay",
+                    cwd="/work/remote",
+                    source="cli",
+                    created_at="2026-10-07T10:00:00Z",
+                    updated_at="2026-10-07T11:00:00Z",
+                    origin_path="",
+                    records=(
+                        relay_cache.CachedRecord(
+                            "2026-10-07T11:00:00Z",
+                            "assistant",
+                            "Remote answer with https://example.com/reference",
+                            42,
+                            "message",
+                        ),
+                    ),
+                ),
+                base_url="https://desktop:8780",
+            )
+            state = viewer.ViewerState(
+                root,
+                root / "archive",
+                False,
+                root / "index.jsonl",
+                relay_cache_file=cache_path,
+                relay_config=root / "relay.json",
+            )
+            rendered = SimpleNamespace(
+                ok=True,
+                key="remote-pdf",
+                cached=False,
+                error="",
+            )
+            query = {
+                "source": ["relay"],
+                "host": ["remote-host"],
+                "agent": ["agent-1"],
+                "tail": ["8"],
+            }
+
+            with patch.object(
+                viewer.typeset, "render_pdf", return_value=rendered
+            ) as render:
+                payload = viewer.handle_typeset(state, query)
+                focused = viewer.handle_typeset(
+                    state,
+                    {**query, "line": ["42"]},
+                    isolated=True,
+                )
+
+        self.assertEqual(payload["session"]["hostName"], "Desktop")
+        self.assertEqual(payload["records"][0]["typeset"]["pdfUrl"], "/typeset/pdf/remote-pdf.pdf")
+        self.assertEqual(payload["records"][0]["attachments"], [])
+        self.assertEqual(
+            payload["records"][0]["externalLinks"][0]["url"],
+            "https://example.com/reference",
+        )
+        self.assertEqual(focused["isolatedLine"], 42)
+        self.assertEqual(render.call_count, 2)
 
     def test_session_deduplication_prefers_the_codex_cli_thread_rollout(self) -> None:
         items = [
@@ -384,9 +571,15 @@ class ViewerCommandTests(unittest.TestCase):
         self.assertIn(">Open answer ↗</a>", viewer.VIEW_JS)
         self.assertIn(">Open answer ↗</a>", viewer.TYPESET_JS)
         self.assertIn(
-            "return `/t/${encodeURIComponent(identity.get(\"id\"))}/${encodeURIComponent(record.line_no)}`",
+            "return `/t/local/${encodeURIComponent(identity.get(\"id\"))}/${encodeURIComponent(record.line_no)}`",
             viewer.VIEW_JS,
         )
+        self.assertIn(
+            "return `/t/relay/${encodeURIComponent(identity.get(\"host\"))}/${encodeURIComponent(identity.get(\"agent\"))}/${encodeURIComponent(record.line_no)}`",
+            viewer.VIEW_JS,
+        )
+        self.assertIn('identity.set("source", "relay")', viewer.TYPESET_JS)
+        self.assertIn('apiParams.set("refresh", "1")', viewer.TYPESET_JS)
         self.assertIn('"/api/typeset/answer"', viewer.TYPESET_JS)
         self.assertIn(">Fresh render ↗</a>", viewer.TYPESET_JS)
 
@@ -637,6 +830,33 @@ https://fenced.example/ignored
 
         self.assertFalse(healthy)
         self.assertIn("unexpected response", detail)
+
+    def test_version_reports_loaded_runtime_and_protocol(self) -> None:
+        payload = viewer.handle_version(SimpleNamespace(), {})
+
+        self.assertEqual(payload["service"], "codex-tools-viewer")
+        self.assertEqual(payload["protocolVersion"], viewer.VIEWER_PROTOCOL_VERSION)
+        self.assertEqual(payload["viewer"], viewer.VIEWER_RUNTIME_SIGNATURE)
+
+    def test_source_check_rejects_viewer_from_before_route_protocol(self) -> None:
+        legacy = self.FakeResponse({"viewer": viewer.viewer_signature()})
+        with patch.object(viewer, "urlopen", return_value=legacy):
+            self.assertFalse(
+                viewer.viewer_source_is_current("http://127.0.0.1:8765/")
+            )
+
+    def test_source_check_accepts_current_loaded_viewer(self) -> None:
+        current = self.FakeResponse(
+            {
+                "service": "codex-tools-viewer",
+                "protocolVersion": viewer.VIEWER_PROTOCOL_VERSION,
+                "viewer": viewer.viewer_signature(),
+            }
+        )
+        with patch.object(viewer, "urlopen", return_value=current):
+            self.assertTrue(
+                viewer.viewer_source_is_current("http://127.0.0.1:8765/")
+            )
 
     def test_start_does_not_open_browser_when_server_fails_readiness(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

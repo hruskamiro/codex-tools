@@ -4,14 +4,22 @@ from __future__ import annotations
 
 import argparse
 import curses
+import io
 import re
 import sys
 import textwrap
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from codex_tools import agents_ui, relay_cache, search
+from codex_tools import (
+    agents_ui,
+    paths,
+    relay_cache,
+    relay_transport,
+    search,
+)
 
 
 MAX_RECORDS = 240
@@ -36,6 +44,7 @@ class AgentItem:
     host_id: str
     host_name: str
     agent: dict[str, Any]
+    base_url: str = ""
 
 
 def compact(value: str, width: int) -> str:
@@ -45,14 +54,135 @@ def compact(value: str, width: int) -> str:
     return value if len(value) <= width else value[: width - 1] + "…"
 
 
-def all_agent_items(cache: relay_cache.RelayCache) -> list[AgentItem]:
+def compact_path_end(value: str, width: int) -> str:
+    """Fit complete trailing path components without cutting a directory name."""
+    value = value.strip()
+    if len(value) <= width:
+        return value
+    if width <= 0:
+        return ""
+    if width == 1:
+        return "…"
+    components = [part for part in re.split(r"[/\\]+", value) if part]
+    suffix = ""
+    for component in reversed(components):
+        candidate = component if not suffix else f"{component}/{suffix}"
+        if len(candidate) + 2 > width:
+            break
+        suffix = candidate
+    return f"…/{suffix}" if suffix else "…"
+
+
+def all_agent_items(
+    cache: relay_cache.RelayCache, *, include_local: bool = True
+) -> list[AgentItem]:
     result = []
     for host in cache.hosts():
+        if not include_local and host["host_id"] == "local":
+            continue
         for agent in cache.agents(str(host["host_id"])):
             result.append(
-                AgentItem(str(host["host_id"]), str(host["name"]), agent)
+                AgentItem(
+                    str(host["host_id"]),
+                    str(host["name"]),
+                    agent,
+                    str(host.get("base_url") or ""),
+                )
             )
     return result
+
+
+def peer_name_for_item(
+    config: dict[str, Any], item: AgentItem
+) -> str | None:
+    """Resolve a cached remote host back to its configured peer alias."""
+    if item.host_id == "local" or not item.base_url:
+        return None
+    base_url = item.base_url.rstrip("/")
+    for name, peer in config.get("peers", {}).items():
+        if (
+            isinstance(peer, dict)
+            and str(peer.get("url") or "").rstrip("/") == base_url
+        ):
+            return str(name)
+    return None
+
+
+def sync_peer(
+    cache: relay_cache.RelayCache,
+    config: dict[str, Any],
+    peer_name: str,
+) -> tuple[int, str]:
+    peer = config.get("peers", {}).get(peer_name)
+    if not isinstance(peer, dict):
+        raise ValueError(f"relay peer not found: {peer_name}")
+    payload = relay_transport.fetch_snapshot(peer)
+    count = relay_transport.apply_snapshot(
+        cache, payload, base_url=str(peer["url"])
+    )
+    return count, str(payload["host"]["name"])
+
+
+def sync_agent(
+    cache: relay_cache.RelayCache,
+    config: dict[str, Any],
+    peer_name: str,
+    agent_id: str,
+) -> str:
+    peer = config.get("peers", {}).get(peer_name)
+    if not isinstance(peer, dict):
+        raise ValueError(f"relay peer not found: {peer_name}")
+    payload = relay_transport.fetch_agent(peer, agent_id)
+    relay_transport.apply_agent_snapshot(
+        cache, payload, base_url=str(peer["url"])
+    )
+    return str(payload["host"]["name"])
+
+
+def open_agent_viewer(item: AgentItem) -> str:
+    # Imported lazily because viewer reads the relay cache, whose local refresh
+    # path imports the agents package.
+    from codex_tools import viewer
+
+    output = io.StringIO()
+    state = viewer.running_daemon_state()
+    if state is not None:
+        base_url = str(state.get("url") or "").rstrip("/")
+        if not viewer.viewer_source_is_current(base_url):
+            with redirect_stdout(output), redirect_stderr(output):
+                result = viewer.command_restart(viewer.default_server_args())
+            if result:
+                detail = output.getvalue().strip() or "viewer could not be restarted"
+                raise RuntimeError(detail.splitlines()[0])
+            state = viewer.running_daemon_state()
+    if state is None:
+        with redirect_stdout(output), redirect_stderr(output):
+            result = viewer.command_start(viewer.default_server_args())
+        if result:
+            detail = output.getvalue().strip() or "viewer could not be started"
+            raise RuntimeError(detail.splitlines()[0])
+        state = viewer.running_daemon_state()
+    if state is None:
+        raise RuntimeError("viewer did not start")
+    base_url = str(state.get("url") or "").rstrip("/")
+    healthy, detail = viewer.viewer_health(base_url)
+    if not healthy:
+        raise RuntimeError(f"viewer is not responding: {detail}")
+    agent_id = str(item.agent.get("agent_id") or "")
+    if item.host_id == "local":
+        session_id = str(
+            item.agent.get("rollout_id")
+            or item.agent.get("session_id")
+            or item.agent.get("thread_id")
+            or agent_id
+        )
+        url = viewer.view_url(base_url, "", 24, False, session_id, "markdown")
+    else:
+        url = base_url + viewer.relay_view_path(item.host_id, agent_id)
+    browser_args = viewer.default_server_args()
+    if not viewer.open_browser(url, browser_args):
+        raise RuntimeError("browser could not be opened")
+    return url
 
 
 def filtered_items(items: list[AgentItem], query: str) -> list[AgentItem]:
@@ -72,6 +202,19 @@ def filtered_items(items: list[AgentItem], query: str) -> list[AgentItem]:
             )
         ).casefold()
     ]
+
+
+def restored_selection(items: list[AgentItem], previous: AgentItem | None) -> int:
+    if previous is None:
+        return 0
+    previous_agent = str(previous.agent.get("agent_id") or "")
+    for index, item in enumerate(items):
+        if (
+            item.host_id == previous.host_id
+            and str(item.agent.get("agent_id") or "") == previous_agent
+        ):
+            return index
+    return 0
 
 
 def transcript_lines(
@@ -379,6 +522,7 @@ def colors() -> dict[str, int]:
     result = {
         "normal": curses.A_NORMAL,
         "muted": curses.A_DIM,
+        "path": curses.A_DIM,
         "header": curses.A_BOLD,
         "focus": curses.A_BOLD,
         "selected": curses.A_BOLD | curses.A_UNDERLINE,
@@ -406,8 +550,10 @@ def colors() -> dict[str, int]:
     curses.start_color()
     curses.use_default_colors()
     user_background = 237 if curses.COLORS >= 256 else curses.COLOR_BLUE
+    path_foreground = 245 if curses.COLORS >= 256 else curses.COLOR_WHITE
     definitions = {
         "focus": (curses.COLOR_CYAN, -1),
+        "path": (path_foreground, -1),
         "user": (curses.COLOR_WHITE, user_background),
         "user_label": (curses.COLOR_WHITE, user_background),
         "assistant_label": (curses.COLOR_CYAN, -1),
@@ -440,6 +586,8 @@ def colors() -> dict[str, int]:
     result["table_header"] |= curses.A_BOLD
     result["table_separator"] |= curses.A_DIM
     result["table_border"] |= curses.A_DIM
+    if curses.COLORS < 256:
+        result["path"] |= curses.A_DIM
     return result
 
 
@@ -483,6 +631,9 @@ def run_console(
     session_index: Path,
     codex_bin: str,
     control_socket: Path | None = None,
+    *,
+    include_local: bool = True,
+    relay_config: Path = paths.RELAY_CONFIG_FILE,
 ) -> int:
     def run(stdscr: Any) -> int:
         curses.curs_set(0)
@@ -494,7 +645,7 @@ def run_console(
         except curses.error:
             pass
         palette = colors()
-        items = all_agent_items(cache)
+        items = all_agent_items(cache, include_local=include_local)
         query = ""
         selected = 0
         scroll = 0
@@ -551,7 +702,7 @@ def run_console(
 
                 row = 3
                 previous_host = None
-                visible_start = max(0, selected - max(0, (height - 6) // 2))
+                visible_start = max(0, selected - max(0, (height - 6) // 3))
                 for index, item in enumerate(shown[visible_start:], visible_start):
                     if row >= height - 2:
                         break
@@ -581,6 +732,17 @@ def run_console(
                         attr,
                     )
                     row += 1
+                    cwd = str(item.agent.get("cwd") or "").strip()
+                    if cwd and row < height - 2:
+                        add_text(
+                            stdscr,
+                            row,
+                            4,
+                            compact_path_end(cwd, sidebar - 6),
+                            sidebar - 5,
+                            palette["path"],
+                        )
+                        row += 1
 
             if current:
                 agent = current.agent
@@ -645,10 +807,22 @@ def run_console(
                 if not rendered:
                     add_text(stdscr, 4, main_x + 2, "No renderable messages.", main_width - 4, palette["muted"])
             else:
-                add_text(stdscr, 3, main_x + 2, "No cached agents.", main_width - 4, palette["muted"])
+                empty = (
+                    "No synchronized remote agents. Run `ct relay sync PEER`."
+                    if not include_local
+                    else "No cached agents."
+                )
+                add_text(
+                    stdscr,
+                    3,
+                    main_x + 2,
+                    empty,
+                    main_width - 4,
+                    palette["muted"],
+                )
 
             layout_action = "restore" if maximized else "max"
-            footer = status or f"←→ pane  ↑↓/wheel scroll  m {layout_action}  i msg  / find  r refresh  ^C×2 quit"
+            footer = status or f"←→ pane  ↑↓/wheel scroll  m {layout_action}  i msg  v viewer  / find  r convo  R all  ^C×2 quit"
             add_text(stdscr, height - 1, 1, footer, width - 2, palette["status"])
             stdscr.refresh()
             status = ""
@@ -706,16 +880,100 @@ def run_console(
                         status = "Message sent." if result["delivery"] == "sent" else "Message queued for synchronization."
                     except (OSError, RuntimeError, ValueError) as exc:
                         status = f"Send failed: {exc}"
-            elif key == ord("r"):
-                show_status(stdscr, "Refreshing…", palette["status"])
+            elif key == ord("v") and current:
+                show_status(stdscr, "Opening viewer…", palette["status"])
                 try:
-                    count = relay_cache.refresh_local(
-                        cache, sessions_root, session_index, control_socket
+                    open_agent_viewer(current)
+                    status = "Opened conversation in viewer."
+                except (OSError, RuntimeError, ValueError) as exc:
+                    status = f"Viewer failed: {exc}"
+            elif key == ord("r"):
+                show_status(stdscr, "Refreshing conversation…", palette["status"])
+                try:
+                    if current is None:
+                        status = "No conversation selected."
+                    elif current.host_id == "local":
+                        refreshed = relay_cache.refresh_local_agent(
+                            cache,
+                            str(current.agent["agent_id"]),
+                            sessions_root,
+                            session_index,
+                            control_socket,
+                        )
+                        status = f"Refreshed {refreshed.title}."
+                    else:
+                        config = relay_transport.load_config(relay_config)
+                        peer_name = peer_name_for_item(config, current)
+                        if peer_name is None:
+                            raise ValueError(
+                                f"no configured peer matches {current.host_name}"
+                            )
+                        host_name = sync_agent(
+                            cache,
+                            config,
+                            peer_name,
+                            str(current.agent["agent_id"]),
+                        )
+                        status = f"Refreshed conversation from {host_name}."
+                    items = all_agent_items(
+                        cache, include_local=include_local
                     )
-                    items = all_agent_items(cache)
-                    status = f"Refreshed {count} local agents."
+                    selected = restored_selection(
+                        filtered_items(items, query), current
+                    )
                 except (OSError, RuntimeError, ValueError) as exc:
                     status = f"Refresh failed: {exc}"
+            elif key == ord("R"):
+                show_status(stdscr, "Refreshing everything…", palette["status"])
+                try:
+                    failures = []
+                    local_count = None
+                    if include_local:
+                        try:
+                            local_count = relay_cache.refresh_local(
+                                cache,
+                                sessions_root,
+                                session_index,
+                                control_socket,
+                            )
+                        except (OSError, RuntimeError, ValueError) as exc:
+                            failures.append(f"local: {exc}")
+                    if relay_config.expanduser().exists():
+                        config = relay_transport.load_config(relay_config)
+                        peer_names = sorted(config["peers"])
+                    else:
+                        config = {"peers": {}}
+                        peer_names = []
+                    synchronized = 0
+                    agents_count = 0
+                    for peer_name in peer_names:
+                        try:
+                            count, _ = sync_peer(cache, config, peer_name)
+                            synchronized += 1
+                            agents_count += count
+                        except (OSError, RuntimeError, ValueError) as exc:
+                            failures.append(f"{peer_name}: {exc}")
+                    parts = []
+                    if local_count is not None:
+                        parts.append(f"{local_count} local agents")
+                    if peer_names:
+                        parts.append(
+                            f"{synchronized}/{len(peer_names)} peers "
+                            f"({agents_count} agents)"
+                        )
+                    if not parts:
+                        parts.append("nothing configured")
+                    status = "Refreshed " + ", ".join(parts) + "."
+                    if failures:
+                        status += " Failed: " + "; ".join(failures)
+                    items = all_agent_items(
+                        cache, include_local=include_local
+                    )
+                    selected = restored_selection(
+                        filtered_items(items, query), current
+                    )
+                except (OSError, RuntimeError, ValueError) as exc:
+                    status = f"Synchronization failed: {exc}"
         return 0
 
     return int(curses.wrapper(run))
@@ -723,7 +981,8 @@ def run_console(
 
 def command_ui(args: argparse.Namespace) -> int:
     cache = relay_cache.RelayCache(args.cache_file)
-    if not args.no_refresh:
+    no_local = getattr(args, "no_local", False)
+    if not args.no_refresh and not no_local:
         count = relay_cache.refresh_local(
             cache,
             args.sessions_root,
@@ -741,6 +1000,10 @@ def command_ui(args: argparse.Namespace) -> int:
             args.session_index,
             args.codex_bin,
             getattr(args, "control_socket", None),
+            include_local=not no_local,
+            relay_config=getattr(
+                args, "relay_config", paths.RELAY_CONFIG_FILE
+            ),
         )
     except curses.error as exc:
         print(f"error: could not start Agent Console: {exc}", file=sys.stderr)

@@ -96,6 +96,26 @@ class RelayCacheTests(unittest.TestCase):
             self.assertEqual(len(pending), 1)
             self.assertEqual(pending[0]["payload"], {"text": "First"})
 
+    def test_upsert_agent_preserves_other_host_conversations(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = relay_cache.RelayCache(Path(temporary) / "relay.sqlite3")
+            cache.replace_host_snapshot(
+                "remote", "Desktop", [cached_agent("one"), cached_agent("two")]
+            )
+
+            cache.upsert_agent(
+                "remote",
+                "Desktop",
+                cached_agent("one", "updated title"),
+                base_url="https://desktop:8780",
+            )
+
+            agents = cache.agents("remote")
+            self.assertEqual({item["agent_id"] for item in agents}, {"one", "two"})
+            updated = next(item for item in agents if item["agent_id"] == "one")
+            self.assertEqual(updated["title"], "updated title")
+            self.assertEqual(cache.hosts()[0]["base_url"], "https://desktop:8780")
+
     def test_refresh_local_normalizes_session_records(self) -> None:
         summary = {
             "title": "viewer",
@@ -141,6 +161,59 @@ class RelayCacheTests(unittest.TestCase):
             self.assertEqual(cache.agents("local")[0]["agent_id"], "thread-1")
             records = cache.records("local", "thread-1")
             self.assertEqual([record["text"] for record in records], ["Hello"])
+
+    def test_refresh_local_agent_updates_only_selected_session(self) -> None:
+        selected_summary = {
+            "title": "selected",
+            "titleSource": "index",
+            "id": "selected",
+            "threadId": "selected",
+            "sessionId": "selected",
+            "rolloutId": "selected",
+            "path": "/sessions/selected.jsonl",
+            "cwd": "/work/project",
+            "source": "cli",
+            "createdAt": "2026-10-07T10:00:00Z",
+            "lastAt": "2026-10-07T12:00:00Z",
+        }
+        session = search.Session(
+            path=Path(selected_summary["path"]),
+            records=[search.TextRecord("1", "assistant", "New", 1, "message")],
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = relay_cache.RelayCache(Path(temporary) / "relay.sqlite3")
+            cache.replace_host_snapshot(
+                "local",
+                "This machine",
+                [cached_agent("selected"), cached_agent("untouched")],
+            )
+            with (
+                patch.object(
+                    relay_cache.agents,
+                    "agent_summaries",
+                    return_value=[selected_summary],
+                ),
+                patch.object(
+                    relay_cache,
+                    "load_recent_session",
+                    return_value=session,
+                ),
+            ):
+                refreshed = relay_cache.refresh_local_agent(
+                    cache,
+                    "selected",
+                    Path("/sessions"),
+                    Path("/index"),
+                )
+
+            self.assertEqual(refreshed.agent_id, "selected")
+            self.assertEqual(
+                {item["agent_id"] for item in cache.agents("local")},
+                {"selected", "untouched"},
+            )
+            self.assertEqual(
+                cache.records("local", "selected")[0]["text"], "New"
+            )
 
     def test_load_recent_session_reads_newest_renderable_records(self) -> None:
         def event(role: str, text: str) -> str:

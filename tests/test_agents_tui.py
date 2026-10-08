@@ -1,11 +1,190 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
-from codex_tools import agents_tui
+from codex_tools import agents_tui, viewer
 
 
 class AgentTuiTests(unittest.TestCase):
+    def test_path_compaction_preserves_the_end(self) -> None:
+        path = "/home/hruskam/projects/codex-tools"
+
+        compacted = agents_tui.compact_path_end(path, 22)
+
+        self.assertEqual(len(compacted), 22)
+        self.assertTrue(compacted.startswith("…"))
+        self.assertTrue(compacted.endswith("projects/codex-tools"))
+        self.assertEqual(agents_tui.compact_path_end("/work/app", 20), "/work/app")
+
+    def test_path_compaction_never_shows_partial_directory_names(self) -> None:
+        path = "/home/hruskam/projects/codex-tools"
+
+        self.assertEqual(
+            agents_tui.compact_path_end(path, 18),
+            "…/codex-tools",
+        )
+        self.assertEqual(agents_tui.compact_path_end(path, 10), "…")
+
+    def test_agent_items_can_exclude_local_host(self) -> None:
+        class Cache:
+            def hosts(self) -> list[dict[str, str]]:
+                return [
+                    {"host_id": "local", "name": "This machine"},
+                    {"host_id": "remote-1", "name": "Desktop"},
+                ]
+
+            def agents(self, host_id: str) -> list[dict[str, str]]:
+                return [{"agent_id": f"{host_id}-agent"}]
+
+        items = agents_tui.all_agent_items(Cache(), include_local=False)  # type: ignore[arg-type]
+
+        self.assertEqual([item.host_id for item in items], ["remote-1"])
+
+    def test_remote_item_resolves_to_peer_by_base_url(self) -> None:
+        item = agents_tui.AgentItem(
+            "host-id",
+            "Desktop",
+            {"agent_id": "agent-1"},
+            "https://desktop.example:8780",
+        )
+        config = {
+            "peers": {
+                "workstation": {
+                    "url": "https://desktop.example:8780/",
+                    "token": "secret",
+                }
+            }
+        }
+
+        self.assertEqual(
+            agents_tui.peer_name_for_item(config, item), "workstation"
+        )
+
+    def test_selection_is_preserved_after_host_refresh(self) -> None:
+        previous = agents_tui.AgentItem(
+            "remote", "Desktop", {"agent_id": "chosen"}
+        )
+        refreshed = [
+            agents_tui.AgentItem("remote", "Desktop", {"agent_id": "other"}),
+            agents_tui.AgentItem("remote", "Desktop", {"agent_id": "chosen"}),
+        ]
+
+        self.assertEqual(
+            agents_tui.restored_selection(refreshed, previous), 1
+        )
+
+    def test_sync_peer_fetches_and_caches_remote_snapshot(self) -> None:
+        config = {
+            "peers": {
+                "desktop": {
+                    "url": "https://desktop.example:8780",
+                    "token": "secret",
+                }
+            }
+        }
+        payload = {
+            "host": {"id": "host-1", "name": "Desktop"},
+            "agents": [],
+        }
+
+        with (
+            patch.object(
+                agents_tui.relay_transport,
+                "fetch_snapshot",
+                return_value=payload,
+            ) as fetch,
+            patch.object(
+                agents_tui.relay_transport,
+                "apply_snapshot",
+                return_value=3,
+            ) as apply,
+        ):
+            result = agents_tui.sync_peer(object(), config, "desktop")  # type: ignore[arg-type]
+
+        self.assertEqual(result, (3, "Desktop"))
+        fetch.assert_called_once_with(config["peers"]["desktop"])
+        self.assertEqual(
+            apply.call_args.kwargs["base_url"],
+            "https://desktop.example:8780",
+        )
+
+    def test_sync_agent_fetches_only_selected_conversation(self) -> None:
+        config = {
+            "peers": {
+                "desktop": {
+                    "url": "https://desktop.example:8780",
+                    "token": "secret",
+                }
+            }
+        }
+        payload = {
+            "host": {"id": "host-1", "name": "Desktop"},
+            "agent": {"agent_id": "selected"},
+        }
+
+        with (
+            patch.object(
+                agents_tui.relay_transport,
+                "fetch_agent",
+                return_value=payload,
+            ) as fetch,
+            patch.object(
+                agents_tui.relay_transport,
+                "apply_agent_snapshot",
+            ) as apply,
+        ):
+            host = agents_tui.sync_agent(
+                object(), config, "desktop", "selected"  # type: ignore[arg-type]
+            )
+
+        self.assertEqual(host, "Desktop")
+        fetch.assert_called_once_with(
+            config["peers"]["desktop"], "selected"
+        )
+        self.assertEqual(
+            apply.call_args.kwargs["base_url"],
+            "https://desktop.example:8780",
+        )
+
+    def test_remote_agent_opens_source_aware_viewer_route(self) -> None:
+        item = agents_tui.AgentItem(
+            "remote-host",
+            "Desktop",
+            {"agent_id": "agent-1"},
+            "https://desktop:8780",
+        )
+
+        with (
+            patch.object(
+                viewer,
+                "running_daemon_state",
+                return_value={"url": "http://127.0.0.1:8765/"},
+            ),
+            patch.object(
+                viewer,
+                "viewer_health",
+                return_value=(True, "responding"),
+            ),
+            patch.object(
+                viewer,
+                "viewer_source_is_current",
+                return_value=True,
+            ),
+            patch.object(
+                viewer,
+                "open_browser",
+                return_value=True,
+            ) as opened,
+        ):
+            url = agents_tui.open_agent_viewer(item)
+
+        self.assertEqual(
+            url,
+            "http://127.0.0.1:8765/v/relay/remote-host/agent-1?tail=24",
+        )
+        self.assertEqual(opened.call_args.args[0], url)
+
     def test_pane_navigation_can_maximize_and_restore_conversation(self) -> None:
         focus, maximized = agents_tui.change_pane(
             "agents", False, agents_tui.curses.KEY_RIGHT

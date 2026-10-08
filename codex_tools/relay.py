@@ -107,6 +107,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=search.DEFAULT_SESSION_INDEX,
         help=argparse.SUPPRESS,
     )
+    serve.add_argument(
+        "--control-socket",
+        type=Path,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
 
     cache = commands.add_parser("cache", help="Inspect or refresh the local relay cache.")
     cache_commands = cache.add_subparsers(dest="cache_command", required=True)
@@ -259,7 +265,12 @@ def command_serve(args: argparse.Namespace) -> int:
         tls_key=args.tls_key,
         allow_insecure_http=args.allow_insecure_http,
     )
-    count = relay_cache.refresh_local(cache, args.sessions_root, args.session_index)
+    count = relay_cache.refresh_local(
+        cache,
+        args.sessions_root,
+        args.session_index,
+        args.control_socket,
+    )
     scheme = "https" if args.tls_cert else "http"
     print(
         f"Serving {count} local agent(s) at {scheme}://{args.host}:{args.port}",
@@ -274,7 +285,17 @@ def command_serve(args: argparse.Namespace) -> int:
         tls_key=args.tls_key,
         allow_insecure_http=args.allow_insecure_http,
         refresh=lambda: relay_cache.refresh_local(
-            cache, args.sessions_root, args.session_index
+            cache,
+            args.sessions_root,
+            args.session_index,
+            args.control_socket,
+        ),
+        refresh_agent=lambda agent_id: relay_cache.refresh_local_agent(
+            cache,
+            agent_id,
+            args.sessions_root,
+            args.session_index,
+            args.control_socket,
         ),
     )
     return 0

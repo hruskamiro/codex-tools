@@ -200,52 +200,7 @@ class RelayCache:
                 "DELETE FROM relay_agents WHERE host_id = ?", (host_id,)
             )
             for agent in cached_agents:
-                connection.execute(
-                    """
-                    INSERT INTO relay_agents(
-                        host_id, agent_id, session_id, thread_id, rollout_id,
-                        title, title_source, cwd, source, created_at, updated_at,
-                        origin_path, status, status_label
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        host_id,
-                        agent.agent_id,
-                        agent.session_id,
-                        agent.thread_id,
-                        agent.rollout_id,
-                        agent.title,
-                        agent.title_source,
-                        agent.cwd,
-                        agent.source,
-                        agent.created_at,
-                        agent.updated_at,
-                        agent.origin_path,
-                        agent.status,
-                        agent.status_label,
-                    ),
-                )
-                connection.executemany(
-                    """
-                    INSERT INTO relay_records(
-                        host_id, agent_id, ordinal, timestamp, role, text,
-                        line_no, record_type
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    [
-                        (
-                            host_id,
-                            agent.agent_id,
-                            ordinal,
-                            record.timestamp,
-                            record.role,
-                            record.text,
-                            record.line_no,
-                            record.record_type,
-                        )
-                        for ordinal, record in enumerate(agent.records)
-                    ],
-                )
+                self._write_agent(connection, host_id, agent)
             connection.execute(
                 """
                 UPDATE relay_hosts
@@ -254,6 +209,103 @@ class RelayCache:
                 """,
                 (cursor, synchronized_at, host_id),
             )
+
+    def upsert_agent(
+        self,
+        host_id: str,
+        name: str,
+        agent: CachedAgent,
+        *,
+        cursor: str | None = None,
+        base_url: str | None = None,
+    ) -> None:
+        synchronized_at = utc_now()
+        with self.connect() as connection, connection:
+            self.ensure_host(
+                host_id,
+                name,
+                base_url=base_url,
+                connection=connection,
+            )
+            self._write_agent(connection, host_id, agent)
+            connection.execute(
+                """
+                UPDATE relay_hosts
+                SET sync_cursor = ?, last_sync_at = ?
+                WHERE host_id = ?
+                """,
+                (cursor, synchronized_at, host_id),
+            )
+
+    @staticmethod
+    def _write_agent(
+        connection: sqlite3.Connection,
+        host_id: str,
+        agent: CachedAgent,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO relay_agents(
+                host_id, agent_id, session_id, thread_id, rollout_id,
+                title, title_source, cwd, source, created_at, updated_at,
+                origin_path, status, status_label
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(host_id, agent_id) DO UPDATE SET
+                session_id = excluded.session_id,
+                thread_id = excluded.thread_id,
+                rollout_id = excluded.rollout_id,
+                title = excluded.title,
+                title_source = excluded.title_source,
+                cwd = excluded.cwd,
+                source = excluded.source,
+                created_at = excluded.created_at,
+                updated_at = excluded.updated_at,
+                origin_path = excluded.origin_path,
+                status = excluded.status,
+                status_label = excluded.status_label
+            """,
+            (
+                host_id,
+                agent.agent_id,
+                agent.session_id,
+                agent.thread_id,
+                agent.rollout_id,
+                agent.title,
+                agent.title_source,
+                agent.cwd,
+                agent.source,
+                agent.created_at,
+                agent.updated_at,
+                agent.origin_path,
+                agent.status,
+                agent.status_label,
+            ),
+        )
+        connection.execute(
+            "DELETE FROM relay_records WHERE host_id = ? AND agent_id = ?",
+            (host_id, agent.agent_id),
+        )
+        connection.executemany(
+            """
+            INSERT INTO relay_records(
+                host_id, agent_id, ordinal, timestamp, role, text,
+                line_no, record_type
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    host_id,
+                    agent.agent_id,
+                    ordinal,
+                    record.timestamp,
+                    record.role,
+                    record.text,
+                    record.line_no,
+                    record.record_type,
+                )
+                for ordinal, record in enumerate(agent.records)
+            ],
+        )
 
     def hosts(self) -> list[dict[str, Any]]:
         with self.connect() as connection:
@@ -445,3 +497,26 @@ def refresh_local(
         cached.append(cached_agent_from_local(summary, session))
     cache.replace_host_snapshot("local", "This machine", cached)
     return len(cached)
+
+
+def refresh_local_agent(
+    cache: RelayCache,
+    agent_id: str,
+    sessions_root: Path,
+    session_index: Path,
+    control_socket: Path | None = None,
+) -> CachedAgent:
+    for summary in agents.agent_summaries(
+        sessions_root, session_index, control_socket
+    ):
+        if agents.agent_identifier(summary) != agent_id:
+            continue
+        session_path = Path(str(summary.get("path") or ""))
+        try:
+            session = load_recent_session(session_path)
+        except (OSError, ValueError):
+            session = search.Session(path=session_path)
+        cached = cached_agent_from_local(summary, session)
+        cache.upsert_agent("local", "This machine", cached)
+        return cached
+    raise ValueError(f"local agent is no longer available: {agent_id}")

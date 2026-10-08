@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from codex_tools import agents_tui, codex_daemon, relay_cache, search, viewer
+from codex_tools import agents_tui, codex_daemon, paths, relay_cache, search
 
 
 @dataclass(frozen=True)
@@ -83,7 +83,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Do not refresh local sessions before opening.",
     )
     ui.add_argument(
+        "--no-local",
+        action="store_true",
+        help="Show only synchronized agents from remote relay hosts.",
+    )
+    ui.add_argument(
         "--cache-file", type=Path, default=relay_cache.DEFAULT_CACHE_PATH,
+        help=argparse.SUPPRESS,
+    )
+    ui.add_argument(
+        "--relay-config",
+        type=Path,
+        default=paths.RELAY_CONFIG_FILE,
         help=argparse.SUPPRESS,
     )
     ui.add_argument("--codex-bin", default="codex", help=argparse.SUPPRESS)

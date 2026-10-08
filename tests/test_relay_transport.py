@@ -6,6 +6,7 @@ import json
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -35,6 +36,17 @@ def agent() -> relay_cache.CachedAgent:
     )
 
 
+def cached_sibling_agent() -> relay_cache.CachedAgent:
+    return replace(
+        agent(),
+        agent_id="agent-2",
+        session_id="session-2",
+        thread_id="thread-2",
+        rollout_id="rollout-2",
+        title="Other work",
+    )
+
+
 class FakeResponse(io.BytesIO):
     def __enter__(self) -> FakeResponse:
         return self
@@ -44,6 +56,38 @@ class FakeResponse(io.BytesIO):
 
 
 class RelayTransportTests(unittest.TestCase):
+    def test_serve_parser_accepts_control_socket_override(self) -> None:
+        args = relay.parse_args(
+            ["serve", "--control-socket", "/tmp/test-control.sock"]
+        )
+
+        self.assertEqual(args.control_socket, Path("/tmp/test-control.sock"))
+
+    def test_server_stops_cleanly_on_keyboard_interrupt(self) -> None:
+        class Server:
+            socket = object()
+
+            def serve_forever(self) -> None:
+                raise KeyboardInterrupt
+
+            def server_close(self) -> None:
+                self.closed = True
+
+        server = Server()
+        config = {
+            "identity": {"token": "key"},
+        }
+
+        with patch.object(relay_transport, "ThreadingHTTPServer", return_value=server):
+            relay_transport.serve(
+                object(),  # type: ignore[arg-type]
+                config,
+                "127.0.0.1",
+                8780,
+            )
+
+        self.assertTrue(server.closed)
+
     def test_initialize_creates_private_identity_and_refuses_overwrite(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "private" / "relay.json"
@@ -138,6 +182,56 @@ class RelayTransportTests(unittest.TestCase):
         request = opened.call_args.args[0]
         self.assertEqual(result, payload)
         self.assertEqual(request.get_header("Authorization"), "Bearer pairing-key")
+
+    def test_fetch_agent_targets_only_encoded_agent(self) -> None:
+        payload = {
+            "protocol": 1,
+            "host": {"id": "h", "name": "Host"},
+            "agent": {"agent_id": "agent one"},
+        }
+        response = FakeResponse(json.dumps(payload).encode())
+
+        with patch.object(relay_transport, "urlopen", return_value=response) as opened:
+            result = relay_transport.fetch_agent(
+                {"url": "http://localhost:8780", "token": "key"},
+                "agent one",
+            )
+
+        self.assertEqual(result, payload)
+        self.assertEqual(
+            opened.call_args.args[0].full_url,
+            "http://localhost:8780/v1/agents/agent%20one",
+        )
+
+    def test_agent_snapshot_updates_one_conversation_without_pruning(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = relay_cache.RelayCache(root / "source.sqlite3")
+            target = relay_cache.RelayCache(root / "target.sqlite3")
+            source.replace_host_snapshot("local", "This machine", [agent()])
+            target.replace_host_snapshot(
+                "host-1",
+                "Desktop",
+                [agent(), cached_sibling_agent()],
+            )
+            config = {
+                "identity": {"id": "host-1", "name": "Desktop", "token": "key"}
+            }
+
+            payload = relay_transport.agent_snapshot_payload(
+                source, config, "agent-1"
+            )
+            self.assertIsNotNone(payload)
+            relay_transport.apply_agent_snapshot(
+                target,
+                payload or {},
+                base_url="https://desktop:8780",
+            )
+
+            self.assertEqual(
+                {item["agent_id"] for item in target.agents("host-1")},
+                {"agent-1", "agent-2"},
+            )
 
     def test_peer_listing_never_prints_keys(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

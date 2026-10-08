@@ -12,7 +12,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import urlparse
+from urllib.parse import quote, unquote, urlparse
 from urllib.request import Request, urlopen
 
 from codex_tools import paths, relay_cache
@@ -134,14 +134,18 @@ def add_peer(
     return peer
 
 
+def public_agent_payload(
+    cache: relay_cache.RelayCache, agent: dict[str, Any]
+) -> dict[str, Any]:
+    public = dict(agent)
+    public.pop("host_id", None)
+    public.pop("origin_path", None)
+    public["records"] = cache.records("local", str(agent["agent_id"]))
+    return public
+
+
 def snapshot_payload(cache: relay_cache.RelayCache, config: dict[str, Any]) -> dict[str, Any]:
-    agents = []
-    for agent in cache.agents("local"):
-        public = dict(agent)
-        public.pop("host_id", None)
-        public.pop("origin_path", None)
-        public["records"] = cache.records("local", str(agent["agent_id"]))
-        agents.append(public)
+    agents = [public_agent_payload(cache, agent) for agent in cache.agents("local")]
     identity = config["identity"]
     return {
         "protocol": PROTOCOL_VERSION,
@@ -149,6 +153,64 @@ def snapshot_payload(cache: relay_cache.RelayCache, config: dict[str, Any]) -> d
         "cursor": relay_cache.utc_now(),
         "agents": agents,
     }
+
+
+def agent_snapshot_payload(
+    cache: relay_cache.RelayCache,
+    config: dict[str, Any],
+    agent_id: str,
+) -> dict[str, Any] | None:
+    agent = next(
+        (
+            value
+            for value in cache.agents("local")
+            if str(value["agent_id"]) == agent_id
+        ),
+        None,
+    )
+    if agent is None:
+        return None
+    identity = config["identity"]
+    return {
+        "protocol": PROTOCOL_VERSION,
+        "host": {"id": identity["id"], "name": identity["name"]},
+        "cursor": relay_cache.utc_now(),
+        "agent": public_agent_payload(cache, agent),
+    }
+
+
+def cached_agent_from_payload(value: dict[str, Any]) -> relay_cache.CachedAgent:
+    if not value.get("agent_id"):
+        raise ValueError("invalid agent in relay snapshot")
+    records = value.get("records") or []
+    if not isinstance(records, list):
+        raise ValueError("invalid records in relay snapshot")
+    return relay_cache.CachedAgent(
+        agent_id=str(value["agent_id"]),
+        session_id=str(value.get("session_id") or ""),
+        thread_id=str(value.get("thread_id") or ""),
+        rollout_id=str(value.get("rollout_id") or ""),
+        title=str(value.get("title") or value["agent_id"]),
+        title_source=str(value.get("title_source") or "relay"),
+        cwd=str(value.get("cwd") or ""),
+        source=str(value.get("source") or ""),
+        created_at=str(value.get("created_at") or ""),
+        updated_at=str(value.get("updated_at") or ""),
+        origin_path="",
+        status=str(value.get("status") or "unknown"),
+        status_label=str(value.get("status_label") or "unknown"),
+        records=tuple(
+            relay_cache.CachedRecord(
+                timestamp=str(record.get("timestamp") or ""),
+                role=str(record.get("role") or ""),
+                text=str(record.get("text") or ""),
+                line_no=int(record.get("line_no") or 0),
+                record_type=str(record.get("record_type") or "message"),
+            )
+            for record in records
+            if isinstance(record, dict)
+        ),
+    )
 
 
 def apply_snapshot(
@@ -169,37 +231,9 @@ def apply_snapshot(
         raise ValueError("relay snapshot has no host identity")
     cached = []
     for value in raw_agents:
-        if not isinstance(value, dict) or not value.get("agent_id"):
+        if not isinstance(value, dict):
             raise ValueError("invalid agent in relay snapshot")
-        records = value.get("records") or []
-        cached.append(
-            relay_cache.CachedAgent(
-                agent_id=str(value["agent_id"]),
-                session_id=str(value.get("session_id") or ""),
-                thread_id=str(value.get("thread_id") or ""),
-                rollout_id=str(value.get("rollout_id") or ""),
-                title=str(value.get("title") or value["agent_id"]),
-                title_source=str(value.get("title_source") or "relay"),
-                cwd=str(value.get("cwd") or ""),
-                source=str(value.get("source") or ""),
-                created_at=str(value.get("created_at") or ""),
-                updated_at=str(value.get("updated_at") or ""),
-                origin_path="",
-                status=str(value.get("status") or "unknown"),
-                status_label=str(value.get("status_label") or "unknown"),
-                records=tuple(
-                    relay_cache.CachedRecord(
-                        timestamp=str(record.get("timestamp") or ""),
-                        role=str(record.get("role") or ""),
-                        text=str(record.get("text") or ""),
-                        line_no=int(record.get("line_no") or 0),
-                        record_type=str(record.get("record_type") or "message"),
-                    )
-                    for record in records
-                    if isinstance(record, dict)
-                ),
-            )
-        )
+        cached.append(cached_agent_from_payload(value))
     cache.ensure_host(host_id, host_name, base_url=base_url)
     cache.replace_host_snapshot(
         host_id, host_name, cached, cursor=str(payload.get("cursor") or "")
@@ -207,9 +241,57 @@ def apply_snapshot(
     return len(cached)
 
 
+def apply_agent_snapshot(
+    cache: relay_cache.RelayCache,
+    payload: dict[str, Any],
+    *,
+    base_url: str | None = None,
+) -> str:
+    if payload.get("protocol") != PROTOCOL_VERSION:
+        raise ValueError("unsupported relay protocol version")
+    host = payload.get("host")
+    value = payload.get("agent")
+    if not isinstance(host, dict) or not isinstance(value, dict):
+        raise ValueError("invalid relay agent snapshot")
+    host_id = str(host.get("id") or "")
+    host_name = str(host.get("name") or "")
+    if not host_id or not host_name:
+        raise ValueError("relay snapshot has no host identity")
+    cached = cached_agent_from_payload(value)
+    cache.upsert_agent(
+        host_id,
+        host_name,
+        cached,
+        cursor=str(payload.get("cursor") or ""),
+        base_url=base_url,
+    )
+    return cached.agent_id
+
+
 def fetch_snapshot(peer: dict[str, Any], timeout: float = 10.0) -> dict[str, Any]:
-    request = Request(
+    return fetch_json(
+        peer,
         str(peer["url"]).rstrip("/") + "/v1/snapshot",
+        timeout,
+    )
+
+
+def fetch_agent(
+    peer: dict[str, Any], agent_id: str, timeout: float = 10.0
+) -> dict[str, Any]:
+    url = (
+        str(peer["url"]).rstrip("/")
+        + "/v1/agents/"
+        + quote(agent_id, safe="")
+    )
+    return fetch_json(peer, url, timeout)
+
+
+def fetch_json(
+    peer: dict[str, Any], url: str, timeout: float
+) -> dict[str, Any]:
+    request = Request(
+        url,
         headers={
             "Authorization": f"Bearer {peer['token']}",
             "Accept": "application/json",
@@ -232,6 +314,7 @@ def make_handler(
     cache: relay_cache.RelayCache,
     config: dict[str, Any],
     refresh: Callable[[], None] | None = None,
+    refresh_agent: Callable[[str], None] | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     token = str(config["identity"]["token"])
 
@@ -240,17 +323,34 @@ def make_handler(
             return
 
         def do_GET(self) -> None:
-            if self.path == "/v1/health":
+            request_path = urlparse(self.path).path
+            if request_path == "/v1/health":
                 self._json({"service": "codex-tools-relay", "protocol": PROTOCOL_VERSION})
                 return
             supplied = self.headers.get("Authorization", "")
             if not hmac.compare_digest(supplied, f"Bearer {token}"):
                 self._json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
                 return
-            if self.path == "/v1/snapshot":
+            if request_path == "/v1/snapshot":
                 if refresh is not None:
                     refresh()
                 self._json(snapshot_payload(cache, config))
+            elif request_path.startswith("/v1/agents/"):
+                agent_id = unquote(request_path.removeprefix("/v1/agents/"))
+                if not agent_id or "/" in agent_id:
+                    self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+                    return
+                try:
+                    if refresh_agent is not None:
+                        refresh_agent(agent_id)
+                except ValueError:
+                    self._json({"error": "agent not found"}, HTTPStatus.NOT_FOUND)
+                    return
+                payload = agent_snapshot_payload(cache, config, agent_id)
+                if payload is None:
+                    self._json({"error": "agent not found"}, HTTPStatus.NOT_FOUND)
+                    return
+                self._json(payload)
             else:
                 self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
@@ -276,6 +376,7 @@ def serve(
     tls_key: Path | None = None,
     allow_insecure_http: bool = False,
     refresh: Callable[[], None] | None = None,
+    refresh_agent: Callable[[str], None] | None = None,
 ) -> None:
     validate_server_transport(
         host,
@@ -284,13 +385,18 @@ def serve(
         tls_key=tls_key,
         allow_insecure_http=allow_insecure_http,
     )
-    server = ThreadingHTTPServer((host, port), make_handler(cache, config, refresh))
+    server = ThreadingHTTPServer(
+        (host, port),
+        make_handler(cache, config, refresh, refresh_agent),
+    )
     if tls_cert and tls_key:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(str(tls_cert), str(tls_key))
         server.socket = context.wrap_socket(server.socket, server_side=True)
     try:
         server.serve_forever()
+    except KeyboardInterrupt:
+        pass
     finally:
         server.server_close()
 

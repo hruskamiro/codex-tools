@@ -20,3 +20,5 @@ daily_summary_site/
 *.log
 *.codex-profile
 docs/ideas.md
+scripts/relay-loopback-serve
+scripts/relay-loopback-sync

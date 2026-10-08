@@ -104,8 +104,22 @@ refreshes the local relay cache and opens the terminal **Agent Console**,
 styled after the Codex CLI. You can switch among cached local or remote agents,
 read their recent messages, search, scroll, and send or queue a message without
 leaving the terminal. Use Left/Right to select a pane, Up/Down or the mouse
-wheel to navigate, `i` to compose, `/` to search, and `r` to refresh. Press
-Ctrl-C twice to quit.
+wheel to navigate, `i` to compose, `v` to open the selected conversation in
+the browser viewer, `/` to search, and `r` to refresh. Press Ctrl-C twice to
+quit.
+
+In the console, `r` refreshes only the selected conversation. `R` refreshes
+all local sessions and configured remote peers (`--no-local` skips the local
+part).
+
+After synchronizing a relay peer, use `ct agents ui --no-local` to hide this
+machine's sessions and browse only cached remote agents.
+
+Viewer routes explicitly identify both presentation and source:
+`/v/local/SESSION` and `/t/local/SESSION` use local Codex JSONL data, while
+`/v/relay/HOST/AGENT` renders a synchronized remote conversation from the
+private relay cache. Remote typesetting is reserved under `/t/relay/...` but is
+not implemented yet.
 
 The relay foundation keeps normalized sessions, messages, synchronization
 cursors, and an idempotent outgoing-message queue in a private local SQLite

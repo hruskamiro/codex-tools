@@ -110,6 +110,12 @@ class AgentCommandTests(unittest.TestCase):
 
         self.assertEqual(args.agents_command, "ui")
         self.assertTrue(args.no_refresh)
+        self.assertFalse(args.no_local)
+
+    def test_ui_can_select_remote_agents_only(self) -> None:
+        args = agents.parse_args(["ui", "--no-local"])
+
+        self.assertTrue(args.no_local)
 
     def test_resolve_agent_accepts_exact_name_and_unique_id_prefix(self) -> None:
         other = {**AGENT, "title": "docs", "threadId": "02thread"}
