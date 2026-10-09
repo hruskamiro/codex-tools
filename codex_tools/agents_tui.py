@@ -89,6 +89,83 @@ class ComposerBuffer:
         self.preferred_column = None
 
 
+@dataclass(frozen=True)
+class OptimisticMessage:
+    text: str
+    baseline_matches: int
+    delivery: str
+    message_id: str = ""
+
+
+def normalized_message_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def user_message_count(records: list[dict[str, Any]], text: str) -> int:
+    expected = normalized_message_text(text)
+    return sum(
+        record.get("role") == "user"
+        and normalized_message_text(record.get("text")) == expected
+        for record in records
+    )
+
+
+def reconcile_optimistic_messages(
+    records: list[dict[str, Any]], messages: list[OptimisticMessage]
+) -> list[OptimisticMessage]:
+    """Drop optimistic bubbles as matching real transcript entries appear."""
+    real_counts: dict[str, int] = {}
+    for record in records:
+        if record.get("role") != "user":
+            continue
+        text = normalized_message_text(record.get("text"))
+        real_counts[text] = real_counts.get(text, 0) + 1
+    remaining = []
+    for message in messages:
+        text = normalized_message_text(message.text)
+        available = real_counts.get(text, 0)
+        if available > message.baseline_matches:
+            real_counts[text] = available - 1
+        else:
+            remaining.append(message)
+    return remaining
+
+
+def optimistic_message_status(
+    message: OptimisticMessage,
+    outbox: dict[str, dict[str, Any]],
+) -> str:
+    if message.message_id:
+        item = outbox.get(message.message_id)
+        state = str((item or {}).get("state") or message.delivery)
+        if state == "delivered":
+            return "Delivered · waiting for transcript"
+        if state == "failed":
+            error = str((item or {}).get("last_error") or "delivery failed")
+            return f"Delivery failed · {error}"
+        return "Queued offline · waiting to retry"
+    return "Sent · waiting for transcript"
+
+
+def records_with_optimistic_messages(
+    records: list[dict[str, Any]],
+    messages: list[OptimisticMessage],
+    outbox: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        *records,
+        *(
+            {
+                "role": "user",
+                "text": message.text,
+                "record_type": "optimistic",
+                "_status": optimistic_message_status(message, outbox),
+            }
+            for message in messages
+        ),
+    ]
+
+
 def compact(value: str, width: int) -> str:
     value = " ".join(value.split())
     if width < 2:
@@ -415,6 +492,16 @@ def outbox_message(
     )
 
 
+def outbox_views(
+    cache: relay_cache.RelayCache,
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    items = cache.outbox()
+    visible = [
+        item for item in items if item["state"] in {"pending", "failed"}
+    ]
+    return visible, {str(item["message_id"]): item for item in items}
+
+
 def agent_delivery_counts(
     messages: list[dict[str, Any]], host_id: str, agent_id: str
 ) -> tuple[int, int]:
@@ -564,6 +651,21 @@ def transcript_lines(
             ) or [""]
             lines.extend(("  " + line, role) for line in wrapped)
             index += 1
+        message_status = str(record.get("_status") or "")
+        if message_status:
+            status_lines = textwrap.wrap(
+                message_status,
+                width=max(8, content_width - 2),
+                break_long_words=True,
+                break_on_hyphens=True,
+            ) or [""]
+            lines.extend(
+                (
+                    ("  ◌ " if status_index == 0 else "    ") + status_line,
+                    "message_status",
+                )
+                for status_index, status_line in enumerate(status_lines)
+            )
         lines.append(("", f"{role}_gap"))
     return lines
 
@@ -844,6 +946,7 @@ def soft_color_definitions(color_count: int) -> dict[str, tuple[int, int]]:
             "composer_muted": (muted_text, selected_background),
             "user": (warm_text, user_background),
             "user_label": (soft_blue, user_background),
+            "message_status": (muted_text, user_background),
             "assistant": (warm_text, -1),
             "assistant_label": (soft_blue, -1),
             "status": (muted_text, -1),
@@ -875,6 +978,7 @@ def soft_color_definitions(color_count: int) -> dict[str, tuple[int, int]]:
         "composer_muted": (curses.COLOR_WHITE, curses.COLOR_BLACK),
         "user": (curses.COLOR_WHITE, curses.COLOR_BLACK),
         "user_label": (curses.COLOR_CYAN, curses.COLOR_BLACK),
+        "message_status": (curses.COLOR_WHITE, curses.COLOR_BLACK),
         "assistant_label": (curses.COLOR_CYAN, -1),
         "syntax_code": (curses.COLOR_MAGENTA, -1),
         "syntax_string": (curses.COLOR_GREEN, -1),
@@ -911,6 +1015,7 @@ def colors() -> dict[str, int]:
         "composer_muted": curses.A_DIM,
         "user": curses.A_NORMAL,
         "user_label": curses.A_BOLD,
+        "message_status": curses.A_DIM,
         "assistant": curses.A_NORMAL,
         "assistant_label": curses.A_BOLD,
         "status": curses.A_DIM,
@@ -946,6 +1051,7 @@ def colors() -> dict[str, int]:
     result["active_dot"] |= curses.A_BOLD
     result["selected_active_dot"] |= curses.A_BOLD
     result["user_label"] |= curses.A_BOLD
+    result["message_status"] |= curses.A_DIM
     result["assistant_label"] |= curses.A_BOLD
     result["syntax_link"] |= curses.A_UNDERLINE
     result["user_syntax_link"] |= curses.A_UNDERLINE
@@ -1316,7 +1422,8 @@ def run_console(
         status = ""
         interrupt_armed = False
         drafts: dict[tuple[str, str], ComposerBuffer] = {}
-        outgoing = cache.outbox(states=("pending", "failed"))
+        outgoing, outbox_by_id = outbox_views(cache)
+        optimistic: dict[tuple[str, str], list[OptimisticMessage]] = {}
         auto_sync = AutoSyncWorker(
             cache,
             sessions_root,
@@ -1351,7 +1458,7 @@ def run_console(
                         status = f"Automatic sync failed: {update.error}"
             if received_update:
                 items = all_agent_items(cache, include_local=include_local)
-                outgoing = cache.outbox(states=("pending", "failed"))
+                outgoing, outbox_by_id = outbox_views(cache)
                 selected = restored_selection(
                     filtered_items(items, query), previous_current
                 )
@@ -1630,8 +1737,19 @@ def run_console(
                 if status:
                     detail = status
                 add_text(stdscr, 1, main_x + 2, detail, main_width - 4, palette["muted"])
-                records = cache.records(current.host_id, str(agent["agent_id"]))
-                rendered = transcript_lines(records, main_width - 2)
+                agent_key = (current.host_id, str(agent["agent_id"]))
+                records = cache.records(*agent_key)
+                pending_messages = reconcile_optimistic_messages(
+                    records, optimistic.get(agent_key, [])
+                )
+                if pending_messages:
+                    optimistic[agent_key] = pending_messages
+                else:
+                    optimistic.pop(agent_key, None)
+                displayed_records = records_with_optimistic_messages(
+                    records, pending_messages, outbox_by_id
+                )
+                rendered = transcript_lines(displayed_records, main_width - 2)
                 composer_width = max(1, main_width - 6)
                 composer_lines, _ = composer_layout(draft.text, composer_width)
                 composer_rows = max(1, min(8, height // 3, len(composer_lines)))
@@ -1642,7 +1760,7 @@ def run_console(
                 start = max(0, len(rendered) - viewport - scroll)
                 for offset, (line, style) in enumerate(rendered[start : start + viewport]):
                     y = 3 + offset
-                    if style in {"user", "user_label"}:
+                    if style in {"user", "user_label", "message_status"}:
                         add_text(
                             stdscr,
                             y,
@@ -1867,7 +1985,7 @@ def run_console(
                     items = all_agent_items(
                         cache, include_local=include_local
                     )
-                    outgoing = cache.outbox(states=("pending", "failed"))
+                    outgoing, outbox_by_id = outbox_views(cache)
                     selected = restored_selection(
                         filtered_items(items, query), current
                     )
@@ -1936,7 +2054,7 @@ def run_console(
                     items = all_agent_items(
                         cache, include_local=include_local
                     )
-                    outgoing = cache.outbox(states=("pending", "failed"))
+                    outgoing, outbox_by_id = outbox_views(cache)
                     selected = restored_selection(
                         filtered_items(items, query), current
                     )
@@ -1967,6 +2085,9 @@ def run_console(
                 )
                 if action == "send" and draft.text.strip():
                     message = draft.text.strip()
+                    baseline_matches = user_message_count(
+                        cache.records(*draft_key), message
+                    )
                     try:
                         result = agents_ui.send_message(
                             cache,
@@ -1978,6 +2099,15 @@ def run_console(
                             codex_bin,
                         )
                         drafts[draft_key] = ComposerBuffer()
+                        scroll = 0
+                        optimistic.setdefault(draft_key, []).append(
+                            OptimisticMessage(
+                                text=message,
+                                baseline_matches=baseline_matches,
+                                delivery=str(result["delivery"]),
+                                message_id=str(result.get("message_id") or ""),
+                            )
+                        )
                         status = (
                             "Message sent."
                             if result["delivery"] == "sent"
@@ -2012,9 +2142,7 @@ def run_console(
                                     "Message safely queued offline; "
                                     "Ctrl-R or Ctrl-S will retry."
                                 )
-                            outgoing = cache.outbox(
-                                states=("pending", "failed")
-                            )
+                            outgoing, outbox_by_id = outbox_views(cache)
                     except (OSError, RuntimeError, ValueError) as exc:
                         status = f"Send failed: {exc}"
         return 0

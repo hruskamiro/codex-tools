@@ -185,6 +185,64 @@ class AgentTuiTests(unittest.TestCase):
             (1, 1),
         )
 
+    def test_optimistic_message_is_rendered_with_delivery_status(self) -> None:
+        message = agents_tui.OptimisticMessage(
+            "Continue please", 0, "pending", "message-1"
+        )
+        outbox = {
+            "message-1": {
+                "message_id": "message-1",
+                "state": "delivered",
+            }
+        }
+
+        records = agents_tui.records_with_optimistic_messages(
+            [], [message], outbox
+        )
+        lines = agents_tui.transcript_lines(records, 60)
+
+        self.assertEqual(records[0]["role"], "user")
+        self.assertEqual(records[0]["text"], "Continue please")
+        self.assertIn(
+            ("  ◌ Delivered · waiting for transcript", "message_status"),
+            lines,
+        )
+
+    def test_real_transcript_reconciles_one_identical_optimistic_message(self) -> None:
+        messages = [
+            agents_tui.OptimisticMessage("Same", 1, "sent"),
+            agents_tui.OptimisticMessage("Same", 1, "sent"),
+        ]
+        records = [
+            {"role": "user", "text": "Same"},
+            {"role": "user", "text": "Same"},
+        ]
+
+        remaining = agents_tui.reconcile_optimistic_messages(
+            records, messages
+        )
+
+        self.assertEqual(len(remaining), 1)
+
+    def test_failed_optimistic_message_preserves_error(self) -> None:
+        message = agents_tui.OptimisticMessage(
+            "Continue", 0, "pending", "message-1"
+        )
+
+        status = agents_tui.optimistic_message_status(
+            message,
+            {
+                "message-1": {
+                    "state": "failed",
+                    "last_error": "agent disappeared",
+                }
+            },
+        )
+
+        self.assertEqual(
+            status, "Delivery failed · agent disappeared"
+        )
+
     def test_composer_draws_only_prompt_and_draft(self) -> None:
         class Window:
             def __init__(self) -> None:

@@ -108,6 +108,12 @@ composer: type immediately, press Enter to send, and use Ctrl-J for a newline.
 It expands as text wraps, supports cursor editing and multiline paste, and
 keeps a separate unsent draft when you move between agents.
 
+Sent messages appear in the conversation immediately, including in manual
+sync mode. A muted line beneath the optimistic bubble reports whether the
+message was sent locally, queued offline, delivered to a relay, or failed.
+When synchronization finds the corresponding real transcript record, the
+temporary bubble is reconciled away instead of appearing twice.
+
 Press Tab to switch between the agent list and composer. Shift-Left also
 selects the agent list from anywhere in a draft; use Up/Down and Right to enter
 the selected agent's composer. Ctrl-P/Ctrl-N move
