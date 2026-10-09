@@ -1063,7 +1063,7 @@ def attachment_link_payload(session_path: Path, record: Any) -> list[dict[str, s
     payload: list[dict[str, str]] = []
     for index, (label, candidate) in enumerate(local_attachment_links(record.text)):
         try:
-            _, _, kind = validated_attachment(candidate)
+            attachment_path, _, kind = validated_attachment(candidate)
         except (FileNotFoundError, OSError):
             continue
         payload.append(
@@ -1073,6 +1073,9 @@ def attachment_link_payload(session_path: Path, record: Any) -> list[dict[str, s
                 "url": "/open?"
                 + urlencode(
                     {
+                        "label": attachment_inline_filename(
+                            label, attachment_path
+                        ),
                         "path": str(session_path),
                         "line": record.line_no,
                         "link": index,

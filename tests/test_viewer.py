@@ -779,6 +779,7 @@ https://fenced.example/ignored
             [("PDF plot", "PDF"), ("PNG plot", "PNG"), ("Results", "CSV")],
         )
         self.assertIn("/open?", payload[0]["url"])
+        self.assertIn("label=PDF+plot.pdf", payload[0]["url"])
         self.assertIn("line=42", payload[0]["url"])
         self.assertIn("link=0", payload[0]["url"])
 
@@ -801,6 +802,7 @@ https://fenced.example/ignored
                 "path": [str(session_path)],
                 "line": ["42"],
                 "link": ["0"],
+                "label": ["Forged label.pdf"],
                 "title": ["Forged title"],
                 "target": ["/etc/passwd"],
             }
