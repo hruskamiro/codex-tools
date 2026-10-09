@@ -103,14 +103,19 @@ transcript history. It uses `codex queue` for message delivery. `ct agents ui`
 refreshes the local relay cache and opens the terminal **Agent Console**,
 styled after the Codex CLI. You can switch among cached local or remote agents,
 read their recent messages, search, scroll, and send or queue a message without
-leaving the terminal. Use Left/Right to select a pane, Up/Down or the mouse
-wheel to navigate, `i` to compose, `v` to open the selected conversation in
-the browser viewer, `/` to search, and `r` to refresh. Press Ctrl-C twice to
-quit.
+leaving the terminal. The conversation pane starts with an always-available
+composer: type immediately, press Enter to send, and use Ctrl-J for a newline.
+It expands as text wraps, supports cursor editing and multiline paste, and
+keeps a separate unsent draft when you move between agents.
 
-In the console, `r` refreshes only the selected conversation. `R` refreshes
-all local sessions and configured remote peers (`--no-local` skips the local
-part).
+Press Shift-Left to select the agent list from anywhere in a draft, then use
+Up/Down and Right to enter the selected agent's composer. Ctrl-P/Ctrl-N move
+between draft lines, while Ctrl-Left/Ctrl-Right move by word. Page Up/Down or
+the mouse wheel scrolls the conversation. Ctrl-R refreshes the selected agent,
+Ctrl-S refreshes all local sessions and configured peers, Ctrl-V opens the
+browser viewer, Ctrl-F searches, and Ctrl-X maximizes or restores the
+conversation. Press Ctrl-C twice to quit. With `--no-local`, Ctrl-S skips the
+local refresh.
 
 After synchronizing a relay peer, use `ct agents ui --no-local` to hide this
 machine's sessions and browse only cached remote agents.
@@ -160,9 +165,16 @@ remain local until the authenticated write protocol is added.
 
 ```bash
 ct viewer                 # choose and open a conversation
+ct viewer launcher        # open the keyboard-first browser launcher
 codex-viewer status       # check the background server
 codex-viewer stop         # stop it
 ```
+
+`ct viewer launcher` is suitable for a desktop keyboard shortcut. It starts
+the background viewer when necessary, focuses the browser launcher's search
+field, and preselects the newest conversation. Type to filter, use Up/Down to
+move, and press Enter to open the selected conversation in the same tab. Pass
+`--query TEXT` to start with a filter already applied.
 
 The viewer resolves the desktop's default browser and asks known browsers to
 open a new window. It falls back to the desktop URL opener when the browser

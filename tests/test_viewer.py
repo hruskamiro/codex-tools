@@ -33,6 +33,39 @@ class ViewerCommandTests(unittest.TestCase):
         self.assertEqual(result, 0)
         pick.assert_called_once()
 
+    def test_launcher_starts_viewer_and_opens_keyboard_picker(self) -> None:
+        args = viewer.parse_args(["launcher", "--query", "render failure"])
+        state = {"url": "http://127.0.0.1:8765/"}
+
+        with (
+            patch.object(
+                viewer,
+                "running_daemon_state",
+                side_effect=[None, state],
+            ),
+            patch.object(viewer, "command_start", return_value=0) as start,
+            patch.object(viewer, "open_browser", return_value=True) as opened,
+        ):
+            result = args.func(args)
+
+        self.assertEqual(result, 0)
+        self.assertFalse(args.open)
+        start.assert_called_once_with(args)
+        opened.assert_called_once_with(
+            "http://127.0.0.1:8765/launcher?q=render+failure",
+            args,
+        )
+
+    def test_launcher_document_and_script_are_keyboard_first(self) -> None:
+        document = viewer.chooser_document("markdown", launcher=True)
+
+        self.assertIn('data-launcher="true"', document)
+        self.assertIn('event.key === "ArrowDown"', viewer.APP_JS)
+        self.assertIn('event.key === "ArrowUp"', viewer.APP_JS)
+        self.assertIn('event.key === "Enter"', viewer.APP_JS)
+        self.assertIn("openSelectedSession()", viewer.APP_JS)
+        self.assertIn("els.search.focus()", viewer.APP_JS)
+
     def test_viewer_browser_config_becomes_command_default(self) -> None:
         with patch.object(
             viewer.config,
@@ -764,20 +797,61 @@ https://fenced.example/ignored
                 ],
             )
             state = SimpleNamespace()
-            query = {"path": [str(session_path)], "line": ["42"], "link": ["0"]}
+            query = {
+                "path": [str(session_path)],
+                "line": ["42"],
+                "link": ["0"],
+                "title": ["Forged title"],
+                "target": ["/etc/passwd"],
+            }
             with (
                 patch.object(viewer, "resolve_session_path", return_value=session_path),
                 patch.object(viewer, "read_session", return_value=session),
             ):
                 self.assertEqual(
                     viewer.resolve_linked_attachment(state, query),
-                    (pdf.resolve(), "application/pdf"),
+                    (pdf.resolve(), "application/pdf", "Open plot"),
                 )
                 with self.assertRaises(FileNotFoundError):
                     viewer.resolve_linked_attachment(
                         state,
                         {**query, "link": ["1"], "target": ["/etc/passwd"]},
                     )
+
+    def test_attachment_response_uses_markdown_label_as_inline_filename(self) -> None:
+        class Handler:
+            def __init__(self) -> None:
+                self.status = None
+                self.headers: dict[str, str] = {}
+                self.wfile = io.BytesIO()
+
+            def send_response(self, status: int) -> None:
+                self.status = status
+
+            def send_header(self, name: str, value: str) -> None:
+                self.headers[name] = value
+
+            def end_headers(self) -> None:
+                pass
+
+        with tempfile.TemporaryDirectory() as temporary:
+            pdf = Path(temporary) / "opaque-storage-name.pdf"
+            pdf.write_bytes(b"%PDF-1.4\n")
+            handler = Handler()
+
+            viewer.attachment_file_response(
+                handler,  # type: ignore[arg-type]
+                pdf,
+                "application/pdf",
+                "Quarterly / čart",
+            )
+
+        self.assertEqual(handler.status, 200)
+        self.assertEqual(
+            handler.headers["Content-Disposition"],
+            "inline; filename*=UTF-8''Quarterly%20-%20%C4%8Dart.pdf",
+        )
+        self.assertEqual(handler.wfile.getvalue(), b"%PDF-1.4\n")
 
     def test_attachment_validation_rejects_mismatched_or_active_content(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

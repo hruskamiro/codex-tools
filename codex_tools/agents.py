@@ -76,7 +76,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     send.add_argument("--codex-bin", default="codex", help=argparse.SUPPRESS)
     add_source_args(send)
 
-    ui = commands.add_parser("ui", help="Open the terminal Agent Console.")
+    ui = commands.add_parser(
+        "ui",
+        help="Open the terminal Agent Console.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""controls:
+  type immediately         edit the selected agent's draft
+  Enter / Ctrl-J           send / insert a newline
+  Shift-Left / Right       select agents / enter the composer
+  Ctrl-P / Ctrl-N          move up / down within the draft
+  Ctrl-Left / Ctrl-Right   move by word
+  Page Up / Page Down      scroll the conversation
+  Ctrl-R / Ctrl-S          refresh selected / refresh everything
+  Ctrl-F / Ctrl-V          find an agent / open in the viewer
+  Ctrl-X                   maximize or restore the conversation
+  Ctrl-C twice             quit""",
+    )
     ui.add_argument(
         "--no-refresh",
         action="store_true",

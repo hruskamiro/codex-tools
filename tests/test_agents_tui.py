@@ -7,6 +7,164 @@ from codex_tools import agents_tui, viewer
 
 
 class AgentTuiTests(unittest.TestCase):
+    def test_composer_buffer_edits_at_cursor(self) -> None:
+        buffer = agents_tui.ComposerBuffer("helo", 3)
+
+        buffer.insert("l")
+        buffer.move(-1)
+        buffer.delete()
+        buffer.insert("l")
+
+        self.assertEqual(buffer.text, "hello")
+        self.assertEqual(buffer.cursor, 4)
+
+    def test_composer_layout_wraps_and_preserves_explicit_lines(self) -> None:
+        lines, positions = agents_tui.composer_layout("abcd\nef", 3)
+
+        self.assertEqual(lines, ["abc", "d", "ef"])
+        self.assertEqual(positions[4], (1, 1))
+        self.assertEqual(positions[5], (2, 0))
+        self.assertEqual(positions[-1], (2, 2))
+
+    def test_composer_vertical_movement_keeps_visual_column(self) -> None:
+        buffer = agents_tui.ComposerBuffer("abcdef", 2)
+
+        agents_tui.move_composer_vertical(buffer, 3, 1)
+        self.assertEqual(buffer.cursor, 5)
+        agents_tui.move_composer_vertical(buffer, 3, -1)
+        self.assertEqual(buffer.cursor, 2)
+
+    def test_ctrl_p_and_ctrl_n_move_between_visual_lines(self) -> None:
+        buffer = agents_tui.ComposerBuffer("abcdef", 2)
+
+        agents_tui.edit_composer_buffer(buffer, "\x0e", 3)
+        self.assertEqual(buffer.cursor, 5)
+        agents_tui.edit_composer_buffer(buffer, "\x10", 3)
+        self.assertEqual(buffer.cursor, 2)
+
+    def test_ctrl_arrows_move_between_words(self) -> None:
+        buffer = agents_tui.ComposerBuffer("one two_three four", 18)
+
+        agents_tui.edit_composer_buffer(buffer, agents_tui.CTRL_LEFT_KEY, 40)
+        self.assertEqual(buffer.cursor, 14)
+        agents_tui.edit_composer_buffer(buffer, agents_tui.CTRL_LEFT_KEY, 40)
+        self.assertEqual(buffer.cursor, 4)
+        agents_tui.edit_composer_buffer(buffer, agents_tui.CTRL_RIGHT_KEY, 40)
+        self.assertEqual(buffer.cursor, 14)
+
+    def test_persistent_composer_uses_ctrl_j_for_newline_and_enter_to_send(self) -> None:
+        buffer = agents_tui.ComposerBuffer("hello", 5)
+
+        self.assertIsNone(agents_tui.edit_composer_buffer(buffer, "\n", 40))
+        self.assertEqual(buffer.text, "hello\n")
+        self.assertEqual(
+            agents_tui.edit_composer_buffer(buffer, "\r", 40),
+            "send",
+        )
+
+    def test_agent_drafts_remain_independent_when_switching(self) -> None:
+        drafts = {
+            ("local", "one"): agents_tui.ComposerBuffer("first", 5),
+            ("remote", "two"): agents_tui.ComposerBuffer("second", 6),
+        }
+
+        agents_tui.edit_composer_buffer(drafts[("local", "one")], "!", 40)
+
+        self.assertEqual(drafts[("local", "one")].text, "first!")
+        self.assertEqual(drafts[("remote", "two")].text, "second")
+
+    def test_composer_draws_only_prompt_and_draft(self) -> None:
+        class Window:
+            def __init__(self) -> None:
+                self.writes: list[str] = []
+
+            def getmaxyx(self) -> tuple[int, int]:
+                return (20, 80)
+
+            def addnstr(self, y: int, x: int, text: str, width: int, attr: int) -> None:
+                self.writes.append(text[:width])
+
+            def move(self, y: int, x: int) -> None:
+                pass
+
+        window = Window()
+        agents_tui.draw_composer(
+            window,  # type: ignore[arg-type]
+            {"composer": 0, "composer_accent": 0, "composer_muted": 0},
+            agents_tui.ComposerBuffer("draft", 5),
+            20,
+            60,
+            focused=True,
+        )
+
+        content = "".join(window.writes)
+        self.assertIn("›", content)
+        self.assertIn("draft", content)
+        self.assertNotIn("Enter", content)
+        self.assertNotIn("Message", content)
+
+    def test_composer_recognizes_alt_enter_and_multiline_paste(self) -> None:
+        class Window:
+            def __init__(self, keys: list[str]) -> None:
+                self.keys = iter(keys)
+
+            def get_wch(self) -> str:
+                return next(self.keys)
+
+            def timeout(self, value: int) -> None:
+                pass
+
+        action, value = agents_tui.escape_action(Window(["\r"]))  # type: ignore[arg-type]
+        pasted = agents_tui.read_bracketed_paste(
+            Window(list("first\nsecond\x1b[201~"))  # type: ignore[arg-type]
+        )
+
+        self.assertEqual((action, value), ("newline", ""))
+        self.assertEqual(pasted, "first\nsecond")
+
+    def test_composer_recognizes_modified_arrow_sequences(self) -> None:
+        class Window:
+            def __init__(self, keys: list[str]) -> None:
+                self.keys = iter(keys)
+
+            def get_wch(self) -> str:
+                return next(self.keys)
+
+            def timeout(self, value: int) -> None:
+                pass
+
+        cases = {
+            "1;5D": "word_left",
+            "5C": "word_right",
+            "1;2D": "agents",
+        }
+        for sequence, expected in cases.items():
+            with self.subTest(sequence=sequence):
+                action, value = agents_tui.escape_action(
+                    Window(["[", *sequence])  # type: ignore[arg-type]
+                )
+                self.assertEqual((action, value), (expected, ""))
+
+    def test_soft_palette_uses_muted_accents_and_charcoal_surfaces(self) -> None:
+        palette = agents_tui.soft_color_definitions(256)
+
+        self.assertEqual(palette["normal"], (252, -1))
+        self.assertEqual(palette["muted"], (245, -1))
+        self.assertEqual(palette["focus"], (110, -1))
+        self.assertEqual(palette["active_dot"], (114, -1))
+        self.assertEqual(palette["selected"], (252, 238))
+        self.assertEqual(palette["user"], (252, 237))
+
+    def test_basic_color_fallback_avoids_bright_blue_backgrounds(self) -> None:
+        palette = agents_tui.soft_color_definitions(8)
+
+        self.assertEqual(
+            palette["user"][1], agents_tui.curses.COLOR_BLACK
+        )
+        self.assertEqual(
+            palette["selected"][1], agents_tui.curses.COLOR_BLACK
+        )
+
     def test_path_compaction_preserves_the_end(self) -> None:
         path = "/home/hruskam/projects/codex-tools"
 
@@ -146,6 +304,95 @@ class AgentTuiTests(unittest.TestCase):
             apply.call_args.kwargs["base_url"],
             "https://desktop.example:8780",
         )
+
+    def test_sync_agent_falls_back_to_snapshot_when_agent_route_is_missing(self) -> None:
+        config = {
+            "peers": {
+                "desktop": {
+                    "url": "https://desktop.example:8780",
+                    "token": "secret",
+                }
+            }
+        }
+        not_found = agents_tui.HTTPError(
+            "https://desktop.example:8780/v1/agents/selected",
+            404,
+            "Not Found",
+            {},
+            None,
+        )
+        snapshot = {
+            "protocol": 1,
+            "host": {"id": "host-1", "name": "Desktop"},
+            "cursor": "now",
+            "agents": [
+                {"agent_id": "other"},
+                {"agent_id": "selected", "records": []},
+            ],
+        }
+
+        with (
+            patch.object(
+                agents_tui.relay_transport,
+                "fetch_agent",
+                side_effect=not_found,
+            ),
+            patch.object(
+                agents_tui.relay_transport,
+                "fetch_snapshot",
+                return_value=snapshot,
+            ) as fetch_snapshot,
+            patch.object(
+                agents_tui.relay_transport,
+                "apply_agent_snapshot",
+            ) as apply,
+        ):
+            host = agents_tui.sync_agent(
+                object(), config, "desktop", "selected"  # type: ignore[arg-type]
+            )
+
+        self.assertEqual(host, "Desktop")
+        fetch_snapshot.assert_called_once_with(config["peers"]["desktop"])
+        self.assertEqual(apply.call_args.args[1]["agent"]["agent_id"], "selected")
+
+    def test_sync_agent_keeps_cached_copy_when_agent_is_no_longer_active(self) -> None:
+        peer = {"url": "https://desktop.example:8780", "token": "secret"}
+        config = {"peers": {"desktop": peer}}
+        not_found = agents_tui.HTTPError(
+            "https://desktop.example:8780/v1/agents/selected",
+            404,
+            "Not Found",
+            {},
+            None,
+        )
+        snapshot = {
+            "protocol": 1,
+            "host": {"id": "host-1", "name": "Desktop"},
+            "agents": [{"agent_id": "other"}],
+        }
+
+        with (
+            patch.object(
+                agents_tui.relay_transport,
+                "fetch_agent",
+                side_effect=not_found,
+            ),
+            patch.object(
+                agents_tui.relay_transport,
+                "fetch_snapshot",
+                return_value=snapshot,
+            ),
+            patch.object(
+                agents_tui.relay_transport,
+                "apply_agent_snapshot",
+            ) as apply,
+        ):
+            host = agents_tui.sync_agent(
+                object(), config, "desktop", "selected"  # type: ignore[arg-type]
+            )
+
+        self.assertIsNone(host)
+        apply.assert_not_called()
 
     def test_remote_agent_opens_source_aware_viewer_route(self) -> None:
         item = agents_tui.AgentItem(

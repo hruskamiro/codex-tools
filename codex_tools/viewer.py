@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from datetime import datetime
@@ -251,7 +252,17 @@ def parse_args(
     raw_args = list(sys.argv[1:] if argv is None else argv)
     if not raw_args:
         return argparse.Namespace(command="default", func=command_default)
-    commands = {"serve", "start", "restart", "stop", "status", "open", "pick", "doctor"}
+    commands = {
+        "serve",
+        "start",
+        "restart",
+        "stop",
+        "status",
+        "open",
+        "pick",
+        "launcher",
+        "doctor",
+    }
     preference_flags = {"--set-default-latex", "--set-default-markdown"}
     if (
         raw_args[0] not in commands
@@ -310,6 +321,14 @@ def parse_args(
     pick.add_argument("--tools", action="store_true", help="Include tool records in the view.")
     pick.add_argument("--query", "-q", default="", help="Initial search query.")
     pick.set_defaults(func=command_pick)
+
+    launcher = sub.add_parser(
+        "launcher",
+        help="Open the keyboard-first conversation launcher in a browser.",
+    )
+    add_server_args(launcher)
+    launcher.add_argument("--query", "-q", default="", help="Initial search query.")
+    launcher.set_defaults(func=command_launcher)
 
     doctor = sub.add_parser(
         "doctor", help="Check viewer startup and optional LaTeX requirements."
@@ -1066,7 +1085,7 @@ def attachment_link_payload(session_path: Path, record: Any) -> list[dict[str, s
 
 def resolve_linked_attachment(
     state: ViewerState, query: dict[str, list[str]]
-) -> tuple[Path, str]:
+) -> tuple[Path, str, str]:
     session_path = resolve_session_path(state, query)
     line_raw = query.get("line", [""])[0]
     link_raw = query.get("link", [""])[0]
@@ -1087,8 +1106,9 @@ def resolve_linked_attachment(
     links = local_attachment_links(matching[-1].text)
     if link_index >= len(links):
         raise FileNotFoundError("attachment not found")
-    candidate, content_type, _ = validated_attachment(links[link_index][1])
-    return candidate, content_type
+    label, linked_path = links[link_index]
+    candidate, content_type, _ = validated_attachment(linked_path)
+    return candidate, content_type, label
 
 
 def handle_version(state: ViewerState, query: dict[str, list[str]]) -> dict[str, Any]:
@@ -1140,11 +1160,26 @@ def bytes_response(
     handler.wfile.write(body)
 
 
+def attachment_inline_filename(label: str, path: Path) -> str:
+    normalized = unicodedata.normalize("NFC", label)
+    normalized = re.sub(r"[\\/]+", " - ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip(" .")
+    suffix = path.suffix
+    if not normalized:
+        normalized = path.stem or "attachment"
+    if suffix and not normalized.casefold().endswith(suffix.casefold()):
+        normalized += suffix
+    return normalized
+
+
 def attachment_file_response(
-    handler: BaseHTTPRequestHandler, path: Path, content_type: str
+    handler: BaseHTTPRequestHandler,
+    path: Path,
+    content_type: str,
+    label: str,
 ) -> None:
     size = path.stat().st_size
-    encoded_name = quote(path.name, safe="")
+    encoded_name = quote(attachment_inline_filename(label, path), safe="")
     handler.send_response(HTTPStatus.OK)
     handler.send_header("Content-Type", content_type)
     handler.send_header("Content-Disposition", f"inline; filename*=UTF-8''{encoded_name}")
@@ -1212,10 +1247,15 @@ def viewer_document(template: str, web_assets: str) -> str:
     )
 
 
-def chooser_document(default_view: str) -> str:
+def chooser_document(default_view: str, *, launcher: bool = False) -> str:
     mode = default_view if default_view in VIEW_MODES else DEFAULT_VIEW_MODE
-    return INDEX_HTML.replace(
+    document = INDEX_HTML.replace(
         'data-default-view="markdown"', f'data-default-view="{mode}"', 1
+    )
+    return document.replace(
+        'data-launcher="false"',
+        f'data-launcher="{str(launcher).lower()}"',
+        1,
     )
 
 
@@ -1232,6 +1272,12 @@ def make_handler(state: ViewerState) -> type[BaseHTTPRequestHandler]:
                     text_response(
                         self,
                         chooser_document(read_default_view()),
+                        "text/html; charset=utf-8",
+                    )
+                elif parsed.path == "/launcher":
+                    text_response(
+                        self,
+                        chooser_document(read_default_view(), launcher=True),
                         "text/html; charset=utf-8",
                     )
                 elif parsed.path == "/v/local" or parsed.path.startswith(
@@ -1280,10 +1326,12 @@ def make_handler(state: ViewerState) -> type[BaseHTTPRequestHandler]:
                 elif parsed.path == "/api/version":
                     json_response(self, handle_version(state, query))
                 elif parsed.path == "/open":
-                    attachment_path, content_type = resolve_linked_attachment(
+                    attachment_path, content_type, label = resolve_linked_attachment(
                         state, query
                     )
-                    attachment_file_response(self, attachment_path, content_type)
+                    attachment_file_response(
+                        self, attachment_path, content_type, label
+                    )
                 elif parsed.path.startswith("/typeset/pdf/"):
                     handle_typeset_pdf(self, parsed.path.removeprefix("/typeset/pdf/"))
                 else:
@@ -1850,6 +1898,41 @@ def command_open(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_launcher(args: argparse.Namespace) -> int:
+    state = running_daemon_state()
+    if state:
+        base_url = str(state.get("url") or "")
+        healthy, detail = viewer_health(base_url)
+        if not healthy:
+            print(f"error: viewer is not responding: {detail}", file=sys.stderr)
+            print("Run `codex-tools viewer restart` to recover.", file=sys.stderr)
+            return 1
+        if not viewer_source_is_current(base_url):
+            args.open = False
+            result = command_restart(args)
+            if result:
+                return result
+            state = running_daemon_state()
+    else:
+        args.open = False
+        result = command_start(args)
+        if result:
+            return result
+        state = running_daemon_state()
+    if not state:
+        print("error: viewer is not running", file=sys.stderr)
+        return 1
+    query = urlencode({"q": args.query}) if args.query else ""
+    url = f"{str(state['url']).rstrip('/')}/launcher"
+    if query:
+        url += f"?{query}"
+    if not open_browser(url, args):
+        print(f"Viewer remains available at {url}", file=sys.stderr)
+        return 1
+    print(f"Opened {url}")
+    return 0
+
+
 def session_label(item: dict[str, Any]) -> str:
     title = str(item.get("title") or "Untitled")
     time_label = str(item.get("lastLabel") or "")
@@ -2234,7 +2317,7 @@ INDEX_HTML = """<!doctype html>
   <title>Codex Conversation Viewer</title>
   <link rel="stylesheet" href="/app.css">
 </head>
-<body class="theme-mist" data-default-view="markdown">
+<body class="theme-mist" data-default-view="markdown" data-launcher="false">
   <main class="app-shell chooser-shell">
     <section class="session-pane chooser-pane">
       <header class="brand">
@@ -3810,9 +3893,12 @@ h2 {
 
 
 APP_JS = r"""
+const pageParams = new URLSearchParams(location.search);
 const state = {
   sessions: [],
   defaultView: document.body.dataset.defaultView === "latex" ? "latex" : "markdown",
+  launcher: document.body.dataset.launcher === "true",
+  selectedIndex: 0,
 };
 
 const els = {
@@ -3861,6 +3947,30 @@ function viewHref(item) {
   return `/${route}/local?${params}`;
 }
 
+function selectedSessionLink() {
+  return els.sessionList.querySelector(".session-item.active");
+}
+
+function selectSession(index, { scroll = true } = {}) {
+  if (!state.sessions.length) {
+    state.selectedIndex = 0;
+    return;
+  }
+  state.selectedIndex = Math.max(0, Math.min(index, state.sessions.length - 1));
+  const links = Array.from(els.sessionList.querySelectorAll(".session-item"));
+  links.forEach((link, linkIndex) => {
+    const active = linkIndex === state.selectedIndex;
+    link.classList.toggle("active", active);
+    link.setAttribute("aria-current", active ? "true" : "false");
+  });
+  if (scroll) selectedSessionLink()?.scrollIntoView({ block: "nearest" });
+}
+
+function openSelectedSession() {
+  if (!state.sessions.length) return;
+  location.assign(viewHref(state.sessions[state.selectedIndex]));
+}
+
 function renderSessions() {
   els.sessionList.innerHTML = "";
   if (state.sessions.length) {
@@ -3872,7 +3982,8 @@ function renderSessions() {
     els.openLatest.classList.add("disabled");
     els.openLatest.setAttribute("aria-disabled", "true");
   }
-  for (const item of state.sessions) {
+  state.selectedIndex = Math.min(state.selectedIndex, Math.max(0, state.sessions.length - 1));
+  for (const [index, item] of state.sessions.entries()) {
     const link = document.createElement("a");
     link.className = "session-item";
     link.href = viewHref(item);
@@ -3884,8 +3995,11 @@ function renderSessions() {
       </span>
       <span class="open-pill">Open view</span>
     `;
+    link.addEventListener("mouseenter", () => selectSession(index, { scroll: false }));
+    link.addEventListener("focus", () => selectSession(index, { scroll: false }));
     els.sessionList.appendChild(link);
   }
+  selectSession(state.selectedIndex, { scroll: false });
 }
 
 async function loadSessions() {
@@ -3898,6 +4012,7 @@ async function loadSessions() {
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || "Could not load sessions");
   state.sessions = data.sessions;
+  state.selectedIndex = 0;
   els.sessionCount.textContent = `${data.total} conversation${data.total === 1 ? "" : "s"}`;
   renderSessions();
 }
@@ -3915,6 +4030,32 @@ els.refreshSessions.addEventListener("click", () => loadSessions().catch((error)
 }));
 els.tailCount.addEventListener("change", renderSessions);
 els.includeTools.addEventListener("change", renderSessions);
+
+window.addEventListener("keydown", (event) => {
+  if (event.metaKey || event.ctrlKey || event.altKey) return;
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    selectSession(state.selectedIndex + (event.key === "ArrowDown" ? 1 : -1));
+    return;
+  }
+  if (event.key === "Enter" && state.sessions.length) {
+    const target = event.target;
+    if (target?.matches?.("select, button, input[type='checkbox']")) return;
+    event.preventDefault();
+    openSelectedSession();
+    return;
+  }
+  if (event.key === "Escape" && els.search.value) {
+    event.preventDefault();
+    els.search.value = "";
+    loadSessions().catch((error) => {
+      els.sessionCount.textContent = error.message;
+    });
+  }
+});
+
+if (pageParams.get("q")) els.search.value = pageParams.get("q");
+if (state.launcher) requestAnimationFrame(() => els.search.focus());
 
 loadSessions().catch((error) => {
   els.sessionCount.textContent = error.message;

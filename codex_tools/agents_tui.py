@@ -8,10 +8,13 @@ import io
 import re
 import sys
 import textwrap
+import unicodedata
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
+from http import HTTPStatus
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError
 
 from codex_tools import (
     agents_ui,
@@ -23,6 +26,8 @@ from codex_tools import (
 
 
 MAX_RECORDS = 240
+CTRL_LEFT_KEY = curses.KEY_MAX + 21
+CTRL_RIGHT_KEY = curses.KEY_MAX + 22
 MARKDOWN_LINK_RE = re.compile(
     r"(?<!!)\[(?P<label>[^\]\n]+)\]\((?P<target>[^)\n]+)\)"
 )
@@ -45,6 +50,33 @@ class AgentItem:
     host_name: str
     agent: dict[str, Any]
     base_url: str = ""
+
+
+@dataclass
+class ComposerBuffer:
+    text: str = ""
+    cursor: int = 0
+    preferred_column: int | None = None
+
+    def insert(self, value: str) -> None:
+        self.text = self.text[: self.cursor] + value + self.text[self.cursor :]
+        self.cursor += len(value)
+        self.preferred_column = None
+
+    def backspace(self) -> None:
+        if self.cursor:
+            self.text = self.text[: self.cursor - 1] + self.text[self.cursor :]
+            self.cursor -= 1
+        self.preferred_column = None
+
+    def delete(self) -> None:
+        if self.cursor < len(self.text):
+            self.text = self.text[: self.cursor] + self.text[self.cursor + 1 :]
+        self.preferred_column = None
+
+    def move(self, offset: int) -> None:
+        self.cursor = max(0, min(len(self.text), self.cursor + offset))
+        self.preferred_column = None
 
 
 def compact(value: str, width: int) -> str:
@@ -128,11 +160,33 @@ def sync_agent(
     config: dict[str, Any],
     peer_name: str,
     agent_id: str,
-) -> str:
+) -> str | None:
     peer = config.get("peers", {}).get(peer_name)
     if not isinstance(peer, dict):
         raise ValueError(f"relay peer not found: {peer_name}")
-    payload = relay_transport.fetch_agent(peer, agent_id)
+    try:
+        payload = relay_transport.fetch_agent(peer, agent_id)
+    except HTTPError as exc:
+        if exc.code != HTTPStatus.NOT_FOUND:
+            raise
+        snapshot = relay_transport.fetch_snapshot(peer)
+        remote_agent = next(
+            (
+                value
+                for value in snapshot.get("agents", [])
+                if isinstance(value, dict)
+                and str(value.get("agent_id") or "") == agent_id
+            ),
+            None,
+        )
+        if remote_agent is None:
+            return None
+        payload = {
+            "protocol": snapshot.get("protocol"),
+            "host": snapshot.get("host"),
+            "cursor": snapshot.get("cursor"),
+            "agent": remote_agent,
+        }
     relay_transport.apply_agent_snapshot(
         cache, payload, base_url=str(peer["url"])
     )
@@ -518,6 +572,86 @@ def change_pane(
     return focus, maximized
 
 
+def soft_color_definitions(color_count: int) -> dict[str, tuple[int, int]]:
+    if color_count >= 256:
+        # Restrained xterm colors chosen to sit comfortably on the charcoal
+        # backgrounds used by Codex and most dark terminal themes.
+        warm_text = 252
+        muted_text = 245
+        soft_blue = 110
+        soft_green = 114
+        soft_gold = 180
+        soft_coral = 174
+        soft_lavender = 146
+        user_background = 237
+        selected_background = 238
+        table_blue = 67
+        return {
+            "normal": (warm_text, -1),
+            "muted": (muted_text, -1),
+            "path": (muted_text, -1),
+            "header": (warm_text, -1),
+            "focus": (soft_blue, -1),
+            "selected": (warm_text, selected_background),
+            "active_dot": (soft_green, -1),
+            "ready_dot": (muted_text, -1),
+            "selected_active_dot": (soft_green, selected_background),
+            "selected_ready_dot": (muted_text, selected_background),
+            "divider": (238, -1),
+            "composer": (warm_text, selected_background),
+            "composer_accent": (soft_blue, selected_background),
+            "composer_muted": (muted_text, selected_background),
+            "user": (warm_text, user_background),
+            "user_label": (soft_blue, user_background),
+            "assistant": (warm_text, -1),
+            "assistant_label": (soft_blue, -1),
+            "status": (muted_text, -1),
+            "syntax_code": (soft_lavender, -1),
+            "syntax_string": (soft_green, -1),
+            "syntax_number": (soft_blue, -1),
+            "syntax_literal": (soft_gold, -1),
+            "syntax_link": (soft_blue, -1),
+            "user_syntax_code": (soft_lavender, user_background),
+            "user_syntax_string": (soft_green, user_background),
+            "user_syntax_number": (soft_blue, user_background),
+            "user_syntax_literal": (soft_gold, user_background),
+            "user_syntax_link": (soft_blue, user_background),
+            "table_header": (soft_blue, -1),
+            "table_separator": (table_blue, -1),
+            "table_border": (table_blue, -1),
+            "error": (soft_coral, -1),
+        }
+    return {
+        "focus": (curses.COLOR_CYAN, -1),
+        "selected": (curses.COLOR_WHITE, curses.COLOR_BLACK),
+        "active_dot": (curses.COLOR_GREEN, -1),
+        "ready_dot": (curses.COLOR_WHITE, -1),
+        "selected_active_dot": (curses.COLOR_GREEN, curses.COLOR_BLACK),
+        "selected_ready_dot": (curses.COLOR_WHITE, curses.COLOR_BLACK),
+        "divider": (curses.COLOR_WHITE, -1),
+        "composer": (curses.COLOR_WHITE, curses.COLOR_BLACK),
+        "composer_accent": (curses.COLOR_CYAN, curses.COLOR_BLACK),
+        "composer_muted": (curses.COLOR_WHITE, curses.COLOR_BLACK),
+        "user": (curses.COLOR_WHITE, curses.COLOR_BLACK),
+        "user_label": (curses.COLOR_CYAN, curses.COLOR_BLACK),
+        "assistant_label": (curses.COLOR_CYAN, -1),
+        "syntax_code": (curses.COLOR_MAGENTA, -1),
+        "syntax_string": (curses.COLOR_GREEN, -1),
+        "syntax_number": (curses.COLOR_CYAN, -1),
+        "syntax_literal": (curses.COLOR_YELLOW, -1),
+        "syntax_link": (curses.COLOR_CYAN, -1),
+        "user_syntax_code": (curses.COLOR_MAGENTA, curses.COLOR_BLACK),
+        "user_syntax_string": (curses.COLOR_GREEN, curses.COLOR_BLACK),
+        "user_syntax_number": (curses.COLOR_CYAN, curses.COLOR_BLACK),
+        "user_syntax_literal": (curses.COLOR_YELLOW, curses.COLOR_BLACK),
+        "user_syntax_link": (curses.COLOR_CYAN, curses.COLOR_BLACK),
+        "table_header": (curses.COLOR_CYAN, -1),
+        "table_separator": (curses.COLOR_BLUE, -1),
+        "table_border": (curses.COLOR_BLUE, -1),
+        "error": (curses.COLOR_RED, -1),
+    }
+
+
 def colors() -> dict[str, int]:
     result = {
         "normal": curses.A_NORMAL,
@@ -525,7 +659,15 @@ def colors() -> dict[str, int]:
         "path": curses.A_DIM,
         "header": curses.A_BOLD,
         "focus": curses.A_BOLD,
-        "selected": curses.A_BOLD | curses.A_UNDERLINE,
+        "selected": curses.A_BOLD,
+        "active_dot": curses.A_BOLD,
+        "ready_dot": curses.A_DIM,
+        "selected_active_dot": curses.A_BOLD,
+        "selected_ready_dot": curses.A_DIM,
+        "divider": curses.A_DIM,
+        "composer": curses.A_NORMAL,
+        "composer_accent": curses.A_BOLD,
+        "composer_muted": curses.A_DIM,
         "user": curses.A_NORMAL,
         "user_label": curses.A_BOLD,
         "assistant": curses.A_NORMAL,
@@ -544,33 +686,13 @@ def colors() -> dict[str, int]:
         "table_header": curses.A_BOLD,
         "table_separator": curses.A_DIM,
         "table_border": curses.A_DIM,
+        "error": curses.A_BOLD,
     }
     if not curses.has_colors():
         return result
     curses.start_color()
     curses.use_default_colors()
-    user_background = 237 if curses.COLORS >= 256 else curses.COLOR_BLUE
-    path_foreground = 245 if curses.COLORS >= 256 else curses.COLOR_WHITE
-    definitions = {
-        "focus": (curses.COLOR_CYAN, -1),
-        "path": (path_foreground, -1),
-        "user": (curses.COLOR_WHITE, user_background),
-        "user_label": (curses.COLOR_WHITE, user_background),
-        "assistant_label": (curses.COLOR_CYAN, -1),
-        "syntax_code": (curses.COLOR_MAGENTA, -1),
-        "syntax_string": (curses.COLOR_GREEN, -1),
-        "syntax_number": (curses.COLOR_CYAN, -1),
-        "syntax_literal": (curses.COLOR_YELLOW, -1),
-        "syntax_link": (curses.COLOR_CYAN, -1),
-        "user_syntax_code": (curses.COLOR_MAGENTA, user_background),
-        "user_syntax_string": (curses.COLOR_GREEN, user_background),
-        "user_syntax_number": (curses.COLOR_CYAN, user_background),
-        "user_syntax_literal": (curses.COLOR_YELLOW, user_background),
-        "user_syntax_link": (curses.COLOR_CYAN, user_background),
-        "table_header": (curses.COLOR_CYAN, -1),
-        "table_separator": (curses.COLOR_BLUE, -1),
-        "table_border": (curses.COLOR_BLUE, -1),
-    }
+    definitions = soft_color_definitions(curses.COLORS)
     for index, (name, pair) in enumerate(definitions.items(), 1):
         try:
             curses.init_pair(index, *pair)
@@ -579,6 +701,9 @@ def colors() -> dict[str, int]:
             pass
     result["header"] |= curses.A_BOLD
     result["focus"] |= curses.A_BOLD
+    result["selected"] |= curses.A_BOLD
+    result["active_dot"] |= curses.A_BOLD
+    result["selected_active_dot"] |= curses.A_BOLD
     result["user_label"] |= curses.A_BOLD
     result["assistant_label"] |= curses.A_BOLD
     result["syntax_link"] |= curses.A_UNDERLINE
@@ -586,9 +711,280 @@ def colors() -> dict[str, int]:
     result["table_header"] |= curses.A_BOLD
     result["table_separator"] |= curses.A_DIM
     result["table_border"] |= curses.A_DIM
+    result["ready_dot"] |= curses.A_DIM
+    result["selected_ready_dot"] |= curses.A_DIM
+    result["divider"] |= curses.A_DIM
+    result["composer_accent"] |= curses.A_BOLD
+    result["composer_muted"] |= curses.A_DIM
+    result["error"] |= curses.A_BOLD
     if curses.COLORS < 256:
         result["path"] |= curses.A_DIM
     return result
+
+
+def character_cell_width(value: str) -> int:
+    if not value or unicodedata.combining(value):
+        return 0
+    return 2 if unicodedata.east_asian_width(value) in {"W", "F"} else 1
+
+
+def composer_layout(
+    text: str, width: int
+) -> tuple[list[str], list[tuple[int, int]]]:
+    width = max(1, width)
+    lines = [""]
+    positions = [(0, 0)] * (len(text) + 1)
+    row = 0
+    column = 0
+    for index, value in enumerate(text):
+        positions[index] = (row, column)
+        if value == "\n":
+            row += 1
+            column = 0
+            lines.append("")
+            positions[index + 1] = (row, column)
+            continue
+        cell_width = character_cell_width(value)
+        if column and column + cell_width > width:
+            row += 1
+            column = 0
+            lines.append("")
+            positions[index] = (row, column)
+        lines[row] += value
+        column += cell_width
+        positions[index + 1] = (row, column)
+    return lines, positions
+
+
+def move_composer_vertical(
+    buffer: ComposerBuffer, width: int, direction: int
+) -> None:
+    _, positions = composer_layout(buffer.text, width)
+    row, column = positions[buffer.cursor]
+    preferred = buffer.preferred_column
+    if preferred is None:
+        preferred = column
+    target_row = row + direction
+    candidates = [
+        (abs(candidate_column - preferred), index)
+        for index, (candidate_row, candidate_column) in enumerate(positions)
+        if candidate_row == target_row
+    ]
+    if not candidates:
+        return
+    _, buffer.cursor = min(candidates, key=lambda item: (item[0], -item[1]))
+    buffer.preferred_column = preferred
+
+
+def move_composer_line_edge(
+    buffer: ComposerBuffer, width: int, *, end: bool
+) -> None:
+    _, positions = composer_layout(buffer.text, width)
+    row, _ = positions[buffer.cursor]
+    candidates = [
+        index
+        for index, (candidate_row, _) in enumerate(positions)
+        if candidate_row == row
+    ]
+    if candidates:
+        buffer.cursor = max(candidates) if end else min(candidates)
+    buffer.preferred_column = None
+
+
+def move_composer_word(buffer: ComposerBuffer, direction: int) -> None:
+    """Move to the previous or next word boundary."""
+    cursor = buffer.cursor
+    if direction < 0:
+        while cursor and not (
+            buffer.text[cursor - 1].isalnum() or buffer.text[cursor - 1] == "_"
+        ):
+            cursor -= 1
+        while cursor and (
+            buffer.text[cursor - 1].isalnum() or buffer.text[cursor - 1] == "_"
+        ):
+            cursor -= 1
+    else:
+        length = len(buffer.text)
+        while cursor < length and (
+            buffer.text[cursor].isalnum() or buffer.text[cursor] == "_"
+        ):
+            cursor += 1
+        while cursor < length and not (
+            buffer.text[cursor].isalnum() or buffer.text[cursor] == "_"
+        ):
+            cursor += 1
+    buffer.cursor = cursor
+    buffer.preferred_column = None
+
+
+def read_bracketed_paste(stdscr: Any) -> str:
+    content = ""
+    marker = "\x1b[201~"
+    while True:
+        key = stdscr.get_wch()
+        if isinstance(key, str):
+            content += key
+            if content.endswith(marker):
+                return content[: -len(marker)].replace("\r\n", "\n").replace(
+                    "\r", "\n"
+                )
+
+
+def escape_action(stdscr: Any) -> tuple[str, str]:
+    """Distinguish Escape, modified arrows, Alt-Enter, and paste."""
+    try:
+        stdscr.timeout(40)
+        following = stdscr.get_wch()
+    except curses.error:
+        return "cancel", ""
+    finally:
+        stdscr.timeout(-1)
+    if following in ("\n", "\r", curses.KEY_ENTER):
+        return "newline", ""
+    if following == "[":
+        suffix = ""
+        try:
+            stdscr.timeout(20)
+            for _ in range(8):
+                part = stdscr.get_wch()
+                if not isinstance(part, str):
+                    return "cancel", ""
+                suffix += part
+                if part.isalpha() or part == "~":
+                    break
+        except curses.error:
+            return "cancel", ""
+        finally:
+            stdscr.timeout(-1)
+        if suffix == "200~":
+            return "paste", read_bracketed_paste(stdscr)
+        if suffix in {"1;5D", "5D"}:
+            return "word_left", ""
+        if suffix in {"1;5C", "5C"}:
+            return "word_right", ""
+        if suffix == "1;2D":
+            return "agents", ""
+    return "cancel", ""
+
+
+def key_code(key: Any) -> int | None:
+    if isinstance(key, int):
+        return key
+    if isinstance(key, str) and len(key) == 1:
+        return ord(key)
+    return None
+
+
+def edit_composer_buffer(buffer: ComposerBuffer, key: Any, width: int) -> str | None:
+    """Apply an editing key; return ``send`` when the draft should be sent."""
+    code = key_code(key)
+    if key == "\r" or code == curses.KEY_ENTER:
+        return "send"
+    if key == "\n" or code == 10:  # Ctrl-J in raw terminal mode.
+        buffer.insert("\n")
+    elif code in (8, 127, curses.KEY_BACKSPACE):
+        buffer.backspace()
+    elif code == curses.KEY_DC:
+        buffer.delete()
+    elif code == curses.KEY_LEFT:
+        buffer.move(-1)
+    elif code == curses.KEY_RIGHT:
+        buffer.move(1)
+    elif code == CTRL_LEFT_KEY:
+        move_composer_word(buffer, -1)
+    elif code == CTRL_RIGHT_KEY:
+        move_composer_word(buffer, 1)
+    elif code in (curses.KEY_UP, 16):  # Up / Ctrl-P
+        move_composer_vertical(buffer, width, -1)
+    elif code in (curses.KEY_DOWN, 14):  # Down / Ctrl-N
+        move_composer_vertical(buffer, width, 1)
+    elif code in (curses.KEY_HOME, 1):
+        move_composer_line_edge(buffer, width, end=False)
+    elif code in (curses.KEY_END, 5):
+        move_composer_line_edge(buffer, width, end=True)
+    elif code == 21:
+        buffer.text = buffer.text[buffer.cursor :]
+        buffer.cursor = 0
+        buffer.preferred_column = None
+    elif code == 11:
+        buffer.text = buffer.text[: buffer.cursor]
+        buffer.preferred_column = None
+    elif code == 23:
+        start = buffer.cursor
+        while start and buffer.text[start - 1].isspace():
+            start -= 1
+        while start and not buffer.text[start - 1].isspace():
+            start -= 1
+        buffer.text = buffer.text[:start] + buffer.text[buffer.cursor :]
+        buffer.cursor = start
+        buffer.preferred_column = None
+    elif code == 15:
+        buffer.insert("\n")
+    elif key == "\t":
+        buffer.insert("  ")
+    elif isinstance(key, str) and key.isprintable():
+        buffer.insert(key)
+    return None
+
+
+def draw_composer(
+    stdscr: Any,
+    palette: dict[str, int],
+    buffer: ComposerBuffer,
+    x: int,
+    pane_width: int,
+    *,
+    focused: bool,
+) -> tuple[int, int]:
+    """Draw the persistent composer and return its top row and inner width."""
+    height, terminal_width = stdscr.getmaxyx()
+    left = max(0, min(x + 1, terminal_width - 4))
+    available_width = max(4, min(pane_width - 2, terminal_width - left))
+    inner_x = left + 2
+    inner_width = max(1, available_width - 4)
+    lines, positions = composer_layout(buffer.text, inner_width)
+    cursor_row, cursor_column = positions[buffer.cursor]
+    visible_rows = max(1, min(8, height // 3, len(lines)))
+    first_line = max(0, cursor_row - visible_rows + 1)
+    panel_height = visible_rows
+    top = max(3, height - panel_height)
+
+    for row in range(top, height):
+        add_text(
+            stdscr,
+            row,
+            left,
+            " " * available_width,
+            available_width,
+            palette["composer"],
+        )
+    visible_lines = lines[first_line : first_line + visible_rows]
+    for offset, line in enumerate(visible_lines):
+        add_text(
+            stdscr,
+            top + offset,
+            inner_x,
+            "›" if offset == 0 else " ",
+            1,
+            palette["composer_accent" if focused else "composer_muted"],
+        )
+        add_text(
+            stdscr,
+            top + offset,
+            inner_x + 2,
+            line,
+            inner_width,
+            palette["composer"],
+        )
+    if focused:
+        try:
+            stdscr.move(
+                top + cursor_row - first_line,
+                inner_x + 2 + min(cursor_column, inner_width - 1),
+            )
+        except curses.error:
+            pass
+    return top, inner_width
 
 
 def edit_line(stdscr: Any, prompt: str, initial: str = "") -> str | None:
@@ -644,17 +1040,22 @@ def run_console(
             curses.mouseinterval(0)
         except curses.error:
             pass
+        sys.stdout.write("\x1b[?2004h")
+        sys.stdout.flush()
         palette = colors()
         items = all_agent_items(cache, include_local=include_local)
         query = ""
         selected = 0
         scroll = 0
-        focus = "agents"
+        focus = "conversation"
         maximized = False
         status = ""
         interrupt_armed = False
+        drafts: dict[tuple[str, str], ComposerBuffer] = {}
 
         def finish() -> int:
+            sys.stdout.write("\x1b[?2004l")
+            sys.stdout.flush()
             try:
                 curses.mousemask(0)
             except curses.error:
@@ -696,7 +1097,13 @@ def run_console(
                 if query:
                     add_text(stdscr, 2, 1, f"filter: {query}", sidebar - 2, palette["status"])
                 try:
-                    stdscr.vline(0, sidebar, curses.ACS_VLINE, height - 1)
+                    stdscr.vline(
+                        0,
+                        sidebar,
+                        curses.ACS_VLINE,
+                        height - 1,
+                        palette["divider"],
+                    )
                 except curses.error:
                     pass
 
@@ -712,23 +1119,47 @@ def run_console(
                         previous_host = item.host_id
                     if row >= height - 2:
                         break
-                    selected_marker = "›" if index == selected else " "
-                    if index == selected:
-                        attr = (
-                            palette["selected"]
-                            if focus == "agents"
-                            else palette["header"]
-                        )
-                    else:
-                        attr = palette["normal"]
+                    is_selected = index == selected
+                    selected_marker = "›" if is_selected else " "
+                    selected_focused = is_selected and focus == "agents"
+                    attr = (
+                        palette["selected"]
+                        if selected_focused
+                        else palette["header"]
+                        if is_selected
+                        else palette["normal"]
+                    )
                     title = str(item.agent.get("title") or item.agent.get("agent_id") or "unnamed")
-                    marker = "●" if item.agent.get("status") == "active" else "○"
+                    active = item.agent.get("status") == "active"
+                    marker = "●" if active else "○"
+                    marker_attr = palette[
+                        ("selected_" if selected_focused else "")
+                        + ("active_dot" if active else "ready_dot")
+                    ]
+                    if selected_focused:
+                        add_text(
+                            stdscr,
+                            row,
+                            1,
+                            " " * (sidebar - 2),
+                            sidebar - 2,
+                            palette["selected"],
+                        )
                     add_text(
                         stdscr,
                         row,
                         1,
-                        f"{selected_marker}{marker} " + compact(title, sidebar - 6),
-                        sidebar - 2,
+                        selected_marker,
+                        1,
+                        attr,
+                    )
+                    add_text(stdscr, row, 2, marker, 1, marker_attr)
+                    add_text(
+                        stdscr,
+                        row,
+                        3,
+                        " " + compact(title, sidebar - 6),
+                        sidebar - 4,
                         attr,
                     )
                     row += 1
@@ -746,6 +1177,8 @@ def run_console(
 
             if current:
                 agent = current.agent
+                draft_key = (current.host_id, str(agent["agent_id"]))
+                draft = drafts.setdefault(draft_key, ComposerBuffer())
                 title = str(agent.get("title") or agent.get("agent_id"))
                 conversation_heading = (
                     palette["focus"]
@@ -761,10 +1194,16 @@ def run_console(
                     conversation_heading,
                 )
                 detail = f"{agent.get('status_label') or agent.get('status') or 'unknown'} · {current.host_name} · {agent.get('cwd') or 'no basedir'} · {agent.get('agent_id')}"
+                if status:
+                    detail = status
                 add_text(stdscr, 1, main_x + 2, detail, main_width - 4, palette["muted"])
                 records = cache.records(current.host_id, str(agent["agent_id"]))
                 rendered = transcript_lines(records, main_width - 2)
-                viewport = height - 5
+                composer_width = max(1, main_width - 6)
+                composer_lines, _ = composer_layout(draft.text, composer_width)
+                composer_rows = max(1, min(8, height // 3, len(composer_lines)))
+                composer_top = max(3, height - composer_rows)
+                viewport = max(0, composer_top - 3)
                 max_scroll = max(0, len(rendered) - viewport)
                 scroll = min(scroll, max_scroll)
                 start = max(0, len(rendered) - viewport - scroll)
@@ -806,6 +1245,14 @@ def run_console(
                         )
                 if not rendered:
                     add_text(stdscr, 4, main_x + 2, "No renderable messages.", main_width - 4, palette["muted"])
+                draw_composer(
+                    stdscr,
+                    palette,
+                    draft,
+                    main_x,
+                    main_width,
+                    focused=focus == "conversation",
+                )
             else:
                 empty = (
                     "No synchronized remote agents. Run `ct relay sync PEER`."
@@ -821,23 +1268,26 @@ def run_console(
                     palette["muted"],
                 )
 
-            layout_action = "restore" if maximized else "max"
-            footer = status or f"←→ pane  ↑↓/wheel scroll  m {layout_action}  i msg  v viewer  / find  r convo  R all  ^C×2 quit"
-            add_text(stdscr, height - 1, 1, footer, width - 2, palette["status"])
+            if not current:
+                footer = status or "No agent selected · ^F find · ^S sync all · ^C×2 quit"
+                add_text(stdscr, height - 1, 1, footer, width - 2, palette["status"])
+            try:
+                curses.curs_set(1 if current and focus == "conversation" else 0)
+            except curses.error:
+                pass
             stdscr.refresh()
             status = ""
-            key = stdscr.getch()
+            key = stdscr.get_wch()
+            code = key_code(key)
             interrupt_armed, should_exit = advance_interrupt(
-                interrupt_armed, key
+                interrupt_armed, code if code is not None else -1
             )
             if should_exit:
                 return finish()
-            if key == 3:
+            if code == 3:
                 status = "Press Ctrl-C again to quit."
                 continue
-            if key in {curses.KEY_LEFT, curses.KEY_RIGHT, ord("m")}:
-                focus, maximized = change_pane(focus, maximized, key)
-            elif key == curses.KEY_MOUSE and shown:
+            if code == curses.KEY_MOUSE and shown:
                 try:
                     _, _, _, _, button_state = curses.getmouse()
                 except curses.error:
@@ -846,48 +1296,54 @@ def run_console(
                 if delta:
                     focus = "conversation"
                     scroll = max(0, min(max_scroll, scroll + delta))
-            elif key in (curses.KEY_UP, ord("k")) and shown:
-                if focus == "agents":
-                    selected = max(0, selected - 1)
-                    scroll = 0
+            elif code == curses.KEY_RIGHT and focus == "agents":
+                focus = "conversation"
+            elif code == curses.KEY_SLEFT and focus == "conversation":
+                focus = "agents"
+            elif code == curses.KEY_LEFT and focus == "conversation" and current:
+                draft = drafts[(current.host_id, str(current.agent["agent_id"]))]
+                if draft.cursor == 0:
+                    focus = "agents"
                 else:
-                    scroll = min(max_scroll, scroll + 1)
-            elif key in (curses.KEY_DOWN, ord("j")) and shown:
+                    draft.move(-1)
+            elif code in (curses.KEY_UP, curses.KEY_DOWN) and shown:
                 if focus == "agents":
-                    selected = min(len(shown) - 1, selected + 1)
+                    selected = max(
+                        0,
+                        min(
+                            len(shown) - 1,
+                            selected + (-1 if code == curses.KEY_UP else 1),
+                        ),
+                    )
                     scroll = 0
-                else:
-                    scroll = max(0, scroll - 1)
-            elif key == curses.KEY_PPAGE:
+                elif current:
+                    draft = drafts[(current.host_id, str(current.agent["agent_id"]))]
+                    move_composer_vertical(
+                        draft,
+                        max(1, main_width - 6),
+                        -1 if code == curses.KEY_UP else 1,
+                    )
+            elif code == curses.KEY_PPAGE:
                 focus = "conversation"
                 scroll += max(1, height - 7)
-            elif key == curses.KEY_NPAGE:
+            elif code == curses.KEY_NPAGE:
                 focus = "conversation"
                 scroll = max(0, scroll - max(1, height - 7))
-            elif key == ord("/"):
+            elif code == 6:  # Ctrl-F
                 entered = edit_line(stdscr, "Find: ", query)
                 if entered is not None:
                     query = entered; selected = 0; scroll = 0
-            elif key in (ord("i"), curses.KEY_ENTER, 10, 13) and current:
-                message = edit_line(stdscr, "Message: ")
-                if message:
-                    try:
-                        result = agents_ui.send_message(
-                            cache,
-                            {"host": current.host_id, "agent": current.agent["agent_id"], "message": message},
-                            codex_bin,
-                        )
-                        status = "Message sent." if result["delivery"] == "sent" else "Message queued for synchronization."
-                    except (OSError, RuntimeError, ValueError) as exc:
-                        status = f"Send failed: {exc}"
-            elif key == ord("v") and current:
+                    focus = "agents"
+            elif code == 22 and current:  # Ctrl-V
                 show_status(stdscr, "Opening viewer…", palette["status"])
                 try:
                     open_agent_viewer(current)
                     status = "Opened conversation in viewer."
                 except (OSError, RuntimeError, ValueError) as exc:
                     status = f"Viewer failed: {exc}"
-            elif key == ord("r"):
+            elif code == 24:  # Ctrl-X
+                focus, maximized = change_pane(focus, maximized, ord("m"))
+            elif code == 18:  # Ctrl-R
                 show_status(stdscr, "Refreshing conversation…", palette["status"])
                 try:
                     if current is None:
@@ -914,7 +1370,11 @@ def run_console(
                             peer_name,
                             str(current.agent["agent_id"]),
                         )
-                        status = f"Refreshed conversation from {host_name}."
+                        status = (
+                            f"Refreshed conversation from {host_name}."
+                            if host_name
+                            else "Remote session is no longer active; showing cached copy."
+                        )
                     items = all_agent_items(
                         cache, include_local=include_local
                     )
@@ -923,7 +1383,7 @@ def run_console(
                     )
                 except (OSError, RuntimeError, ValueError) as exc:
                     status = f"Refresh failed: {exc}"
-            elif key == ord("R"):
+            elif code == 19:  # Ctrl-S
                 show_status(stdscr, "Refreshing everything…", palette["status"])
                 try:
                     failures = []
@@ -974,6 +1434,47 @@ def run_console(
                     )
                 except (OSError, RuntimeError, ValueError) as exc:
                     status = f"Synchronization failed: {exc}"
+            elif current and focus == "conversation":
+                draft_key = (current.host_id, str(current.agent["agent_id"]))
+                draft = drafts.setdefault(draft_key, ComposerBuffer())
+                if code == 27:
+                    action, pasted = escape_action(stdscr)
+                    if action == "paste":
+                        draft.insert(pasted)
+                    elif action == "newline":
+                        draft.insert("\n")
+                    elif action == "word_left":
+                        move_composer_word(draft, -1)
+                    elif action == "word_right":
+                        move_composer_word(draft, 1)
+                    elif action == "agents":
+                        focus = "agents"
+                    else:
+                        focus = "agents"
+                    continue
+                action = edit_composer_buffer(
+                    draft, key, max(1, main_width - 6)
+                )
+                if action == "send" and draft.text.strip():
+                    message = draft.text.strip()
+                    try:
+                        result = agents_ui.send_message(
+                            cache,
+                            {
+                                "host": current.host_id,
+                                "agent": current.agent["agent_id"],
+                                "message": message,
+                            },
+                            codex_bin,
+                        )
+                        status = (
+                            "Message sent."
+                            if result["delivery"] == "sent"
+                            else "Message queued for synchronization."
+                        )
+                        drafts[draft_key] = ComposerBuffer()
+                    except (OSError, RuntimeError, ValueError) as exc:
+                        status = f"Send failed: {exc}"
         return 0
 
     return int(curses.wrapper(run))
