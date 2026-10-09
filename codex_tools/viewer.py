@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import curses
+import html
 import ipaddress
 import json
 import os
@@ -1063,7 +1064,7 @@ def attachment_link_payload(session_path: Path, record: Any) -> list[dict[str, s
     payload: list[dict[str, str]] = []
     for index, (label, candidate) in enumerate(local_attachment_links(record.text)):
         try:
-            attachment_path, _, kind = validated_attachment(candidate)
+            _, _, kind = validated_attachment(candidate)
         except (FileNotFoundError, OSError):
             continue
         payload.append(
@@ -1073,9 +1074,6 @@ def attachment_link_payload(session_path: Path, record: Any) -> list[dict[str, s
                 "url": "/open?"
                 + urlencode(
                     {
-                        "label": attachment_inline_filename(
-                            label, attachment_path
-                        ),
                         "path": str(session_path),
                         "line": record.line_no,
                         "link": index,
@@ -1173,6 +1171,50 @@ def attachment_inline_filename(label: str, path: Path) -> str:
     if suffix and not normalized.casefold().endswith(suffix.casefold()):
         normalized += suffix
     return normalized
+
+
+def attachment_page_document(label: str, raw_url: str) -> str:
+    safe_label = html.escape(label)
+    safe_url = html.escape(raw_url, quote=True)
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{safe_label}</title>
+<style>
+html,body,iframe{{width:100%;height:100%;margin:0;border:0;background:#202124}}
+</style>
+</head>
+<body><iframe src="{safe_url}" title="{safe_label}"></iframe></body>
+</html>"""
+
+
+def attachment_page_response(
+    handler: BaseHTTPRequestHandler,
+    label: str,
+    query: dict[str, list[str]],
+) -> None:
+    selector = {
+        key: query[key][0]
+        for key in ("path", "id", "line", "link")
+        if query.get(key, [""])[0]
+    }
+    document = attachment_page_document(
+        label, "/open/file?" + urlencode(selector)
+    ).encode("utf-8")
+    handler.send_response(HTTPStatus.OK)
+    handler.send_header("Content-Type", "text/html; charset=utf-8")
+    handler.send_header("Cache-Control", "private, no-store")
+    handler.send_header(
+        "Content-Security-Policy",
+        "default-src 'none'; frame-src 'self'; style-src 'unsafe-inline'; "
+        "base-uri 'none'; frame-ancestors 'none'",
+    )
+    handler.send_header("X-Content-Type-Options", "nosniff")
+    handler.send_header("Content-Length", str(len(document)))
+    handler.end_headers()
+    handler.wfile.write(document)
 
 
 def attachment_file_response(
@@ -1329,6 +1371,9 @@ def make_handler(state: ViewerState) -> type[BaseHTTPRequestHandler]:
                 elif parsed.path == "/api/version":
                     json_response(self, handle_version(state, query))
                 elif parsed.path == "/open":
+                    _, _, label = resolve_linked_attachment(state, query)
+                    attachment_page_response(self, label, query)
+                elif parsed.path == "/open/file":
                     attachment_path, content_type, label = resolve_linked_attachment(
                         state, query
                     )

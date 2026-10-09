@@ -779,7 +779,6 @@ https://fenced.example/ignored
             [("PDF plot", "PDF"), ("PNG plot", "PNG"), ("Results", "CSV")],
         )
         self.assertIn("/open?", payload[0]["url"])
-        self.assertIn("label=PDF+plot.pdf", payload[0]["url"])
         self.assertIn("line=42", payload[0]["url"])
         self.assertIn("link=0", payload[0]["url"])
 
@@ -854,6 +853,50 @@ https://fenced.example/ignored
             "inline; filename*=UTF-8''Quarterly%20-%20%C4%8Dart.pdf",
         )
         self.assertEqual(handler.wfile.getvalue(), b"%PDF-1.4\n")
+
+    def test_attachment_page_uses_trusted_label_as_browser_title(self) -> None:
+        document = viewer.attachment_page_document(
+            "Quarterly <chart>",
+            "/open/file?path=%2Ftmp%2Fsession.jsonl&amp;line=42&amp;link=0",
+        )
+
+        self.assertIn("<title>Quarterly &lt;chart&gt;</title>", document)
+        self.assertIn('title="Quarterly &lt;chart&gt;"', document)
+        self.assertNotIn("<title>Quarterly <chart></title>", document)
+
+    def test_attachment_page_raw_url_excludes_untrusted_label_parameter(self) -> None:
+        class Handler:
+            def __init__(self) -> None:
+                self.headers: dict[str, str] = {}
+                self.wfile = io.BytesIO()
+
+            def send_response(self, status: int) -> None:
+                self.status = status
+
+            def send_header(self, name: str, value: str) -> None:
+                self.headers[name] = value
+
+            def end_headers(self) -> None:
+                pass
+
+        handler = Handler()
+        viewer.attachment_page_response(
+            handler,  # type: ignore[arg-type]
+            "Trusted label",
+            {
+                "path": ["/tmp/session.jsonl"],
+                "line": ["42"],
+                "link": ["0"],
+                "label": ["Forged label"],
+                "target": ["/etc/passwd"],
+            },
+        )
+        document = handler.wfile.getvalue().decode()
+
+        self.assertIn("<title>Trusted label</title>", document)
+        self.assertIn("/open/file?", document)
+        self.assertNotIn("Forged", document)
+        self.assertNotIn("passwd", document)
 
     def test_attachment_validation_rejects_mismatched_or_active_content(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
