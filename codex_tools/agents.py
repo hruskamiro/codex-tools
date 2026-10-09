@@ -83,6 +83,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         epilog="""controls:
   type immediately         edit the selected agent's draft
   Enter / Ctrl-J           send / insert a newline
+  Tab                      switch between panes
   Shift-Left / Right       select agents / enter the composer
   Ctrl-P / Ctrl-N          move up / down within the draft
   Ctrl-Left / Ctrl-Right   move by word

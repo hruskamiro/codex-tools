@@ -64,6 +64,13 @@ class AgentTuiTests(unittest.TestCase):
             "send",
         )
 
+    def test_tab_is_reserved_for_pane_switching_not_inserted(self) -> None:
+        buffer = agents_tui.ComposerBuffer("draft", 5)
+
+        agents_tui.edit_composer_buffer(buffer, "\t", 40)
+
+        self.assertEqual(buffer.text, "draft")
+
     def test_agent_drafts_remain_independent_when_switching(self) -> None:
         drafts = {
             ("local", "one"): agents_tui.ComposerBuffer("first", 5),
@@ -487,6 +494,16 @@ class AgentTuiTests(unittest.TestCase):
             focus, maximized, agents_tui.curses.KEY_LEFT
         )
         self.assertEqual((focus, maximized), ("agents", False))
+
+    def test_tab_switches_panes_and_restores_sidebar(self) -> None:
+        self.assertEqual(
+            agents_tui.change_pane("agents", False, 9),
+            ("conversation", False),
+        )
+        self.assertEqual(
+            agents_tui.change_pane("conversation", True, 9),
+            ("agents", False),
+        )
 
     def test_m_toggles_maximized_conversation(self) -> None:
         self.assertEqual(

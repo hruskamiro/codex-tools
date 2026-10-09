@@ -605,6 +605,10 @@ def mouse_scroll_delta(button_state: int, amount: int = 3) -> int:
 def change_pane(
     focus: str, maximized: bool, key: int
 ) -> tuple[str, bool]:
+    if key == 9:  # Tab
+        if focus == "agents":
+            return "conversation", False
+        return "agents", False
     if key == curses.KEY_LEFT:
         if maximized:
             return "conversation", False
@@ -966,8 +970,6 @@ def edit_composer_buffer(buffer: ComposerBuffer, key: Any, width: int) -> str | 
         buffer.preferred_column = None
     elif code == 15:
         buffer.insert("\n")
-    elif key == "\t":
-        buffer.insert("  ")
     elif isinstance(key, str) and key.isprintable():
         buffer.insert(key)
     return None
@@ -1343,7 +1345,12 @@ def run_console(
             if code == 3:
                 status = "Press Ctrl-C again to quit."
                 continue
-            if code == curses.KEY_MOUSE and shown:
+            if code == 9:
+                if current is not None:
+                    focus, maximized = change_pane(focus, maximized, code)
+                else:
+                    focus = "agents"
+            elif code == curses.KEY_MOUSE and shown:
                 try:
                     _, _, _, _, button_state = curses.getmouse()
                 except curses.error:

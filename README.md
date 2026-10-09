@@ -108,8 +108,9 @@ composer: type immediately, press Enter to send, and use Ctrl-J for a newline.
 It expands as text wraps, supports cursor editing and multiline paste, and
 keeps a separate unsent draft when you move between agents.
 
-Press Shift-Left to select the agent list from anywhere in a draft, then use
-Up/Down and Right to enter the selected agent's composer. Ctrl-P/Ctrl-N move
+Press Tab to switch between the agent list and composer. Shift-Left also
+selects the agent list from anywhere in a draft; use Up/Down and Right to enter
+the selected agent's composer. Ctrl-P/Ctrl-N move
 between draft lines, while Ctrl-Left/Ctrl-Right move by word. Page Up/Down or
 the mouse wheel scrolls the conversation. Ctrl-R refreshes the selected agent,
 Ctrl-S refreshes all local sessions and configured peers, Ctrl-V opens the
