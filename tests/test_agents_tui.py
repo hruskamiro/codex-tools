@@ -54,6 +54,17 @@ class AgentTuiTests(unittest.TestCase):
         agents_tui.edit_composer_buffer(buffer, agents_tui.CTRL_RIGHT_KEY, 40)
         self.assertEqual(buffer.cursor, 14)
 
+    def test_ncurses_extended_ctrl_arrow_keys_move_between_words(self) -> None:
+        buffer = agents_tui.ComposerBuffer("one two three", 13)
+
+        with patch.object(agents_tui.curses, "keyname", return_value=b"kLFT5"):
+            agents_tui.edit_composer_buffer(buffer, 554, 40)
+        self.assertEqual(buffer.cursor, 8)
+
+        with patch.object(agents_tui.curses, "keyname", return_value=b"kRIT5"):
+            agents_tui.edit_composer_buffer(buffer, 569, 40)
+        self.assertEqual(buffer.cursor, 13)
+
     def test_backward_word_deletion_keeps_text_after_cursor(self) -> None:
         buffer = agents_tui.ComposerBuffer("one two three", 7)
 

@@ -938,9 +938,20 @@ def key_code(key: Any) -> int | None:
     return None
 
 
+def terminal_key_name(key: Any) -> str:
+    """Return ncurses' portable name for an extended integer key."""
+    if not isinstance(key, int):
+        return ""
+    try:
+        return curses.keyname(key).decode("ascii", errors="replace")
+    except (curses.error, AttributeError):
+        return ""
+
+
 def edit_composer_buffer(buffer: ComposerBuffer, key: Any, width: int) -> str | None:
     """Apply an editing key; return ``send`` when the draft should be sent."""
     code = key_code(key)
+    name = terminal_key_name(key)
     if key == "\r" or code == curses.KEY_ENTER:
         return "send"
     if key == "\n" or code == 10:  # Ctrl-J in raw terminal mode.
@@ -953,9 +964,9 @@ def edit_composer_buffer(buffer: ComposerBuffer, key: Any, width: int) -> str | 
         buffer.move(-1)
     elif code == curses.KEY_RIGHT:
         buffer.move(1)
-    elif code == CTRL_LEFT_KEY:
+    elif code == CTRL_LEFT_KEY or name == "kLFT5":
         move_composer_word(buffer, -1)
-    elif code == CTRL_RIGHT_KEY:
+    elif code == CTRL_RIGHT_KEY or name == "kRIT5":
         move_composer_word(buffer, 1)
     elif code in (curses.KEY_UP, 16):  # Up / Ctrl-P
         move_composer_vertical(buffer, width, -1)
