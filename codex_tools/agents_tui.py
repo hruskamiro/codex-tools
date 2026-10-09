@@ -867,6 +867,17 @@ def move_composer_word(buffer: ComposerBuffer, direction: int) -> None:
     buffer.preferred_column = None
 
 
+def delete_composer_word(buffer: ComposerBuffer) -> None:
+    start = buffer.cursor
+    while start and buffer.text[start - 1].isspace():
+        start -= 1
+    while start and not buffer.text[start - 1].isspace():
+        start -= 1
+    buffer.text = buffer.text[:start] + buffer.text[buffer.cursor :]
+    buffer.cursor = start
+    buffer.preferred_column = None
+
+
 def read_bracketed_paste(stdscr: Any) -> str:
     content = ""
     marker = "\x1b[201~"
@@ -891,6 +902,8 @@ def escape_action(stdscr: Any) -> tuple[str, str]:
         stdscr.timeout(-1)
     if following in ("\n", "\r", curses.KEY_ENTER):
         return "newline", ""
+    if following in ("\b", "\x7f", curses.KEY_BACKSPACE):
+        return "word_backspace", ""
     if following == "[":
         suffix = ""
         try:
@@ -960,14 +973,7 @@ def edit_composer_buffer(buffer: ComposerBuffer, key: Any, width: int) -> str | 
         buffer.text = buffer.text[: buffer.cursor]
         buffer.preferred_column = None
     elif code == 23:
-        start = buffer.cursor
-        while start and buffer.text[start - 1].isspace():
-            start -= 1
-        while start and not buffer.text[start - 1].isspace():
-            start -= 1
-        buffer.text = buffer.text[:start] + buffer.text[buffer.cursor :]
-        buffer.cursor = start
-        buffer.preferred_column = None
+        delete_composer_word(buffer)
     elif code == 15:
         buffer.insert("\n")
     elif isinstance(key, str) and key.isprintable():
@@ -1532,6 +1538,8 @@ def run_console(
                         move_composer_word(draft, -1)
                     elif action == "word_right":
                         move_composer_word(draft, 1)
+                    elif action == "word_backspace":
+                        delete_composer_word(draft)
                     elif action == "agents":
                         focus = "agents"
                     else:

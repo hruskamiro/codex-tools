@@ -54,6 +54,14 @@ class AgentTuiTests(unittest.TestCase):
         agents_tui.edit_composer_buffer(buffer, agents_tui.CTRL_RIGHT_KEY, 40)
         self.assertEqual(buffer.cursor, 14)
 
+    def test_backward_word_deletion_keeps_text_after_cursor(self) -> None:
+        buffer = agents_tui.ComposerBuffer("one two three", 7)
+
+        agents_tui.delete_composer_word(buffer)
+
+        self.assertEqual(buffer.text, "one  three")
+        self.assertEqual(buffer.cursor, 4)
+
     def test_persistent_composer_uses_ctrl_j_for_newline_and_enter_to_send(self) -> None:
         buffer = agents_tui.ComposerBuffer("hello", 5)
 
@@ -143,6 +151,11 @@ class AgentTuiTests(unittest.TestCase):
 
         self.assertEqual((action, value), ("newline", ""))
         self.assertEqual(pasted, "first\nsecond")
+
+        action, value = agents_tui.escape_action(  # type: ignore[arg-type]
+            Window(["\x7f"])
+        )
+        self.assertEqual((action, value), ("word_backspace", ""))
 
     def test_composer_recognizes_modified_arrow_sequences(self) -> None:
         class Window:
