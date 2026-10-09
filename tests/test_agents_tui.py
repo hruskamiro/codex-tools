@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 from codex_tools import agents_tui, viewer
 
@@ -360,6 +360,67 @@ class AgentTuiTests(unittest.TestCase):
             apply.call_args.kwargs["base_url"],
             "https://desktop.example:8780",
         )
+
+    def test_sync_agent_uses_incremental_cursor_when_available(self) -> None:
+        class Cache:
+            def hosts(self) -> list[dict[str, str]]:
+                return [
+                    {
+                        "host_id": "host-1",
+                        "base_url": "https://desktop.example:8780",
+                    }
+                ]
+
+            def agents(self, _host_id: str) -> list[dict[str, str]]:
+                return [
+                    {"agent_id": "selected", "event_cursor": "cursor-1"}
+                ]
+
+        config = {
+            "peers": {
+                "desktop": {
+                    "url": "https://desktop.example:8780",
+                    "token": "secret",
+                }
+            }
+        }
+        payload = {
+            "protocol": 1,
+            "host": {"id": "host-1", "name": "Desktop"},
+            "agent_id": "selected",
+            "events": [],
+            "next_cursor": "cursor-2",
+            "has_more": False,
+        }
+
+        with (
+            patch.object(
+                agents_tui.relay_transport,
+                "fetch_agent_events",
+                return_value=payload,
+            ) as fetch_events,
+            patch.object(
+                agents_tui.relay_transport, "apply_agent_events"
+            ) as apply_events,
+            patch.object(
+                agents_tui.relay_transport, "fetch_agent"
+            ) as fetch_agent,
+            patch.object(
+                agents_tui.relay_transport,
+                "deliver_pending",
+                return_value=self.DELIVERY,
+            ),
+        ):
+            host = agents_tui.sync_agent(
+                Cache(), config, "desktop", "selected"  # type: ignore[arg-type]
+            )
+
+        self.assertEqual(host, ("Desktop", self.DELIVERY))
+        fetch_events.assert_called_once_with(
+            config["peers"]["desktop"], "selected", "cursor-1"
+        )
+        apply_events.assert_called_once_with(ANY, payload)
+        fetch_agent.assert_not_called()
 
     def test_sync_agent_falls_back_to_snapshot_when_agent_route_is_missing(self) -> None:
         config = {

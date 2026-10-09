@@ -167,6 +167,53 @@ def sync_agent(
     peer = config.get("peers", {}).get(peer_name)
     if not isinstance(peer, dict):
         raise ValueError(f"relay peer not found: {peer_name}")
+    peer_url = str(peer["url"]).rstrip("/")
+    cached_hosts = cache.hosts() if hasattr(cache, "hosts") else []
+    cached_host = next(
+        (
+            host
+            for host in cached_hosts
+            if str(host.get("base_url") or "").rstrip("/") == peer_url
+        ),
+        None,
+    )
+    cached_agent = None
+    if cached_host is not None and hasattr(cache, "agents"):
+        cached_agent = next(
+            (
+                value
+                for value in cache.agents(str(cached_host["host_id"]))
+                if str(value["agent_id"]) == agent_id
+            ),
+            None,
+        )
+    event_cursor = str((cached_agent or {}).get("event_cursor") or "")
+    if event_cursor:
+        try:
+            event_payload = relay_transport.fetch_agent_events(
+                peer, agent_id, event_cursor
+            )
+        except HTTPError as exc:
+            if exc.code != HTTPStatus.NOT_FOUND:
+                raise
+        else:
+            if not event_payload.get("reset_required"):
+                while True:
+                    relay_transport.apply_agent_events(cache, event_payload)
+                    if not event_payload.get("has_more"):
+                        break
+                    event_payload = relay_transport.fetch_agent_events(
+                        peer,
+                        agent_id,
+                        str(event_payload["next_cursor"]),
+                    )
+                    if event_payload.get("reset_required"):
+                        break
+                if not event_payload.get("reset_required"):
+                    delivery = relay_transport.deliver_pending(
+                        cache, peer, str(event_payload["host"]["id"])
+                    )
+                    return str(event_payload["host"]["name"]), delivery
     try:
         payload = relay_transport.fetch_agent(peer, agent_id)
     except HTTPError as exc:

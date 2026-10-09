@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import os
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -14,7 +16,7 @@ from typing import Any, Iterator, Sequence
 from codex_tools import agents, paths, search
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 DEFAULT_CACHE_PATH = paths.RELAY_CACHE_FILE
 RECENT_RECORD_LIMIT = 20
 RECENT_LINE_LIMIT = 20_000
@@ -46,6 +48,7 @@ class CachedAgent:
     records: tuple[CachedRecord, ...]
     status: str = "unknown"
     status_label: str = "unknown"
+    event_cursor: str = ""
 
 
 def utc_now() -> str:
@@ -77,7 +80,7 @@ class RelayCache:
 
     def _ensure_schema(self, connection: sqlite3.Connection) -> None:
         version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-        if version not in {0, 1, 2, SCHEMA_VERSION}:
+        if version not in {0, 1, 2, 3, SCHEMA_VERSION}:
             raise ValueError(
                 f"unsupported relay cache schema {version}; expected {SCHEMA_VERSION}"
             )
@@ -107,6 +110,7 @@ class RelayCache:
                 origin_path TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'unknown',
                 status_label TEXT NOT NULL DEFAULT 'unknown',
+                event_cursor TEXT NOT NULL DEFAULT '',
                 PRIMARY KEY (host_id, agent_id),
                 FOREIGN KEY (host_id) REFERENCES relay_hosts(host_id) ON DELETE CASCADE
             );
@@ -171,6 +175,10 @@ class RelayCache:
         if "status_label" not in agent_columns:
             connection.execute(
                 "ALTER TABLE relay_agents ADD COLUMN status_label TEXT NOT NULL DEFAULT 'unknown'"
+            )
+        if "event_cursor" not in agent_columns:
+            connection.execute(
+                "ALTER TABLE relay_agents ADD COLUMN event_cursor TEXT NOT NULL DEFAULT ''"
             )
         outbox_columns = {
             str(row[1])
@@ -277,7 +285,8 @@ class RelayCache:
                 host_id, agent_id, session_id, thread_id, rollout_id,
                 title, title_source, cwd, source, created_at, updated_at,
                 origin_path, status, status_label
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                , event_cursor
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(host_id, agent_id) DO UPDATE SET
                 session_id = excluded.session_id,
                 thread_id = excluded.thread_id,
@@ -290,7 +299,8 @@ class RelayCache:
                 updated_at = excluded.updated_at,
                 origin_path = excluded.origin_path,
                 status = excluded.status,
-                status_label = excluded.status_label
+                status_label = excluded.status_label,
+                event_cursor = excluded.event_cursor
             """,
             (
                 host_id,
@@ -307,6 +317,7 @@ class RelayCache:
                 agent.origin_path,
                 agent.status,
                 agent.status_label,
+                agent.event_cursor,
             ),
         )
         connection.execute(
@@ -380,6 +391,65 @@ class RelayCache:
                 (host_id, agent_id),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def append_agent_records(
+        self,
+        host_id: str,
+        agent_id: str,
+        records: Sequence[CachedRecord],
+        *,
+        event_cursor: str,
+    ) -> int:
+        """Append an incremental batch and advance its cursor atomically."""
+        with self.connect() as connection, connection:
+            row = connection.execute(
+                """
+                SELECT COALESCE(MAX(ordinal), -1) AS last_ordinal
+                FROM relay_records
+                WHERE host_id = ? AND agent_id = ?
+                """,
+                (host_id, agent_id),
+            ).fetchone()
+            agent = connection.execute(
+                """
+                SELECT event_cursor FROM relay_agents
+                WHERE host_id = ? AND agent_id = ?
+                """,
+                (host_id, agent_id),
+            ).fetchone()
+            if agent is None:
+                raise FileNotFoundError(f"cached agent not found: {agent_id}")
+            ordinal = int(row["last_ordinal"]) + 1
+            connection.executemany(
+                """
+                INSERT INTO relay_records(
+                    host_id, agent_id, ordinal, timestamp, role, text,
+                    line_no, record_type
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        host_id,
+                        agent_id,
+                        ordinal + index,
+                        record.timestamp,
+                        record.role,
+                        record.text,
+                        record.line_no,
+                        record.record_type,
+                    )
+                    for index, record in enumerate(records)
+                ],
+            )
+            connection.execute(
+                """
+                UPDATE relay_agents
+                SET event_cursor = ?, updated_at = ?
+                WHERE host_id = ? AND agent_id = ?
+                """,
+                (event_cursor, utc_now(), host_id, agent_id),
+            )
+        return len(records)
 
     def enqueue(
         self,
@@ -567,32 +637,58 @@ def cached_agent_from_local(
     )
 
 
+def complete_jsonl_size(handle: Any, size: int) -> int:
+    """Return the byte position after the last complete JSONL line."""
+    if size <= 0:
+        return 0
+    position = size
+    while position:
+        chunk_size = min(REVERSE_READ_SIZE, position)
+        position -= chunk_size
+        handle.seek(position)
+        chunk = handle.read(chunk_size)
+        newline = chunk.rfind(b"\n")
+        if newline >= 0:
+            return position + newline + 1
+    return 0
+
+
+def jsonl_boundary_fingerprint(handle: Any, offset: int) -> str:
+    """Fingerprint bytes immediately before a cursor to detect rewrites."""
+    start = max(0, offset - 64)
+    handle.seek(start)
+    return hashlib.sha256(handle.read(offset - start)).hexdigest()[:24]
+
+
+def reverse_lines_from_handle(handle: Any, end: int) -> Iterator[bytes]:
+    position = end
+    remainder = b""
+    while position:
+        size = min(REVERSE_READ_SIZE, position)
+        position -= size
+        handle.seek(position)
+        pieces = (handle.read(size) + remainder).split(b"\n")
+        remainder = pieces.pop(0)
+        for line in reversed(pieces):
+            if line:
+                yield line
+    if remainder:
+        yield remainder
+
+
 def reverse_lines(path: Path) -> Iterator[bytes]:
-    """Yield non-empty lines from a file, newest first, without reading it all."""
+    """Yield complete non-empty lines newest first without reading it all."""
     with path.open("rb") as handle:
-        handle.seek(0, 2)
-        position = handle.tell()
-        remainder = b""
-        while position:
-            size = min(REVERSE_READ_SIZE, position)
-            position -= size
-            handle.seek(position)
-            pieces = (handle.read(size) + remainder).split(b"\n")
-            remainder = pieces.pop(0)
-            for line in reversed(pieces):
-                if line:
-                    yield line
-        if remainder:
-            yield remainder
+        stat_result = os.fstat(handle.fileno())
+        end = complete_jsonl_size(handle, int(stat_result.st_size))
+        yield from reverse_lines_from_handle(handle, end)
 
 
-def load_recent_session(
-    path: Path,
-    limit: int = RECENT_RECORD_LIMIT,
-    line_limit: int = RECENT_LINE_LIMIT,
-) -> search.Session:
+def recent_records_from_lines(
+    lines: Iterator[bytes], limit: int, line_limit: int
+) -> list[search.TextRecord]:
     records: list[search.TextRecord] = []
-    for line_count, raw_line in enumerate(reverse_lines(path), start=1):
+    for line_count, raw_line in enumerate(lines, start=1):
         if b'"response_item"' not in raw_line or b'"message"' not in raw_line:
             if line_count >= line_limit:
                 break
@@ -609,7 +705,34 @@ def load_recent_session(
         records.extend(reversed(extracted))
         if len(records) >= limit or line_count >= line_limit:
             break
-    return search.Session(path=path, records=list(reversed(records[:limit])))
+    return list(reversed(records[:limit]))
+
+
+def load_recent_session(
+    path: Path,
+    limit: int = RECENT_RECORD_LIMIT,
+    line_limit: int = RECENT_LINE_LIMIT,
+) -> search.Session:
+    return search.Session(
+        path=path,
+        records=recent_records_from_lines(reverse_lines(path), limit, line_limit),
+    )
+
+
+def load_recent_session_snapshot(
+    path: Path,
+    limit: int = RECENT_RECORD_LIMIT,
+    line_limit: int = RECENT_LINE_LIMIT,
+) -> tuple[search.Session, os.stat_result, int, str]:
+    """Read recent records and their exact complete-file boundary together."""
+    with path.open("rb") as handle:
+        stat_result = os.fstat(handle.fileno())
+        end = complete_jsonl_size(handle, int(stat_result.st_size))
+        fingerprint = jsonl_boundary_fingerprint(handle, end)
+        records = recent_records_from_lines(
+            reverse_lines_from_handle(handle, end), limit, line_limit
+        )
+    return search.Session(path=path, records=records), stat_result, end, fingerprint
 
 
 def refresh_local(

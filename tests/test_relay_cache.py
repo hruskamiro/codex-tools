@@ -306,7 +306,7 @@ class RelayCacheTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         payload = json.loads(output.getvalue())
-        self.assertEqual(payload["schema"], 3)
+        self.assertEqual(payload["schema"], 4)
         self.assertEqual(payload["hosts"][0]["agent_count"], 1)
 
     def test_outbox_json_reports_persisted_delivery_state(self) -> None:

@@ -168,6 +168,14 @@ IDs idempotently, so an ordinary reconnect or repeated sync does not submit the
 same prompt twice. Restart an already-running `ct relay serve` process after
 upgrading so it exposes the authenticated write endpoint.
 
+After the first per-agent snapshot, selected-conversation refreshes use an
+authenticated byte cursor and transfer only complete JSONL records appended
+since the previous refresh. Cursors are bound to the agent and file generation;
+truncation or replacement requests a fresh snapshot. The relay also supports a
+bounded long-poll events request, backed by one shared lightweight file watcher,
+so an interactive client can receive changes promptly without repeatedly
+downloading whole conversations.
+
 Plain HTTP is accepted only on loopback by default. When an address is already
 protected by a VPN or an encrypted tunnel, explicitly opt in on both ends with
 `--allow-insecure-http`; the relay itself does not configure or depend on a

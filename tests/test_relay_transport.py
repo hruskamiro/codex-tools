@@ -10,6 +10,7 @@ from email.message import Message
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import urlencode
 
 from codex_tools import relay, relay_cache, relay_transport
 
@@ -48,6 +49,20 @@ def cached_sibling_agent() -> relay_cache.CachedAgent:
     )
 
 
+def session_event(role: str, text: str) -> str:
+    return json.dumps(
+        {
+            "timestamp": "2026-10-09T12:00:00Z",
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": role,
+                "content": [{"type": "input_text", "text": text}],
+            },
+        }
+    )
+
+
 class FakeResponse(io.BytesIO):
     def __enter__(self) -> FakeResponse:
         return self
@@ -57,6 +72,202 @@ class FakeResponse(io.BytesIO):
 
 
 class RelayTransportTests(unittest.TestCase):
+    def test_jsonl_cursor_reads_only_complete_appended_records(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "session.jsonl"
+            path.write_text(session_event("user", "Existing") + "\n", encoding="utf-8")
+            cursor = relay_transport.event_cursor_for_path(
+                path, "agent-1", "secret"
+            )
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(session_event("assistant", "Complete") + "\n")
+                handle.write(session_event("assistant", "Partial"))
+
+            first = relay_transport.read_jsonl_events(
+                path, "agent-1", cursor, "secret"
+            )
+
+            self.assertEqual(
+                [event["record"]["text"] for event in first["events"]],
+                ["Complete"],
+            )
+            self.assertFalse(first["has_more"])
+
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write("\n")
+            second = relay_transport.read_jsonl_events(
+                path, "agent-1", first["next_cursor"], "secret"
+            )
+            self.assertEqual(
+                [event["record"]["text"] for event in second["events"]],
+                ["Partial"],
+            )
+
+    def test_jsonl_cursor_requires_reset_after_truncation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "session.jsonl"
+            path.write_text(
+                session_event("user", "A reasonably long existing message") + "\n",
+                encoding="utf-8",
+            )
+            cursor = relay_transport.event_cursor_for_path(
+                path, "agent-1", "secret"
+            )
+            path.write_text(session_event("user", "short") + "\n", encoding="utf-8")
+
+            result = relay_transport.read_jsonl_events(
+                path, "agent-1", cursor, "secret"
+            )
+
+            self.assertTrue(result["reset_required"])
+
+    def test_jsonl_cursor_requires_reset_after_same_inode_rewrite(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "session.jsonl"
+            original = session_event("user", "original") + "\n"
+            replacement = session_event("user", "changed!") + "\n"
+            self.assertEqual(len(original), len(replacement))
+            path.write_text(original, encoding="utf-8")
+            cursor = relay_transport.event_cursor_for_path(
+                path, "agent-1", "secret"
+            )
+            path.write_text(replacement, encoding="utf-8")
+
+            result = relay_transport.read_jsonl_events(
+                path, "agent-1", cursor, "secret"
+            )
+
+            self.assertTrue(result["reset_required"])
+
+    def test_jsonl_cursor_is_bound_to_agent_and_secret(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "session.jsonl"
+            path.write_text(session_event("user", "Existing") + "\n", encoding="utf-8")
+            cursor = relay_transport.event_cursor_for_path(
+                path, "agent-1", "secret"
+            )
+
+            with self.assertRaisesRegex(ValueError, "invalid relay event cursor"):
+                relay_transport.read_jsonl_events(
+                    path, "agent-2", cursor, "secret"
+                )
+            with self.assertRaisesRegex(ValueError, "invalid relay event cursor"):
+                relay_transport.read_jsonl_events(
+                    path, "agent-1", cursor, "different"
+                )
+
+    def test_incremental_events_append_to_cached_conversation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = relay_cache.RelayCache(Path(temporary) / "relay.sqlite3")
+            cached = replace(agent(), event_cursor="old-cursor")
+            cache.replace_host_snapshot("host-1", "Desktop", [cached])
+            payload = {
+                "protocol": 1,
+                "host": {"id": "host-1", "name": "Desktop"},
+                "agent_id": "agent-1",
+                "events": [
+                    {
+                        "type": "record.appended",
+                        "record": {
+                            "timestamp": "2026-10-09T12:00:00Z",
+                            "role": "assistant",
+                            "text": "New response",
+                            "line_no": 8,
+                            "record_type": "message",
+                        },
+                    }
+                ],
+                "next_cursor": "new-cursor",
+            }
+
+            count = relay_transport.apply_agent_events(cache, payload)
+
+            self.assertEqual(count, 1)
+            self.assertEqual(
+                [record["text"] for record in cache.records("host-1", "agent-1")],
+                ["Done", "New response"],
+            )
+            self.assertEqual(
+                cache.agents("host-1")[0]["event_cursor"], "new-cursor"
+            )
+
+    def test_agent_snapshot_establishes_incremental_cursor(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            session_path = root / "session.jsonl"
+            session_path.write_text(
+                session_event("assistant", "Existing") + "\n", encoding="utf-8"
+            )
+            cache = relay_cache.RelayCache(root / "relay.sqlite3")
+            cache.replace_host_snapshot(
+                "local",
+                "This machine",
+                [replace(agent(), origin_path=str(session_path))],
+            )
+            config = {
+                "identity": {
+                    "id": "host-1",
+                    "name": "Desktop",
+                    "token": "secret",
+                }
+            }
+
+            payload = relay_transport.agent_snapshot_payload(
+                cache, config, "agent-1"
+            )
+
+            self.assertIsNotNone(payload)
+            remote_agent = (payload or {})["agent"]
+            self.assertNotIn("origin_path", remote_agent)
+            cursor = relay_transport.decode_event_cursor(
+                remote_agent["events_cursor"], "agent-1", "secret"
+            )
+            self.assertEqual(cursor["o"], session_path.stat().st_size)
+
+    def test_event_endpoint_returns_only_appended_records(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            session_path = root / "session.jsonl"
+            session_path.write_text(
+                session_event("user", "Existing") + "\n", encoding="utf-8"
+            )
+            cache = relay_cache.RelayCache(root / "relay.sqlite3")
+            cache.replace_host_snapshot(
+                "local",
+                "This machine",
+                [replace(agent(), origin_path=str(session_path))],
+            )
+            config = {
+                "identity": {
+                    "id": "host-1",
+                    "name": "Desktop",
+                    "token": "secret",
+                }
+            }
+            cursor = relay_transport.event_cursor_for_path(
+                session_path, "agent-1", "secret"
+            )
+            with session_path.open("a", encoding="utf-8") as handle:
+                handle.write(session_event("assistant", "Appended") + "\n")
+            handler = relay_transport.make_handler(cache, config)
+            instance = handler.__new__(handler)
+            instance.path = "/v1/agents/agent-1/events?" + urlencode(
+                {"after": cursor, "wait": 0}
+            )
+            headers = Message()
+            headers["Authorization"] = "Bearer secret"
+            instance.headers = headers
+            responses: list[tuple[dict[str, object], object]] = []
+            instance._json = lambda payload, status=relay_transport.HTTPStatus.OK: responses.append((payload, status))  # type: ignore[method-assign]
+
+            instance.do_GET()
+
+            payload, status = responses[0]
+            self.assertEqual(status, relay_transport.HTTPStatus.OK)
+            self.assertEqual(payload["agent_id"], "agent-1")
+            events = payload["events"]
+            self.assertEqual(events[0]["record"]["text"], "Appended")  # type: ignore[index]
+
     def test_serve_parser_accepts_control_socket_override(self) -> None:
         args = relay.parse_args(
             ["serve", "--control-socket", "/tmp/test-control.sock"]
@@ -244,6 +455,31 @@ class RelayTransportTests(unittest.TestCase):
             opened.call_args.args[0].full_url,
             "http://localhost:8780/v1/agents/agent%20one",
         )
+
+    def test_fetch_agent_events_sends_cursor_and_long_poll_timeout(self) -> None:
+        payload = {
+            "protocol": 1,
+            "host": {"id": "h", "name": "Host"},
+            "agent_id": "agent one",
+            "events": [],
+            "next_cursor": "next",
+        }
+        response = FakeResponse(json.dumps(payload).encode())
+
+        with patch.object(relay_transport, "urlopen", return_value=response) as opened:
+            result = relay_transport.fetch_agent_events(
+                {"url": "http://localhost:8780", "token": "key"},
+                "agent one",
+                "cursor/value",
+                wait=20,
+            )
+
+        self.assertEqual(result, payload)
+        request = opened.call_args.args[0]
+        self.assertIn("/v1/agents/agent%20one/events?", request.full_url)
+        self.assertIn("after=cursor%2Fvalue", request.full_url)
+        self.assertIn("wait=20", request.full_url)
+        self.assertEqual(opened.call_args.kwargs["timeout"], 25.0)
 
     def test_post_message_uses_authenticated_json_request(self) -> None:
         response = FakeResponse(
