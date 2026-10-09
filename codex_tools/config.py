@@ -131,6 +131,13 @@ SETTINGS = {
             "LaTeX code-block renderer.",
             ("auto", "pygments", "verbatim"),
         ),
+        Setting(
+            "agents.sync_mode",
+            "str",
+            "adaptive",
+            "Agent Console automatic synchronization policy.",
+            ("manual", "economy", "adaptive", "live"),
+        ),
     )
 }
 
@@ -212,7 +219,7 @@ def _leaf_keys(data: Any, prefix: str = "") -> list[str]:
 def validate_config(data: Any) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError("configuration root must be a TOML table")
-    allowed_top = {"version", "summary", "viewer"}
+    allowed_top = {"version", "summary", "viewer", "agents"}
     unknown_top = set(data) - allowed_top
     if unknown_top:
         raise ValueError(f"unknown configuration sections: {sorted(unknown_top)}")
@@ -321,7 +328,7 @@ def _toml_scalar(value: Any) -> str:
 
 def render_toml(data: dict[str, Any]) -> str:
     lines = [f"version = {int(data.get('version', 1))}"]
-    for section_name in ("summary.daily", "summary.weekly", "viewer"):
+    for section_name in ("summary.daily", "summary.weekly", "viewer", "agents"):
         found, table = _nested_value(data, section_name)
         if not found or not isinstance(table, dict) or not table:
             continue
@@ -334,7 +341,7 @@ def render_toml(data: dict[str, Any]) -> str:
 def render_template(data: dict[str, Any] | None = None) -> str:
     selected = data or {"version": 1}
     lines = ["# Codex Tools configuration", "version = 1"]
-    for section_name in ("summary.daily", "summary.weekly", "viewer"):
+    for section_name in ("summary.daily", "summary.weekly", "viewer", "agents"):
         lines.extend(["", f"[{section_name}]"])
         prefix = section_name + "."
         for setting in SETTINGS.values():

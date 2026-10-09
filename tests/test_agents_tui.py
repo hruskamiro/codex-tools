@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import unittest
 from unittest.mock import ANY, patch
 
@@ -8,6 +9,76 @@ from codex_tools import agents_tui, viewer
 
 class AgentTuiTests(unittest.TestCase):
     DELIVERY = {"delivered": 0, "pending": 0, "failed": 0, "errors": []}
+
+    def test_auto_sync_worker_refreshes_selected_local_agent(self) -> None:
+        refreshed = threading.Event()
+        item = agents_tui.AgentItem(
+            "local", "This machine", {"agent_id": "agent-1"}
+        )
+        with patch.object(
+            agents_tui.relay_cache,
+            "refresh_local_agent",
+            side_effect=lambda *_args: refreshed.set(),
+        ):
+            worker = agents_tui.AutoSyncWorker(
+                object(),  # type: ignore[arg-type]
+                agents_tui.Path("/sessions"),
+                agents_tui.Path("/index"),
+                None,
+                agents_tui.Path("/relay.json"),
+            )
+            try:
+                worker.select(item, "live")
+                self.assertTrue(refreshed.wait(1))
+                update = worker.updates.get(timeout=1)
+            finally:
+                worker.close()
+
+        self.assertEqual(update.target, ("local", "agent-1"))
+        self.assertEqual(update.error, "")
+
+    def test_adaptive_worker_long_polls_selected_remote_agent(self) -> None:
+        synchronized = threading.Event()
+        item = agents_tui.AgentItem(
+            "remote-host",
+            "Desktop",
+            {"agent_id": "agent-1"},
+            "https://desktop.example:8780",
+        )
+        config = {
+            "peers": {
+                "desktop": {
+                    "url": "https://desktop.example:8780",
+                    "token": "secret",
+                }
+            }
+        }
+
+        def synchronize(*_args: object, **kwargs: object) -> tuple[str, dict[str, object]]:
+            self.assertEqual(kwargs["wait"], 8.0)
+            synchronized.set()
+            return "Desktop", self.DELIVERY
+
+        with (
+            patch.object(agents_tui.relay_transport, "load_config", return_value=config),
+            patch.object(agents_tui, "sync_agent", side_effect=synchronize),
+        ):
+            worker = agents_tui.AutoSyncWorker(
+                object(),  # type: ignore[arg-type]
+                agents_tui.Path("/sessions"),
+                agents_tui.Path("/index"),
+                None,
+                agents_tui.Path("/relay.json"),
+            )
+            try:
+                worker.select(item, "adaptive")
+                self.assertTrue(synchronized.wait(1))
+                update = worker.updates.get(timeout=1)
+            finally:
+                worker.close()
+
+        self.assertEqual(update.target, ("remote-host", "agent-1"))
+        self.assertEqual(update.error, "")
 
     def test_composer_buffer_edits_at_cursor(self) -> None:
         buffer = agents_tui.ComposerBuffer("helo", 3)

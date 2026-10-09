@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from codex_tools import agents_tui, codex_daemon, paths, relay_cache, search
+from codex_tools import agents_tui, codex_daemon, config, paths, relay_cache, search
 
 
 @dataclass(frozen=True)
@@ -84,7 +84,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
   type immediately         edit the selected agent's draft
   Enter / Ctrl-J           send / insert a newline
   Tab                      switch between panes
-  Shift-Left / Right       select agents / enter the composer
+  Shift-Left / Right       select sidebar / enter selected item
+  Enter                    open or apply the selected sidebar item
   Ctrl-P / Ctrl-N          move up / down within the draft
   Ctrl-Left / Ctrl-Right   move by word
   Page Up / Page Down      scroll the conversation
@@ -102,6 +103,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--no-local",
         action="store_true",
         help="Show only synchronized agents from remote relay hosts.",
+    )
+    ui.add_argument(
+        "--sync",
+        choices=("manual", "economy", "adaptive", "live"),
+        default=None,
+        help=(
+            "Automatic sync mode. Defaults to agents.sync_mode from config "
+            f"({config.default_help('agents.sync_mode')})."
+        ),
     )
     ui.add_argument(
         "--cache-file", type=Path, default=relay_cache.DEFAULT_CACHE_PATH,

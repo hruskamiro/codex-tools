@@ -118,6 +118,20 @@ browser viewer, Ctrl-F searches, and Ctrl-X maximizes or restores the
 conversation. Press Ctrl-C twice to quit. With `--no-local`, Ctrl-S skips the
 local refresh.
 
+The first item in the agent pane opens **Settings**. Its synchronization mode
+applies immediately and is saved as `agents.sync_mode` in the regular Codex
+Tools configuration:
+
+- `manual` performs no background work;
+- `economy` checks the selected conversation roughly every ten seconds;
+- `adaptive` keeps a low-bandwidth incremental request open and backs off when
+  the connection fails;
+- `live` favors the shortest update delay.
+
+`adaptive` is the default. Use `ct agents ui --sync MODE` for a temporary
+startup override. Automatic synchronization follows only the selected agent;
+inactive conversations and attachments are not downloaded in the background.
+
 After synchronizing a relay peer, use `ct agents ui --no-local` to hide this
 machine's sessions and browse only cached remote agents.
 

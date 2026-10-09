@@ -117,6 +117,11 @@ class AgentCommandTests(unittest.TestCase):
 
         self.assertTrue(args.no_local)
 
+    def test_ui_accepts_sync_mode_override(self) -> None:
+        args = agents.parse_args(["ui", "--sync", "economy"])
+
+        self.assertEqual(args.sync, "economy")
+
     def test_resolve_agent_accepts_exact_name_and_unique_id_prefix(self) -> None:
         other = {**AGENT, "title": "docs", "threadId": "02thread"}
 

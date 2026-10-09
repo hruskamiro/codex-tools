@@ -5,9 +5,11 @@ from __future__ import annotations
 import argparse
 import curses
 import io
+import queue
 import re
 import sys
 import textwrap
+import threading
 import unicodedata
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
@@ -18,6 +20,7 @@ from urllib.error import HTTPError
 
 from codex_tools import (
     agents_ui,
+    config as user_config,
     paths,
     relay_cache,
     relay_transport,
@@ -26,6 +29,13 @@ from codex_tools import (
 
 
 MAX_RECORDS = 240
+SYNC_MODES = ("manual", "economy", "adaptive", "live")
+SYNC_MODE_DETAILS = {
+    "manual": "Refresh only when you request it with Ctrl-R or Ctrl-S.",
+    "economy": "Check the selected conversation about every 10 seconds.",
+    "adaptive": "Keep a low-bandwidth event request open; back off on errors.",
+    "live": "Keep the selected conversation as immediate as possible.",
+}
 CTRL_LEFT_KEY = curses.KEY_MAX + 21
 CTRL_RIGHT_KEY = curses.KEY_MAX + 22
 MARKDOWN_LINK_RE = re.compile(
@@ -163,6 +173,8 @@ def sync_agent(
     config: dict[str, Any],
     peer_name: str,
     agent_id: str,
+    *,
+    wait: float = 0,
 ) -> tuple[str | None, dict[str, Any]]:
     peer = config.get("peers", {}).get(peer_name)
     if not isinstance(peer, dict):
@@ -190,9 +202,14 @@ def sync_agent(
     event_cursor = str((cached_agent or {}).get("event_cursor") or "")
     if event_cursor:
         try:
-            event_payload = relay_transport.fetch_agent_events(
-                peer, agent_id, event_cursor
-            )
+            if wait:
+                event_payload = relay_transport.fetch_agent_events(
+                    peer, agent_id, event_cursor, wait=wait
+                )
+            else:
+                event_payload = relay_transport.fetch_agent_events(
+                    peer, agent_id, event_cursor
+                )
         except HTTPError as exc:
             if exc.code != HTTPStatus.NOT_FOUND:
                 raise
@@ -247,6 +264,133 @@ def sync_agent(
         cache, peer, str(payload["host"]["id"])
     )
     return str(payload["host"]["name"]), delivery
+
+
+@dataclass(frozen=True)
+class AutoSyncUpdate:
+    target: tuple[str, str]
+    error: str = ""
+
+
+class AutoSyncWorker:
+    """Synchronize only the selected agent without blocking terminal input."""
+
+    def __init__(
+        self,
+        cache: relay_cache.RelayCache,
+        sessions_root: Path,
+        session_index: Path,
+        control_socket: Path | None,
+        relay_config: Path,
+    ) -> None:
+        self.cache = cache
+        self.sessions_root = sessions_root
+        self.session_index = session_index
+        self.control_socket = control_socket
+        self.relay_config = relay_config
+        self.updates: queue.SimpleQueue[AutoSyncUpdate] = queue.SimpleQueue()
+        self._condition = threading.Condition()
+        self._target: AgentItem | None = None
+        self._mode = "manual"
+        self._revision = 0
+        self._stopped = False
+        self._thread = threading.Thread(
+            target=self._run, name="agent-console-sync", daemon=True
+        )
+        self._thread.start()
+
+    def select(self, item: AgentItem | None, mode: str) -> None:
+        if mode not in SYNC_MODES:
+            raise ValueError(f"unknown sync mode: {mode}")
+        with self._condition:
+            key = self._item_key(item)
+            if key != self._item_key(self._target) or mode != self._mode:
+                self._target = item
+                self._mode = mode
+                self._revision += 1
+                self._condition.notify_all()
+
+    def close(self) -> None:
+        with self._condition:
+            self._stopped = True
+            self._condition.notify_all()
+        self._thread.join(timeout=0.25)
+
+    @staticmethod
+    def _item_key(item: AgentItem | None) -> tuple[str, str] | None:
+        if item is None:
+            return None
+        return item.host_id, str(item.agent["agent_id"])
+
+    def _run(self) -> None:
+        failure_count = 0
+        while True:
+            with self._condition:
+                self._condition.wait_for(
+                    lambda: self._stopped
+                    or (self._target is not None and self._mode != "manual")
+                )
+                if self._stopped:
+                    return
+                item = self._target
+                mode = self._mode
+                revision = self._revision
+            if item is None:
+                continue
+            target = self._item_key(item)
+            if target is None:
+                continue
+            error = ""
+            try:
+                if item.host_id == "local":
+                    relay_cache.refresh_local_agent(
+                        self.cache,
+                        str(item.agent["agent_id"]),
+                        self.sessions_root,
+                        self.session_index,
+                        self.control_socket,
+                    )
+                else:
+                    config = relay_transport.load_config(self.relay_config)
+                    peer_name = peer_name_for_item(config, item)
+                    if peer_name is None:
+                        raise ValueError(
+                            f"no configured peer matches {item.host_name}"
+                        )
+                    wait = 8.0 if mode in {"adaptive", "live"} else 0.0
+                    sync_agent(
+                        self.cache,
+                        config,
+                        peer_name,
+                        str(item.agent["agent_id"]),
+                        wait=wait,
+                    )
+                failure_count = 0
+            except (OSError, RuntimeError, ValueError) as exc:
+                failure_count += 1
+                error = str(exc)
+            self.updates.put(AutoSyncUpdate(target, error))
+            if error:
+                delay = min(
+                    30.0,
+                    (1.0 if mode == "live" else 2.0)
+                    * 2 ** min(failure_count - 1, 4),
+                )
+            elif item.host_id != "local" and mode in {"adaptive", "live"}:
+                delay = 0.05
+            else:
+                delay = {
+                    "economy": 10.0,
+                    "adaptive": 1.0,
+                    "live": 0.25,
+                }[mode]
+            with self._condition:
+                self._condition.wait_for(
+                    lambda: self._stopped or self._revision != revision,
+                    timeout=delay,
+                )
+                if self._stopped:
+                    return
 
 
 def delivery_summary_text(delivery: dict[str, Any]) -> str:
@@ -1142,8 +1286,10 @@ def run_console(
     *,
     include_local: bool = True,
     relay_config: Path = paths.RELAY_CONFIG_FILE,
+    sync_mode: str = "adaptive",
 ) -> int:
     def run(stdscr: Any) -> int:
+        active_sync_mode = sync_mode
         curses.curs_set(0)
         curses.raw()
         # Keep physical Enter (CR) distinct from Ctrl-J (LF).  In curses'
@@ -1162,6 +1308,8 @@ def run_console(
         items = all_agent_items(cache, include_local=include_local)
         query = ""
         selected = 0
+        settings_selected = False
+        settings_choice = SYNC_MODES.index(active_sync_mode)
         scroll = 0
         focus = "conversation"
         maximized = False
@@ -1169,8 +1317,17 @@ def run_console(
         interrupt_armed = False
         drafts: dict[tuple[str, str], ComposerBuffer] = {}
         outgoing = cache.outbox(states=("pending", "failed"))
+        auto_sync = AutoSyncWorker(
+            cache,
+            sessions_root,
+            session_index,
+            control_socket,
+            relay_config,
+        )
+        previous_current: AgentItem | None = None
 
         def finish() -> int:
+            auto_sync.close()
             sys.stdout.write("\x1b[?2004l")
             sys.stdout.flush()
             try:
@@ -1182,9 +1339,31 @@ def run_console(
             return 0
 
         while True:
+            received_update = False
+            while True:
+                try:
+                    update = auto_sync.updates.get_nowait()
+                except queue.Empty:
+                    break
+                received_update = True
+                if update.error and previous_current is not None:
+                    if update.target == AutoSyncWorker._item_key(previous_current):
+                        status = f"Automatic sync failed: {update.error}"
+            if received_update:
+                items = all_agent_items(cache, include_local=include_local)
+                outgoing = cache.outbox(states=("pending", "failed"))
+                selected = restored_selection(
+                    filtered_items(items, query), previous_current
+                )
             shown = filtered_items(items, query)
             selected = max(0, min(selected, len(shown) - 1)) if shown else 0
-            current = shown[selected] if shown else None
+            current = (
+                None
+                if settings_selected
+                else (shown[selected] if shown else None)
+            )
+            previous_current = current
+            auto_sync.select(current, active_sync_mode)
             height, width = stdscr.getmaxyx()
             stdscr.erase()
             if height < 10 or width < 60:
@@ -1226,8 +1405,51 @@ def run_console(
                     pass
 
                 row = 3
+                settings_focused = settings_selected and focus == "agents"
+                settings_attr = (
+                    palette["selected"]
+                    if settings_focused
+                    else palette["header"]
+                    if settings_selected
+                    else palette["normal"]
+                )
+                if settings_focused:
+                    add_text(
+                        stdscr,
+                        row,
+                        1,
+                        " " * (sidebar - 2),
+                        sidebar - 2,
+                        palette["selected"],
+                    )
+                add_text(
+                    stdscr,
+                    row,
+                    1,
+                    "›" if settings_selected else " ",
+                    1,
+                    settings_attr,
+                )
+                add_text(
+                    stdscr,
+                    row,
+                    3,
+                    "Settings",
+                    sidebar - 4,
+                    settings_attr,
+                )
+                row += 1
+                add_text(
+                    stdscr,
+                    row,
+                    4,
+                    f"Sync: {active_sync_mode}",
+                    sidebar - 5,
+                    palette["path"],
+                )
+                row += 2
                 previous_host = None
-                visible_start = max(0, selected - max(0, (height - 6) // 3))
+                visible_start = max(0, selected - max(0, (height - 9) // 3))
                 for index, item in enumerate(shown[visible_start:], visible_start):
                     if row >= height - 2:
                         break
@@ -1302,7 +1524,91 @@ def run_console(
                         )
                         row += 1
 
-            if current:
+            if settings_selected:
+                heading = (
+                    palette["focus"]
+                    if focus == "conversation"
+                    else palette["header"]
+                )
+                add_text(
+                    stdscr,
+                    0,
+                    main_x + 2,
+                    "Settings",
+                    main_width - 4,
+                    heading,
+                )
+                detail = status or "Agent Console preferences"
+                add_text(
+                    stdscr,
+                    1,
+                    main_x + 2,
+                    detail,
+                    main_width - 4,
+                    palette["muted"],
+                )
+                add_text(
+                    stdscr,
+                    3,
+                    main_x + 2,
+                    "Automatic synchronization",
+                    main_width - 4,
+                    palette["header"] | curses.A_BOLD,
+                )
+                row = 5
+                for index, mode in enumerate(SYNC_MODES):
+                    chosen = mode == active_sync_mode
+                    highlighted = (
+                        index == settings_choice and focus == "conversation"
+                    )
+                    marker = "●" if chosen else "○"
+                    attr = palette["selected"] if highlighted else palette["normal"]
+                    if highlighted:
+                        add_text(
+                            stdscr,
+                            row,
+                            main_x + 1,
+                            " " * (main_width - 2),
+                            main_width - 2,
+                            palette["selected"],
+                        )
+                    add_text(
+                        stdscr,
+                        row,
+                        main_x + 2,
+                        f"{marker} {mode.capitalize()}",
+                        main_width - 4,
+                        attr,
+                    )
+                    detail_lines = textwrap.wrap(
+                        SYNC_MODE_DETAILS[mode],
+                        width=max(8, main_width - 6),
+                        break_long_words=False,
+                        break_on_hyphens=False,
+                    )[:2]
+                    for detail_offset, detail_line in enumerate(
+                        detail_lines, start=1
+                    ):
+                        if row + detail_offset >= height - 1:
+                            break
+                        add_text(
+                            stdscr,
+                            row + detail_offset,
+                            main_x + 4,
+                            detail_line,
+                            main_width - 6,
+                            palette["muted"],
+                        )
+                    row += 2 + len(detail_lines)
+                add_text(
+                    stdscr,
+                    height - 1,
+                    main_x + 2,
+                    "↑↓ choose · Enter apply · Tab switch pane",
+                    main_width - 4,
+                    palette["status"],
+                )
+            elif current:
                 agent = current.agent
                 draft_key = (current.host_id, str(agent["agent_id"]))
                 draft = drafts.setdefault(draft_key, ComposerBuffer())
@@ -1395,16 +1701,26 @@ def run_console(
                     palette["muted"],
                 )
 
-            if not current:
+            if not current and not settings_selected:
                 footer = status or "No agent selected · ^F find · ^S sync all · ^C×2 quit"
                 add_text(stdscr, height - 1, 1, footer, width - 2, palette["status"])
             try:
-                curses.curs_set(1 if current and focus == "conversation" else 0)
+                curses.curs_set(
+                    1
+                    if current and focus == "conversation" and not settings_selected
+                    else 0
+                )
             except curses.error:
                 pass
             stdscr.refresh()
             status = ""
-            key = stdscr.get_wch()
+            try:
+                stdscr.timeout(200)
+                key = stdscr.get_wch()
+            except curses.error:
+                continue
+            finally:
+                stdscr.timeout(-1)
             code = key_code(key)
             interrupt_armed, should_exit = advance_interrupt(
                 interrupt_armed, code if code is not None else -1
@@ -1415,7 +1731,7 @@ def run_console(
                 status = "Press Ctrl-C again to quit."
                 continue
             if code == 9:
-                if current is not None:
+                if current is not None or settings_selected:
                     focus, maximized = change_pane(focus, maximized, code)
                 else:
                     focus = "agents"
@@ -1428,25 +1744,62 @@ def run_console(
                 if delta:
                     focus = "conversation"
                     scroll = max(0, min(max_scroll, scroll + delta))
-            elif code == curses.KEY_RIGHT and focus == "agents":
+            elif (
+                code in (curses.KEY_RIGHT, 13, curses.KEY_ENTER)
+                and focus == "agents"
+            ):
                 focus = "conversation"
             elif code == curses.KEY_SLEFT and focus == "conversation":
                 focus = "agents"
+            elif (
+                settings_selected
+                and focus == "conversation"
+                and code in (curses.KEY_LEFT, curses.KEY_UP, curses.KEY_DOWN, 10, 13, curses.KEY_ENTER)
+            ):
+                if code == curses.KEY_LEFT:
+                    focus = "agents"
+                elif code in (curses.KEY_UP, curses.KEY_DOWN):
+                    settings_choice = max(
+                        0,
+                        min(
+                            len(SYNC_MODES) - 1,
+                            settings_choice
+                            + (-1 if code == curses.KEY_UP else 1),
+                        ),
+                    )
+                else:
+                    selected_mode = SYNC_MODES[settings_choice]
+                    try:
+                        user_config.set_value("agents.sync_mode", selected_mode)
+                        active_sync_mode = selected_mode
+                        auto_sync.select(None, active_sync_mode)
+                        status = f"Automatic sync set to {selected_mode}."
+                    except (OSError, ValueError) as exc:
+                        status = f"Could not save setting: {exc}"
             elif code == curses.KEY_LEFT and focus == "conversation" and current:
                 draft = drafts[(current.host_id, str(current.agent["agent_id"]))]
                 if draft.cursor == 0:
                     focus = "agents"
                 else:
                     draft.move(-1)
-            elif code in (curses.KEY_UP, curses.KEY_DOWN) and shown:
+            elif code in (curses.KEY_UP, curses.KEY_DOWN):
                 if focus == "agents":
-                    selected = max(
-                        0,
-                        min(
-                            len(shown) - 1,
-                            selected + (-1 if code == curses.KEY_UP else 1),
-                        ),
-                    )
+                    if settings_selected:
+                        if code == curses.KEY_DOWN and shown:
+                            settings_selected = False
+                            selected = 0
+                    elif code == curses.KEY_UP and selected == 0:
+                        settings_selected = True
+                        settings_choice = SYNC_MODES.index(active_sync_mode)
+                    elif shown:
+                        selected = max(
+                            0,
+                            min(
+                                len(shown) - 1,
+                                selected
+                                + (-1 if code == curses.KEY_UP else 1),
+                            ),
+                        )
                     scroll = 0
                 elif current:
                     draft = drafts[(current.host_id, str(current.agent["agent_id"]))]
@@ -1465,6 +1818,7 @@ def run_console(
                 entered = edit_line(stdscr, "Find: ", query)
                 if entered is not None:
                     query = entered; selected = 0; scroll = 0
+                    settings_selected = False
                     focus = "agents"
             elif code == 22 and current:  # Ctrl-V
                 show_status(stdscr, "Opening viewer…", palette["status"])
@@ -1671,6 +2025,9 @@ def run_console(
 def command_ui(args: argparse.Namespace) -> int:
     cache = relay_cache.RelayCache(args.cache_file)
     no_local = getattr(args, "no_local", False)
+    sync_mode = getattr(args, "sync", None) or str(
+        user_config.value("agents.sync_mode")
+    )
     if not args.no_refresh and not no_local:
         count = relay_cache.refresh_local(
             cache,
@@ -1693,6 +2050,7 @@ def command_ui(args: argparse.Namespace) -> int:
             relay_config=getattr(
                 args, "relay_config", paths.RELAY_CONFIG_FILE
             ),
+            sync_mode=sync_mode,
         )
     except curses.error as exc:
         print(f"error: could not start Agent Console: {exc}", file=sys.stderr)
