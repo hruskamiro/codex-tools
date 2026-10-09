@@ -22,3 +22,4 @@ daily_summary_site/
 docs/ideas.md
 scripts/relay-loopback-serve
 scripts/relay-loopback-sync
+scripts/relay-vpn-serve
