@@ -1088,6 +1088,10 @@ def run_console(
     def run(stdscr: Any) -> int:
         curses.curs_set(0)
         curses.raw()
+        # Keep physical Enter (CR) distinct from Ctrl-J (LF).  In curses'
+        # default newline mode both arrive as LF, which makes Enter insert a
+        # newline instead of sending the draft.
+        curses.nonl()
         stdscr.keypad(True)
         try:
             curses.mousemask(curses.ALL_MOUSE_EVENTS)
@@ -1115,6 +1119,7 @@ def run_console(
                 curses.mousemask(0)
             except curses.error:
                 pass
+            curses.nl()
             curses.noraw()
             return 0
 
