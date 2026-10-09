@@ -12,6 +12,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
+from urllib.error import HTTPError
 from urllib.parse import quote, unquote, urlparse
 from urllib.request import Request, urlopen
 
@@ -20,6 +21,7 @@ from codex_tools import paths, relay_cache
 
 PROTOCOL_VERSION = 1
 MAX_SNAPSHOT_BYTES = 32 * 1024 * 1024
+MAX_MESSAGE_BYTES = 128 * 1024
 
 
 def load_config(path: Path = paths.RELAY_CONFIG_FILE) -> dict[str, Any]:
@@ -310,11 +312,91 @@ def fetch_json(
     return payload
 
 
+def post_message(
+    peer: dict[str, Any], message: dict[str, Any], timeout: float = 10.0
+) -> dict[str, Any]:
+    body = json.dumps(message, ensure_ascii=False).encode("utf-8")
+    if len(body) > MAX_MESSAGE_BYTES:
+        raise ValueError("relay message exceeds the 128 KiB safety limit")
+    request = Request(
+        str(peer["url"]).rstrip("/") + "/v1/messages",
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {peer['token']}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+    )
+    context = None
+    if str(peer["url"]).startswith("https://"):
+        context = ssl.create_default_context(cafile=peer.get("ca_file") or None)
+    with urlopen(request, timeout=timeout, context=context) as response:
+        response_body = response.read(MAX_MESSAGE_BYTES + 1)
+    if len(response_body) > MAX_MESSAGE_BYTES:
+        raise ValueError("relay response exceeds the 128 KiB safety limit")
+    payload = json.loads(response_body)
+    if not isinstance(payload, dict):
+        raise ValueError("relay returned an invalid message response")
+    return payload
+
+
+def deliver_pending(
+    cache: relay_cache.RelayCache,
+    peer: dict[str, Any],
+    host_id: str,
+) -> dict[str, Any]:
+    """Attempt every pending message once, preserving failures for retry."""
+    result: dict[str, Any] = {
+        "delivered": 0,
+        "pending": 0,
+        "failed": 0,
+        "errors": [],
+    }
+    pending_items = cache.pending(host_id)
+    for index, item in enumerate(pending_items):
+        message_id = str(item["message_id"])
+        request_payload = {
+            "message_id": message_id,
+            "agent_id": str(item["agent_id"]),
+            "kind": str(item["kind"]),
+            "payload": item["payload"],
+        }
+        try:
+            response = post_message(peer, request_payload)
+            if response.get("delivery") != "accepted":
+                raise ValueError("relay did not acknowledge the message")
+        except HTTPError as exc:
+            permanent = exc.code in {
+                HTTPStatus.BAD_REQUEST,
+                HTTPStatus.CONFLICT,
+                HTTPStatus.GONE,
+            }
+            state = "failed" if permanent else "pending"
+            error = f"HTTP {exc.code}: {exc.reason}"
+            cache.record_outbox_attempt(message_id, state=state, error=error)
+            result[state] += 1
+            result["errors"].append({"message_id": message_id, "error": error})
+        except (OSError, ValueError) as exc:
+            error = str(exc)
+            cache.record_outbox_attempt(
+                message_id, state="pending", error=error
+            )
+            result["pending"] += len(pending_items) - index
+            result["errors"].append({"message_id": message_id, "error": error})
+            break
+        else:
+            cache.record_outbox_attempt(message_id, state="delivered")
+            result["delivered"] += 1
+    return result
+
+
 def make_handler(
     cache: relay_cache.RelayCache,
     config: dict[str, Any],
     refresh: Callable[[], None] | None = None,
     refresh_agent: Callable[[str], None] | None = None,
+    deliver_message: Callable[[str, str, dict[str, Any]], None] | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     token = str(config["identity"]["token"])
 
@@ -354,6 +436,77 @@ def make_handler(
             else:
                 self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
+        def do_POST(self) -> None:
+            request_path = urlparse(self.path).path
+            supplied = self.headers.get("Authorization", "")
+            if not hmac.compare_digest(supplied, f"Bearer {token}"):
+                self._json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
+                return
+            if request_path != "/v1/messages" or deliver_message is None:
+                self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if (
+                    self.headers.get_content_type() != "application/json"
+                    or length < 1
+                    or length > MAX_MESSAGE_BYTES
+                ):
+                    raise ValueError("invalid message request")
+                request_payload = json.loads(self.rfile.read(length))
+                if not isinstance(request_payload, dict):
+                    raise ValueError("JSON object required")
+                message_id = str(request_payload.get("message_id") or "")
+                agent_id = str(request_payload.get("agent_id") or "")
+                kind = str(request_payload.get("kind") or "")
+                payload = request_payload.get("payload")
+                if (
+                    not message_id
+                    or not agent_id
+                    or kind != "message"
+                    or not isinstance(payload, dict)
+                    or not isinstance(payload.get("text"), str)
+                    or not payload["text"].strip()
+                ):
+                    raise ValueError("invalid relay message")
+                reservation = cache.begin_incoming(
+                    message_id, agent_id, kind, payload
+                )
+                if reservation in {"accepted", "processing"}:
+                    self._json(
+                        {
+                            "delivery": reservation,
+                            "message_id": message_id,
+                            "duplicate": True,
+                        }
+                    )
+                    return
+                try:
+                    deliver_message(message_id, agent_id, payload)
+                except FileNotFoundError as exc:
+                    cache.finish_incoming(
+                        message_id, accepted=False, error=str(exc)
+                    )
+                    self._json({"error": str(exc)}, HTTPStatus.GONE)
+                    return
+                except (OSError, RuntimeError, ValueError) as exc:
+                    cache.finish_incoming(
+                        message_id, accepted=False, error=str(exc)
+                    )
+                    self._json({"error": str(exc)}, HTTPStatus.BAD_GATEWAY)
+                    return
+                cache.finish_incoming(message_id, accepted=True)
+                self._json(
+                    {"delivery": "accepted", "message_id": message_id}
+                )
+            except ValueError as exc:
+                status = (
+                    HTTPStatus.CONFLICT
+                    if "already used" in str(exc)
+                    else HTTPStatus.BAD_REQUEST
+                )
+                self._json({"error": str(exc)}, status)
+
         def _json(self, payload: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             self.send_response(status)
@@ -377,6 +530,7 @@ def serve(
     allow_insecure_http: bool = False,
     refresh: Callable[[], None] | None = None,
     refresh_agent: Callable[[str], None] | None = None,
+    deliver_message: Callable[[str, str, dict[str, Any]], None] | None = None,
 ) -> None:
     validate_server_transport(
         host,
@@ -387,7 +541,7 @@ def serve(
     )
     server = ThreadingHTTPServer(
         (host, port),
-        make_handler(cache, config, refresh, refresh_agent),
+        make_handler(cache, config, refresh, refresh_agent, deliver_message),
     )
     if tls_cert and tls_key:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)

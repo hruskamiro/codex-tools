@@ -10,7 +10,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from codex_tools import paths, relay_cache, relay_transport, search
+from codex_tools import agents_ui, paths, relay_cache, relay_transport, search
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -113,6 +113,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help=argparse.SUPPRESS,
     )
+    serve.add_argument("--codex-bin", default="codex", help=argparse.SUPPRESS)
+
+    outbox = commands.add_parser(
+        "outbox", help="Show outgoing remote messages and delivery states."
+    )
+    outbox.add_argument("--json", action="store_true")
+    outbox.add_argument(
+        "--cache-file",
+        type=Path,
+        default=relay_cache.DEFAULT_CACHE_PATH,
+        help=argparse.SUPPRESS,
+    )
 
     cache = commands.add_parser("cache", help="Inspect or refresh the local relay cache.")
     cache_commands = cache.add_subparsers(dest="cache_command", required=True)
@@ -173,11 +185,33 @@ def command_status(args: argparse.Namespace) -> int:
         print("No cached hosts.")
         return 0
     print()
-    print(f"{'HOST':20} {'AGENTS':>8} {'PENDING':>8} LAST SYNC")
+    print(f"{'HOST':20} {'AGENTS':>8} {'PENDING':>8} {'FAILED':>7} LAST SYNC")
     for host in hosts:
         print(
             f"{str(host['name'])[:20]:20} {int(host['agent_count']):>8} "
-            f"{int(host['pending_count']):>8} {host['last_sync_at'] or '-'}"
+            f"{int(host['pending_count']):>8} {int(host['failed_count']):>7} "
+            f"{host['last_sync_at'] or '-'}"
+        )
+    return 0
+
+
+def command_outbox(args: argparse.Namespace) -> int:
+    messages = relay_cache.RelayCache(args.cache_file).outbox()
+    if args.json:
+        print(json.dumps(messages, ensure_ascii=False, indent=2))
+        return 0
+    if not messages:
+        print("No outgoing relay messages.")
+        return 0
+    print(f"{'STATE':10} {'MESSAGE':10} {'AGENT':10} {'ATTEMPTS':>8} DETAIL")
+    for item in messages:
+        text = str(item.get("payload", {}).get("text") or "")
+        detail = str(item.get("last_error") or text).replace("\n", " ")
+        if len(detail) > 70:
+            detail = detail[:69] + "…"
+        print(
+            f"{str(item['state'])[:10]:10} {str(item['message_id'])[:8]:10} "
+            f"{str(item['agent_id'])[:8]:10} {int(item['attempt_count']):>8} {detail}"
         )
     return 0
 
@@ -248,10 +282,20 @@ def command_sync(args: argparse.Namespace) -> int:
     if not isinstance(peer, dict):
         raise FileNotFoundError(f"relay peer not found: {args.peer}")
     payload = relay_transport.fetch_snapshot(peer)
+    cache = relay_cache.RelayCache(args.cache_file)
     count = relay_transport.apply_snapshot(
-        relay_cache.RelayCache(args.cache_file), payload, base_url=str(peer["url"])
+        cache, payload, base_url=str(peer["url"])
     )
-    print(f"Synchronized {count} agent(s) from {payload['host']['name']}.")
+    delivery = relay_transport.deliver_pending(
+        cache, peer, str(payload["host"]["id"])
+    )
+    message = f"Synchronized {count} agent(s) from {payload['host']['name']}."
+    if delivery["delivered"] or delivery["pending"] or delivery["failed"]:
+        message += (
+            f" Messages: {delivery['delivered']} delivered, "
+            f"{delivery['pending']} pending, {delivery['failed']} failed."
+        )
+    print(message)
     return 0
 
 
@@ -276,6 +320,26 @@ def command_serve(args: argparse.Namespace) -> int:
         f"Serving {count} local agent(s) at {scheme}://{args.host}:{args.port}",
         flush=True,
     )
+
+    def deliver_message(
+        _message_id: str, agent_id: str, payload: dict[str, object]
+    ) -> None:
+        try:
+            relay_cache.refresh_local_agent(
+                cache,
+                agent_id,
+                args.sessions_root,
+                args.session_index,
+                args.control_socket,
+            )
+        except ValueError as exc:
+            raise FileNotFoundError(str(exc)) from exc
+        agents_ui.send_message(
+            cache,
+            {"host": "local", "agent": agent_id, "message": payload.get("text")},
+            args.codex_bin,
+        )
+
     relay_transport.serve(
         cache,
         config,
@@ -297,6 +361,7 @@ def command_serve(args: argparse.Namespace) -> int:
             args.session_index,
             args.control_socket,
         ),
+        deliver_message=deliver_message,
     )
     return 0
 
@@ -316,6 +381,8 @@ def main(argv: list[str] | None = None) -> int:
             return command_sync(args)
         if args.relay_command == "serve":
             return command_serve(args)
+        if args.relay_command == "outbox":
+            return command_outbox(args)
         if args.relay_command == "cache" and args.cache_command == "refresh":
             return command_refresh(args)
         if args.relay_command == "cache" and args.cache_command == "status":

@@ -6,6 +6,7 @@ import json
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from email.message import Message
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -87,6 +88,47 @@ class RelayTransportTests(unittest.TestCase):
             )
 
         self.assertTrue(server.closed)
+
+    def test_relay_server_delivery_queues_message_into_local_codex(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            args = argparse.Namespace(
+                config_file=root / "relay.json",
+                cache_file=root / "relay.sqlite3",
+                host="127.0.0.1",
+                port=8780,
+                tls_cert=None,
+                tls_key=None,
+                allow_insecure_http=False,
+                sessions_root=root / "sessions",
+                session_index=root / "index.jsonl",
+                control_socket=None,
+                codex_bin="codex-test",
+            )
+            config = {
+                "identity": {"id": "host", "name": "Desktop", "token": "key"},
+                "peers": {},
+            }
+            with (
+                patch.object(relay.relay_transport, "load_config", return_value=config),
+                patch.object(relay.relay_transport, "validate_server_transport"),
+                patch.object(relay.relay_cache, "refresh_local", return_value=1),
+                patch.object(relay.relay_cache, "refresh_local_agent") as refresh_agent,
+                patch.object(relay.agents_ui, "send_message") as send_message,
+                patch.object(relay.relay_transport, "serve") as serve,
+                redirect_stdout(io.StringIO()),
+            ):
+                result = relay.command_serve(args)
+                deliver = serve.call_args.kwargs["deliver_message"]
+                deliver("message-1", "agent-1", {"text": "Continue"})
+
+        self.assertEqual(result, 0)
+        refresh_agent.assert_called_once()
+        self.assertEqual(
+            send_message.call_args.args[1],
+            {"host": "local", "agent": "agent-1", "message": "Continue"},
+        )
+        self.assertEqual(send_message.call_args.args[2], "codex-test")
 
     def test_initialize_creates_private_identity_and_refuses_overwrite(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -201,6 +243,144 @@ class RelayTransportTests(unittest.TestCase):
         self.assertEqual(
             opened.call_args.args[0].full_url,
             "http://localhost:8780/v1/agents/agent%20one",
+        )
+
+    def test_post_message_uses_authenticated_json_request(self) -> None:
+        response = FakeResponse(
+            json.dumps({"delivery": "accepted", "message_id": "message-1"}).encode()
+        )
+        message = {
+            "message_id": "message-1",
+            "agent_id": "agent-1",
+            "kind": "message",
+            "payload": {"text": "Continue"},
+        }
+
+        with patch.object(relay_transport, "urlopen", return_value=response) as opened:
+            result = relay_transport.post_message(
+                {"url": "http://localhost:8780", "token": "pairing-key"},
+                message,
+            )
+
+        request = opened.call_args.args[0]
+        self.assertEqual(result["delivery"], "accepted")
+        self.assertEqual(request.full_url, "http://localhost:8780/v1/messages")
+        self.assertEqual(request.method, "POST")
+        self.assertEqual(request.get_header("Authorization"), "Bearer pairing-key")
+        self.assertEqual(json.loads(request.data), message)
+
+    def test_deliver_pending_marks_acknowledged_message_delivered(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = relay_cache.RelayCache(Path(temporary) / "relay.sqlite3")
+            cache.replace_host_snapshot("home", "Home", [agent()])
+            message_id = cache.enqueue("home", "agent-1", {"text": "Continue"})
+
+            with patch.object(
+                relay_transport,
+                "post_message",
+                return_value={"delivery": "accepted", "message_id": message_id},
+            ) as post:
+                result = relay_transport.deliver_pending(
+                    cache,
+                    {"url": "https://home:8780", "token": "key"},
+                    "home",
+                )
+
+            self.assertEqual(result["delivered"], 1)
+            self.assertEqual(cache.outbox()[0]["state"], "delivered")
+            self.assertEqual(post.call_args.args[1]["message_id"], message_id)
+
+    def test_deliver_pending_keeps_network_failure_for_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = relay_cache.RelayCache(Path(temporary) / "relay.sqlite3")
+            cache.replace_host_snapshot("home", "Home", [agent()])
+            first = cache.enqueue("home", "agent-1", {"text": "Continue"})
+            second = cache.enqueue("home", "agent-1", {"text": "And then"})
+
+            with patch.object(
+                relay_transport,
+                "post_message",
+                side_effect=OSError("network unavailable"),
+            ) as post:
+                result = relay_transport.deliver_pending(
+                    cache,
+                    {"url": "https://home:8780", "token": "key"},
+                    "home",
+                )
+
+            messages = {item["message_id"]: item for item in cache.outbox()}
+            self.assertEqual(result["pending"], 2)
+            self.assertEqual(messages[first]["state"], "pending")
+            self.assertEqual(messages[first]["last_error"], "network unavailable")
+            self.assertEqual(messages[second]["attempt_count"], 0)
+            post.assert_called_once()
+
+    def test_deliver_pending_marks_gone_agent_as_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = relay_cache.RelayCache(Path(temporary) / "relay.sqlite3")
+            cache.replace_host_snapshot("home", "Home", [agent()])
+            cache.enqueue("home", "agent-1", {"text": "Continue"})
+            gone = relay_transport.HTTPError(
+                "https://home:8780/v1/messages",
+                410,
+                "Gone",
+                {},
+                None,
+            )
+
+            with patch.object(
+                relay_transport, "post_message", side_effect=gone
+            ):
+                result = relay_transport.deliver_pending(
+                    cache,
+                    {"url": "https://home:8780", "token": "key"},
+                    "home",
+                )
+
+            self.assertEqual(result["failed"], 1)
+            self.assertEqual(cache.outbox()[0]["state"], "failed")
+
+    def test_message_endpoint_authenticates_and_deduplicates_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = relay_cache.RelayCache(Path(temporary) / "relay.sqlite3")
+            delivered: list[tuple[str, str, dict[str, str]]] = []
+            handler = relay_transport.make_handler(
+                cache,
+                {"identity": {"token": "secret"}},
+                deliver_message=lambda message_id, agent_id, payload: delivered.append(
+                    (message_id, agent_id, payload)  # type: ignore[arg-type]
+                ),
+            )
+            message = {
+                "message_id": "message-1",
+                "agent_id": "agent-1",
+                "kind": "message",
+                "payload": {"text": "Continue"},
+            }
+
+            def request() -> dict[str, object]:
+                body = json.dumps(message).encode()
+                headers = Message()
+                headers["Authorization"] = "Bearer secret"
+                headers["Content-Type"] = "application/json"
+                headers["Content-Length"] = str(len(body))
+                instance = handler.__new__(handler)
+                instance.path = "/v1/messages"
+                instance.headers = headers
+                instance.rfile = io.BytesIO(body)
+                responses: list[dict[str, object]] = []
+                instance._json = lambda payload, status=relay_transport.HTTPStatus.OK: responses.append(payload)  # type: ignore[method-assign]
+                instance.do_POST()
+                return responses[0]
+
+            first = request()
+            second = request()
+
+        self.assertEqual(first["delivery"], "accepted")
+        self.assertTrue(second["duplicate"])
+        self.assertEqual(
+            delivered,
+            [("message-1", "agent-1", {"text": "Continue"})],
         )
 
     def test_agent_snapshot_updates_one_conversation_without_pruning(self) -> None:

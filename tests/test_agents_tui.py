@@ -7,6 +7,8 @@ from codex_tools import agents_tui, viewer
 
 
 class AgentTuiTests(unittest.TestCase):
+    DELIVERY = {"delivered": 0, "pending": 0, "failed": 0, "errors": []}
+
     def test_composer_buffer_edits_at_cursor(self) -> None:
         buffer = agents_tui.ComposerBuffer("helo", 3)
 
@@ -72,6 +74,19 @@ class AgentTuiTests(unittest.TestCase):
 
         self.assertEqual(drafts[("local", "one")].text, "first!")
         self.assertEqual(drafts[("remote", "two")].text, "second")
+
+    def test_agent_delivery_counts_pending_and_failed_messages(self) -> None:
+        messages = [
+            {"host_id": "home", "agent_id": "one", "state": "pending"},
+            {"host_id": "home", "agent_id": "one", "state": "failed"},
+            {"host_id": "home", "agent_id": "two", "state": "pending"},
+            {"host_id": "home", "agent_id": "one", "state": "delivered"},
+        ]
+
+        self.assertEqual(
+            agents_tui.agent_delivery_counts(messages, "home", "one"),
+            (1, 1),
+        )
 
     def test_composer_draws_only_prompt_and_draft(self) -> None:
         class Window:
@@ -257,10 +272,15 @@ class AgentTuiTests(unittest.TestCase):
                 "apply_snapshot",
                 return_value=3,
             ) as apply,
+            patch.object(
+                agents_tui.relay_transport,
+                "deliver_pending",
+                return_value=self.DELIVERY,
+            ),
         ):
             result = agents_tui.sync_peer(object(), config, "desktop")  # type: ignore[arg-type]
 
-        self.assertEqual(result, (3, "Desktop"))
+        self.assertEqual(result, (3, "Desktop", self.DELIVERY))
         fetch.assert_called_once_with(config["peers"]["desktop"])
         self.assertEqual(
             apply.call_args.kwargs["base_url"],
@@ -291,12 +311,17 @@ class AgentTuiTests(unittest.TestCase):
                 agents_tui.relay_transport,
                 "apply_agent_snapshot",
             ) as apply,
+            patch.object(
+                agents_tui.relay_transport,
+                "deliver_pending",
+                return_value=self.DELIVERY,
+            ),
         ):
             host = agents_tui.sync_agent(
                 object(), config, "desktop", "selected"  # type: ignore[arg-type]
             )
 
-        self.assertEqual(host, "Desktop")
+        self.assertEqual(host, ("Desktop", self.DELIVERY))
         fetch.assert_called_once_with(
             config["peers"]["desktop"], "selected"
         )
@@ -346,12 +371,17 @@ class AgentTuiTests(unittest.TestCase):
                 agents_tui.relay_transport,
                 "apply_agent_snapshot",
             ) as apply,
+            patch.object(
+                agents_tui.relay_transport,
+                "deliver_pending",
+                return_value=self.DELIVERY,
+            ),
         ):
             host = agents_tui.sync_agent(
                 object(), config, "desktop", "selected"  # type: ignore[arg-type]
             )
 
-        self.assertEqual(host, "Desktop")
+        self.assertEqual(host, ("Desktop", self.DELIVERY))
         fetch_snapshot.assert_called_once_with(config["peers"]["desktop"])
         self.assertEqual(apply.call_args.args[1]["agent"]["agent_id"], "selected")
 
@@ -386,12 +416,17 @@ class AgentTuiTests(unittest.TestCase):
                 agents_tui.relay_transport,
                 "apply_agent_snapshot",
             ) as apply,
+            patch.object(
+                agents_tui.relay_transport,
+                "deliver_pending",
+                return_value=self.DELIVERY,
+            ),
         ):
             host = agents_tui.sync_agent(
                 object(), config, "desktop", "selected"  # type: ignore[arg-type]
             )
 
-        self.assertIsNone(host)
+        self.assertEqual(host, (None, self.DELIVERY))
         apply.assert_not_called()
 
     def test_remote_agent_opens_source_aware_viewer_route(self) -> None:

@@ -14,7 +14,7 @@ from typing import Any, Iterator, Sequence
 from codex_tools import agents, paths, search
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 DEFAULT_CACHE_PATH = paths.RELAY_CACHE_FILE
 RECENT_RECORD_LIMIT = 20
 RECENT_LINE_LIMIT = 20_000
@@ -77,7 +77,7 @@ class RelayCache:
 
     def _ensure_schema(self, connection: sqlite3.Connection) -> None:
         version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-        if version not in {0, 1, SCHEMA_VERSION}:
+        if version not in {0, 1, 2, SCHEMA_VERSION}:
             raise ValueError(
                 f"unsupported relay cache schema {version}; expected {SCHEMA_VERSION}"
             )
@@ -135,13 +135,29 @@ class RelayCache:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 delivered_at TEXT,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
                 FOREIGN KEY (host_id) REFERENCES relay_hosts(host_id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS relay_inbox (
+                message_id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                state TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                accepted_at TEXT,
+                last_error TEXT
             );
 
             CREATE INDEX IF NOT EXISTS relay_agents_updated
                 ON relay_agents(host_id, updated_at DESC);
             CREATE INDEX IF NOT EXISTS relay_outbox_state
                 ON relay_outbox(host_id, state, created_at);
+            CREATE INDEX IF NOT EXISTS relay_inbox_state
+                ON relay_inbox(state, created_at);
             """
         )
         agent_columns = {
@@ -155,6 +171,18 @@ class RelayCache:
         if "status_label" not in agent_columns:
             connection.execute(
                 "ALTER TABLE relay_agents ADD COLUMN status_label TEXT NOT NULL DEFAULT 'unknown'"
+            )
+        outbox_columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(relay_outbox)")
+        }
+        if "attempt_count" not in outbox_columns:
+            connection.execute(
+                "ALTER TABLE relay_outbox ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0"
+            )
+        if "last_error" not in outbox_columns:
+            connection.execute(
+                "ALTER TABLE relay_outbox ADD COLUMN last_error TEXT"
             )
         connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         connection.commit()
@@ -314,7 +342,11 @@ class RelayCache:
                 SELECT h.*,
                        COUNT(DISTINCT a.agent_id) AS agent_count,
                        COUNT(DISTINCT CASE WHEN o.state = 'pending'
-                                          THEN o.message_id END) AS pending_count
+                                          THEN o.message_id END) AS pending_count,
+                       COUNT(DISTINCT CASE WHEN o.state = 'failed'
+                                          THEN o.message_id END) AS failed_count,
+                       COUNT(DISTINCT CASE WHEN o.state = 'delivered'
+                                          THEN o.message_id END) AS delivered_count
                 FROM relay_hosts h
                 LEFT JOIN relay_agents a ON a.host_id = h.host_id
                 LEFT JOIN relay_outbox o ON o.host_id = h.host_id
@@ -381,11 +413,25 @@ class RelayCache:
         return selected_id
 
     def pending(self, host_id: str | None = None) -> list[dict[str, Any]]:
-        query = "SELECT * FROM relay_outbox WHERE state = 'pending'"
-        values: tuple[Any, ...] = ()
+        return self.outbox(host_id=host_id, states=("pending",))
+
+    def outbox(
+        self,
+        host_id: str | None = None,
+        *,
+        states: Sequence[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        query = "SELECT * FROM relay_outbox"
+        clauses = []
+        values: list[Any] = []
+        if states:
+            clauses.append("state IN (" + ",".join("?" for _ in states) + ")")
+            values.extend(states)
         if host_id is not None:
-            query += " AND host_id = ?"
-            values = (host_id,)
+            clauses.append("host_id = ?")
+            values.append(host_id)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY created_at, message_id"
         with self.connect() as connection:
             rows = connection.execute(query, values).fetchall()
@@ -395,6 +441,93 @@ class RelayCache:
             item["payload"] = json.loads(item.pop("payload_json"))
             result.append(item)
         return result
+
+    def record_outbox_attempt(
+        self,
+        message_id: str,
+        *,
+        state: str,
+        error: str = "",
+    ) -> None:
+        if state not in {"pending", "delivered", "failed"}:
+            raise ValueError(f"invalid outbox state: {state}")
+        now = utc_now()
+        with self.connect() as connection, connection:
+            cursor = connection.execute(
+                """
+                UPDATE relay_outbox
+                SET state = ?, updated_at = ?,
+                    delivered_at = CASE WHEN ? = 'delivered' THEN ? ELSE delivered_at END,
+                    attempt_count = attempt_count + 1,
+                    last_error = NULLIF(?, '')
+                WHERE message_id = ?
+                """,
+                (state, now, state, now, error, message_id),
+            )
+            if cursor.rowcount != 1:
+                raise FileNotFoundError(f"outbox message not found: {message_id}")
+
+    def begin_incoming(
+        self,
+        message_id: str,
+        agent_id: str,
+        kind: str,
+        payload: dict[str, Any],
+    ) -> str:
+        """Reserve an incoming ID and return new, retry, or its existing state."""
+        now = utc_now()
+        encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        with self.connect() as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT agent_id, kind, payload_json, state FROM relay_inbox WHERE message_id = ?",
+                (message_id,),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    str(existing["agent_id"]) != agent_id
+                    or str(existing["kind"]) != kind
+                    or str(existing["payload_json"]) != encoded
+                ):
+                    raise ValueError("message ID was already used with different content")
+                if str(existing["state"]) != "failed":
+                    return str(existing["state"])
+                connection.execute(
+                    """
+                    UPDATE relay_inbox
+                    SET state = 'processing', updated_at = ?, last_error = NULL
+                    WHERE message_id = ?
+                    """,
+                    (now, message_id),
+                )
+                return "retry"
+            connection.execute(
+                """
+                INSERT INTO relay_inbox(
+                    message_id, agent_id, kind, payload_json, state,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 'processing', ?, ?)
+                """,
+                (message_id, agent_id, kind, encoded, now, now),
+            )
+        return "new"
+
+    def finish_incoming(
+        self, message_id: str, *, accepted: bool, error: str = ""
+    ) -> None:
+        now = utc_now()
+        state = "accepted" if accepted else "failed"
+        with self.connect() as connection, connection:
+            connection.execute(
+                """
+                UPDATE relay_inbox
+                SET state = ?, updated_at = ?,
+                    accepted_at = CASE WHEN ? THEN ? ELSE accepted_at END,
+                    last_error = NULLIF(?, '')
+                WHERE message_id = ?
+                """,
+                (state, now, accepted, now, error, message_id),
+            )
 
 
 def cached_agent_from_local(

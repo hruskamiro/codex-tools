@@ -126,13 +126,14 @@ Viewer routes explicitly identify both presentation and source:
 private relay cache. Remote typesetting is reserved under `/t/relay/...` but is
 not implemented yet.
 
-The relay foundation keeps normalized sessions, messages, synchronization
-cursors, and an idempotent outgoing-message queue in a private local SQLite
-cache. Populate or inspect the local-machine snapshot with:
+The relay keeps normalized sessions, synchronization cursors, and an
+idempotent outgoing-message queue in a private local SQLite cache. Populate or
+inspect the local-machine snapshot and outgoing messages with:
 
 ```bash
 ct relay cache refresh
 ct relay cache status
+ct relay outbox
 ```
 
 To expose one machine and pull its read-only snapshot from another:
@@ -154,14 +155,24 @@ ct agents ui
 `ct relay peers` lists configured connections without exposing their keys. Each
 sync refreshes the serving machine's currently loaded Codex sessions before it
 returns the snapshot, then stores the result in the client's private cache for
-offline viewing.
+offline viewing. Messages written in the Agent Console are committed to the
+local outbox before a network attempt. If the peer is reachable, they are sent
+immediately to its `codex queue`; otherwise they remain pending. Ctrl-R,
+Ctrl-S, and `ct relay sync PEER` retry pending messages. `ct relay outbox`
+shows pending, delivered, and permanently failed messages; add `--json` for
+machine-readable status.
+
+The receiver records each message ID before dispatch and acknowledges accepted
+IDs idempotently, so an ordinary reconnect or repeated sync does not submit the
+same prompt twice. Restart an already-running `ct relay serve` process after
+upgrading so it exposes the authenticated write endpoint.
 
 Plain HTTP is accepted only on loopback by default. When an address is already
 protected by a VPN or an encrypted tunnel, explicitly opt in on both ends with
 `--allow-insecure-http`; the relay itself does not configure or depend on a
-particular VPN. Use HTTPS for an otherwise untrusted network. This first
-transport slice is pull-only: queued message delivery and remote agent control
-remain local until the authenticated write protocol is added.
+particular VPN. Use HTTPS for an otherwise untrusted network. Remote delivery
+currently targets already-running Codex sessions; starting and controlling new
+remote sessions remains future work.
 
 ```bash
 ct viewer                 # choose and open a conversation

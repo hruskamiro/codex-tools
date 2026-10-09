@@ -96,6 +96,55 @@ class RelayCacheTests(unittest.TestCase):
             self.assertEqual(len(pending), 1)
             self.assertEqual(pending[0]["payload"], {"text": "First"})
 
+    def test_outbox_tracks_attempts_delivery_and_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = relay_cache.RelayCache(Path(temporary) / "relay.sqlite3")
+            cache.replace_host_snapshot(
+                "home", "Home", [cached_agent("viewer")]
+            )
+            message_id = cache.enqueue("home", "viewer", {"text": "Continue"})
+
+            cache.record_outbox_attempt(
+                message_id, state="pending", error="offline"
+            )
+            cache.record_outbox_attempt(message_id, state="delivered")
+
+            message = cache.outbox()[0]
+            self.assertEqual(message["state"], "delivered")
+            self.assertEqual(message["attempt_count"], 2)
+            self.assertIsNotNone(message["delivered_at"])
+            self.assertIsNone(message["last_error"])
+            self.assertEqual(cache.pending("home"), [])
+
+    def test_incoming_message_ids_are_idempotent_and_retry_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = relay_cache.RelayCache(Path(temporary) / "relay.sqlite3")
+            payload = {"text": "Continue"}
+
+            self.assertEqual(
+                cache.begin_incoming("message-1", "agent-1", "message", payload),
+                "new",
+            )
+            cache.finish_incoming("message-1", accepted=True)
+            self.assertEqual(
+                cache.begin_incoming("message-1", "agent-1", "message", payload),
+                "accepted",
+            )
+            with self.assertRaisesRegex(ValueError, "different content"):
+                cache.begin_incoming(
+                    "message-1", "agent-1", "message", {"text": "Changed"}
+                )
+
+            self.assertEqual(
+                cache.begin_incoming("message-2", "agent-1", "message", payload),
+                "new",
+            )
+            cache.finish_incoming("message-2", accepted=False, error="busy")
+            self.assertEqual(
+                cache.begin_incoming("message-2", "agent-1", "message", payload),
+                "retry",
+            )
+
     def test_upsert_agent_preserves_other_host_conversations(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             cache = relay_cache.RelayCache(Path(temporary) / "relay.sqlite3")
@@ -257,8 +306,32 @@ class RelayCacheTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         payload = json.loads(output.getvalue())
-        self.assertEqual(payload["schema"], 2)
+        self.assertEqual(payload["schema"], 3)
         self.assertEqual(payload["hosts"][0]["agent_count"], 1)
+
+    def test_outbox_json_reports_persisted_delivery_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "relay.sqlite3"
+            cache = relay_cache.RelayCache(path)
+            cache.replace_host_snapshot(
+                "home", "Home", [cached_agent("one")]
+            )
+            message_id = cache.enqueue("home", "one", {"text": "Continue"})
+            cache.record_outbox_attempt(
+                message_id, state="pending", error="offline"
+            )
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                result = relay.command_outbox(
+                    argparse.Namespace(cache_file=path, json=True)
+                )
+
+        self.assertEqual(result, 0)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload[0]["message_id"], message_id)
+        self.assertEqual(payload[0]["state"], "pending")
+        self.assertEqual(payload[0]["last_error"], "offline")
 
 
 if __name__ == "__main__":

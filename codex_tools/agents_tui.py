@@ -144,7 +144,7 @@ def sync_peer(
     cache: relay_cache.RelayCache,
     config: dict[str, Any],
     peer_name: str,
-) -> tuple[int, str]:
+) -> tuple[int, str, dict[str, Any]]:
     peer = config.get("peers", {}).get(peer_name)
     if not isinstance(peer, dict):
         raise ValueError(f"relay peer not found: {peer_name}")
@@ -152,7 +152,10 @@ def sync_peer(
     count = relay_transport.apply_snapshot(
         cache, payload, base_url=str(peer["url"])
     )
-    return count, str(payload["host"]["name"])
+    delivery = relay_transport.deliver_pending(
+        cache, peer, str(payload["host"]["id"])
+    )
+    return count, str(payload["host"]["name"]), delivery
 
 
 def sync_agent(
@@ -160,7 +163,7 @@ def sync_agent(
     config: dict[str, Any],
     peer_name: str,
     agent_id: str,
-) -> str | None:
+) -> tuple[str | None, dict[str, Any]]:
     peer = config.get("peers", {}).get(peer_name)
     if not isinstance(peer, dict):
         raise ValueError(f"relay peer not found: {peer_name}")
@@ -180,7 +183,10 @@ def sync_agent(
             None,
         )
         if remote_agent is None:
-            return None
+            delivery = relay_transport.deliver_pending(
+                cache, peer, str(snapshot["host"]["id"])
+            )
+            return None, delivery
         payload = {
             "protocol": snapshot.get("protocol"),
             "host": snapshot.get("host"),
@@ -190,7 +196,47 @@ def sync_agent(
     relay_transport.apply_agent_snapshot(
         cache, payload, base_url=str(peer["url"])
     )
-    return str(payload["host"]["name"])
+    delivery = relay_transport.deliver_pending(
+        cache, peer, str(payload["host"]["id"])
+    )
+    return str(payload["host"]["name"]), delivery
+
+
+def delivery_summary_text(delivery: dict[str, Any]) -> str:
+    parts = []
+    for state in ("delivered", "pending", "failed"):
+        count = int(delivery.get(state) or 0)
+        if count:
+            parts.append(f"{count} {state}")
+    return ", ".join(parts)
+
+
+def outbox_message(
+    cache: relay_cache.RelayCache, message_id: str
+) -> dict[str, Any] | None:
+    return next(
+        (
+            item
+            for item in cache.outbox()
+            if str(item["message_id"]) == message_id
+        ),
+        None,
+    )
+
+
+def agent_delivery_counts(
+    messages: list[dict[str, Any]], host_id: str, agent_id: str
+) -> tuple[int, int]:
+    matching = [
+        item
+        for item in messages
+        if str(item.get("host_id")) == host_id
+        and str(item.get("agent_id")) == agent_id
+    ]
+    return (
+        sum(item.get("state") == "pending" for item in matching),
+        sum(item.get("state") == "failed" for item in matching),
+    )
 
 
 def open_agent_viewer(item: AgentItem) -> str:
@@ -1052,6 +1098,7 @@ def run_console(
         status = ""
         interrupt_armed = False
         drafts: dict[tuple[str, str], ComposerBuffer] = {}
+        outgoing = cache.outbox(states=("pending", "failed"))
 
         def finish() -> int:
             sys.stdout.write("\x1b[?2004l")
@@ -1130,6 +1177,15 @@ def run_console(
                         else palette["normal"]
                     )
                     title = str(item.agent.get("title") or item.agent.get("agent_id") or "unnamed")
+                    pending, failed = agent_delivery_counts(
+                        outgoing,
+                        item.host_id,
+                        str(item.agent.get("agent_id") or ""),
+                    )
+                    if pending:
+                        title += f" · {pending} queued"
+                    if failed:
+                        title += f" · {failed} failed"
                     active = item.agent.get("status") == "active"
                     marker = "●" if active else "○"
                     marker_attr = palette[
@@ -1364,7 +1420,7 @@ def run_console(
                             raise ValueError(
                                 f"no configured peer matches {current.host_name}"
                             )
-                        host_name = sync_agent(
+                        host_name, delivery = sync_agent(
                             cache,
                             config,
                             peer_name,
@@ -1375,9 +1431,13 @@ def run_console(
                             if host_name
                             else "Remote session is no longer active; showing cached copy."
                         )
+                        delivery_text = delivery_summary_text(delivery)
+                        if delivery_text:
+                            status += f" Messages: {delivery_text}."
                     items = all_agent_items(
                         cache, include_local=include_local
                     )
+                    outgoing = cache.outbox(states=("pending", "failed"))
                     selected = restored_selection(
                         filtered_items(items, query), current
                     )
@@ -1406,11 +1466,19 @@ def run_console(
                         peer_names = []
                     synchronized = 0
                     agents_count = 0
+                    delivered_count = 0
+                    pending_count = 0
+                    failed_count = 0
                     for peer_name in peer_names:
                         try:
-                            count, _ = sync_peer(cache, config, peer_name)
+                            count, _, delivery = sync_peer(
+                                cache, config, peer_name
+                            )
                             synchronized += 1
                             agents_count += count
+                            delivered_count += int(delivery["delivered"])
+                            pending_count += int(delivery["pending"])
+                            failed_count += int(delivery["failed"])
                         except (OSError, RuntimeError, ValueError) as exc:
                             failures.append(f"{peer_name}: {exc}")
                     parts = []
@@ -1424,11 +1492,21 @@ def run_console(
                     if not parts:
                         parts.append("nothing configured")
                     status = "Refreshed " + ", ".join(parts) + "."
+                    delivery_text = delivery_summary_text(
+                        {
+                            "delivered": delivered_count,
+                            "pending": pending_count,
+                            "failed": failed_count,
+                        }
+                    )
+                    if delivery_text:
+                        status += f" Messages: {delivery_text}."
                     if failures:
                         status += " Failed: " + "; ".join(failures)
                     items = all_agent_items(
                         cache, include_local=include_local
                     )
+                    outgoing = cache.outbox(states=("pending", "failed"))
                     selected = restored_selection(
                         filtered_items(items, query), current
                     )
@@ -1467,12 +1545,44 @@ def run_console(
                             },
                             codex_bin,
                         )
+                        drafts[draft_key] = ComposerBuffer()
                         status = (
                             "Message sent."
                             if result["delivery"] == "sent"
                             else "Message queued for synchronization."
                         )
-                        drafts[draft_key] = ComposerBuffer()
+                        if result["delivery"] == "queued":
+                            try:
+                                config = relay_transport.load_config(relay_config)
+                                peer_name = peer_name_for_item(config, current)
+                                if peer_name is not None:
+                                    peer = config["peers"][peer_name]
+                                    relay_transport.deliver_pending(
+                                        cache, peer, current.host_id
+                                    )
+                                queued = outbox_message(
+                                    cache, result["message_id"]
+                                )
+                                if queued and queued["state"] == "delivered":
+                                    status = "Message delivered to remote Codex queue."
+                                elif queued and queued["state"] == "failed":
+                                    status = (
+                                        "Remote delivery failed: "
+                                        + str(queued.get("last_error") or "unknown error")
+                                    )
+                                else:
+                                    status = (
+                                        "Message safely queued offline; "
+                                        "Ctrl-R or Ctrl-S will retry."
+                                    )
+                            except (OSError, RuntimeError, ValueError):
+                                status = (
+                                    "Message safely queued offline; "
+                                    "Ctrl-R or Ctrl-S will retry."
+                                )
+                            outgoing = cache.outbox(
+                                states=("pending", "failed")
+                            )
                     except (OSError, RuntimeError, ValueError) as exc:
                         status = f"Send failed: {exc}"
         return 0
