@@ -1183,10 +1183,16 @@ def attachment_page_document(label: str, raw_url: str) -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{safe_label}</title>
 <style>
-html,body,iframe{{width:100%;height:100%;margin:0;border:0;background:#202124}}
+html,body{{width:100%;height:100%;margin:0;background:#202124}}
+body{{display:grid;grid-template-rows:auto minmax(0,1fr);color:#ddd;
+font:13px/1.4 system-ui,sans-serif}}
+header{{padding:8px 12px;background:#292b2f;border-bottom:1px solid #3a3d42;
+white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+iframe{{width:100%;height:100%;min-height:0;border:0;background:#202124}}
 </style>
 </head>
-<body><iframe src="{safe_url}" title="{safe_label}"></iframe></body>
+<body><header dir="auto">{safe_label}</header>
+<iframe src="{safe_url}" title="{safe_label}"></iframe></body>
 </html>"""
 
 

@@ -861,6 +861,9 @@ https://fenced.example/ignored
         )
 
         self.assertIn("<title>Quarterly &lt;chart&gt;</title>", document)
+        self.assertIn(
+            '<header dir="auto">Quarterly &lt;chart&gt;</header>', document
+        )
         self.assertIn('title="Quarterly &lt;chart&gt;"', document)
         self.assertNotIn("<title>Quarterly <chart></title>", document)
 
