@@ -578,9 +578,22 @@ def apply_agent_events(
                 record_type=str(record.get("record_type") or "message"),
             )
         )
-    return cache.append_agent_records(
+    appended = cache.append_agent_records(
         str(host["id"]), agent_id, records, event_cursor=next_cursor
     )
+    agent_status = payload.get("agent_status")
+    if isinstance(agent_status, dict):
+        status = str(agent_status.get("status") or "")
+        status_label = str(agent_status.get("status_label") or "")
+        if status and status_label:
+            cache.update_agent_status(
+                str(host["id"]),
+                agent_id,
+                status=status,
+                status_label=status_label,
+                updated_at=str(agent_status.get("updated_at") or ""),
+            )
+    return appended
 
 
 def fetch_snapshot(peer: dict[str, Any], timeout: float = 10.0) -> dict[str, Any]:
@@ -790,6 +803,26 @@ def agent_events_payload(
             monitor.wait(path, after, remaining)
 
 
+def agent_status_payload(
+    cache: relay_cache.RelayCache, agent_id: str
+) -> dict[str, str] | None:
+    agent = next(
+        (
+            value
+            for value in cache.agents("local")
+            if str(value["agent_id"]) == agent_id
+        ),
+        None,
+    )
+    if agent is None:
+        return None
+    return {
+        "status": str(agent.get("status") or "unknown"),
+        "status_label": str(agent.get("status_label") or "unknown"),
+        "updated_at": str(agent.get("updated_at") or ""),
+    }
+
+
 def make_handler(
     cache: relay_cache.RelayCache,
     config: dict[str, Any],
@@ -848,6 +881,15 @@ def make_handler(
                 if payload is None:
                     self._json({"error": "agent not found"}, HTTPStatus.NOT_FOUND)
                     return
+                try:
+                    if refresh_agent is not None:
+                        refresh_agent(agent_id)
+                except ValueError:
+                    self._json({"error": "agent not found"}, HTTPStatus.NOT_FOUND)
+                    return
+                current_status = agent_status_payload(cache, agent_id)
+                if current_status is not None:
+                    payload["agent_status"] = current_status
                 self._json(payload)
             elif request_path.startswith("/v1/agents/"):
                 agent_id = unquote(request_path.removeprefix("/v1/agents/"))
@@ -941,12 +983,18 @@ def make_handler(
 
         def _json(self, payload: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
             body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                # A polling client may cancel an in-flight request when the UI
+                # changes agent, refreshes, or exits.  The response is no longer
+                # useful, and socketserver would otherwise print a noisy traceback.
+                return
 
     return Handler
 

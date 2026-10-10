@@ -392,6 +392,28 @@ class RelayCache:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def update_agent_status(
+        self,
+        host_id: str,
+        agent_id: str,
+        *,
+        status: str,
+        status_label: str,
+        updated_at: str | None = None,
+    ) -> None:
+        with self.connect() as connection, connection:
+            cursor = connection.execute(
+                """
+                UPDATE relay_agents
+                SET status = ?, status_label = ?,
+                    updated_at = COALESCE(NULLIF(?, ''), updated_at)
+                WHERE host_id = ? AND agent_id = ?
+                """,
+                (status, status_label, updated_at or "", host_id, agent_id),
+            )
+            if cursor.rowcount != 1:
+                raise FileNotFoundError(f"cached agent not found: {agent_id}")
+
     def append_agent_records(
         self,
         host_id: str,

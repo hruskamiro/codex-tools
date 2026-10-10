@@ -178,6 +178,11 @@ class RelayTransportTests(unittest.TestCase):
                     }
                 ],
                 "next_cursor": "new-cursor",
+                "agent_status": {
+                    "status": "active",
+                    "status_label": "working",
+                    "updated_at": "2026-10-09T12:00:00Z",
+                },
             }
 
             count = relay_transport.apply_agent_events(cache, payload)
@@ -189,6 +194,10 @@ class RelayTransportTests(unittest.TestCase):
             )
             self.assertEqual(
                 cache.agents("host-1")[0]["event_cursor"], "new-cursor"
+            )
+            self.assertEqual(cache.agents("host-1")[0]["status"], "active")
+            self.assertEqual(
+                cache.agents("host-1")[0]["status_label"], "working"
             )
 
     def test_agent_snapshot_establishes_incremental_cursor(self) -> None:
@@ -249,7 +258,17 @@ class RelayTransportTests(unittest.TestCase):
             )
             with session_path.open("a", encoding="utf-8") as handle:
                 handle.write(session_event("assistant", "Appended") + "\n")
-            handler = relay_transport.make_handler(cache, config)
+            def refresh_agent(_agent_id: str) -> None:
+                cache.update_agent_status(
+                    "local",
+                    "agent-1",
+                    status="active",
+                    status_label="working",
+                )
+
+            handler = relay_transport.make_handler(
+                cache, config, refresh_agent=refresh_agent
+            )
             instance = handler.__new__(handler)
             instance.path = "/v1/agents/agent-1/events?" + urlencode(
                 {"after": cursor, "wait": 0}
@@ -267,6 +286,14 @@ class RelayTransportTests(unittest.TestCase):
             self.assertEqual(payload["agent_id"], "agent-1")
             events = payload["events"]
             self.assertEqual(events[0]["record"]["text"], "Appended")  # type: ignore[index]
+            self.assertEqual(
+                payload["agent_status"],
+                {
+                    "status": "active",
+                    "status_label": "working",
+                    "updated_at": "2026-10-07T11:00:00Z",
+                },
+            )
 
     def test_serve_parser_accepts_control_socket_override(self) -> None:
         args = relay.parse_args(
@@ -299,6 +326,23 @@ class RelayTransportTests(unittest.TestCase):
             )
 
         self.assertTrue(server.closed)
+
+    def test_json_response_ignores_client_disconnect(self) -> None:
+        class DisconnectedWriter:
+            def write(self, _body: bytes) -> None:
+                raise BrokenPipeError(32, "Broken pipe")
+
+        handler = relay_transport.make_handler(
+            object(),  # type: ignore[arg-type]
+            {"identity": {"token": "key"}},
+        )
+        instance = handler.__new__(handler)
+        instance.send_response = lambda _status: None  # type: ignore[method-assign]
+        instance.send_header = lambda _name, _value: None  # type: ignore[method-assign]
+        instance.end_headers = lambda: None  # type: ignore[method-assign]
+        instance.wfile = DisconnectedWriter()
+
+        instance._json({"ok": True})
 
     def test_relay_server_delivery_queues_message_into_local_codex(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
