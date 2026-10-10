@@ -5,11 +5,13 @@ from __future__ import annotations
 import argparse
 import curses
 import io
+import json
 import queue
 import re
 import sys
 import textwrap
 import threading
+import time
 import unicodedata
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
@@ -17,6 +19,11 @@ from http import HTTPStatus
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError
+
+from pygments.lexers import get_lexer_by_name
+from pygments.lexers.special import TextLexer
+from pygments.token import Comment, Generic, Keyword, Name, Number, Operator, String
+from pygments.util import ClassNotFound
 
 from codex_tools import (
     agents_ui,
@@ -52,6 +59,9 @@ SEMANTIC_TOKEN_RE = re.compile(
 TABLE_SEPARATOR_RE = re.compile(
     r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$"
 )
+FENCE_RE = re.compile(r"^\s*(?P<fence>`{3,}|~{3,})\s*(?P<info>[^\s`]*)?.*$")
+WORKING_FRAMES = ("◐", "◓", "◑", "◒")
+AGENT_ORDER_FILE = paths.AGENTS_UI_STATE_DIR / "agent-order.json"
 
 
 @dataclass(frozen=True)
@@ -134,23 +144,31 @@ def reconcile_optimistic_messages(
 def optimistic_message_status(
     message: OptimisticMessage,
     outbox: dict[str, dict[str, Any]],
+    *,
+    agent_working: bool = False,
 ) -> str:
     if message.message_id:
         item = outbox.get(message.message_id)
         state = str((item or {}).get("state") or message.delivery)
         if state == "delivered":
-            return "Delivered · waiting for transcript"
+            return (
+                "Delivered · agent working…"
+                if agent_working
+                else "Delivered · waiting for agent"
+            )
         if state == "failed":
             error = str((item or {}).get("last_error") or "delivery failed")
             return f"Delivery failed · {error}"
         return "Queued offline · waiting to retry"
-    return "Sent · waiting for transcript"
+    return "Agent working…" if agent_working else "Sent · waiting for agent"
 
 
 def records_with_optimistic_messages(
     records: list[dict[str, Any]],
     messages: list[OptimisticMessage],
     outbox: dict[str, dict[str, Any]],
+    *,
+    agent_working: bool = False,
 ) -> list[dict[str, Any]]:
     return [
         *records,
@@ -159,10 +177,42 @@ def records_with_optimistic_messages(
                 "role": "user",
                 "text": message.text,
                 "record_type": "optimistic",
-                "_status": optimistic_message_status(message, outbox),
+                "_status": optimistic_message_status(
+                    message, outbox, agent_working=agent_working
+                ),
             }
             for message in messages
         ),
+    ]
+
+
+def agent_is_working(agent: dict[str, Any]) -> bool:
+    return (
+        str(agent.get("status") or "") == "active"
+        and str(agent.get("status_label") or "").lower() == "working"
+    )
+
+
+def working_frame(now: float | None = None) -> str:
+    moment = time.monotonic() if now is None else now
+    return WORKING_FRAMES[int(moment * 5) % len(WORKING_FRAMES)]
+
+
+def records_with_agent_activity(
+    records: list[dict[str, Any]],
+    *,
+    agent_working: bool,
+    frame: str | None = None,
+) -> list[dict[str, Any]]:
+    if not agent_working:
+        return records
+    return [
+        *records,
+        {
+            "role": "assistant",
+            "text": f"{frame or working_frame()} Working…",
+            "record_type": "activity",
+        },
     ]
 
 
@@ -193,13 +243,25 @@ def compact_path_end(value: str, width: int) -> str:
 
 
 def all_agent_items(
-    cache: relay_cache.RelayCache, *, include_local: bool = True
+    cache: relay_cache.RelayCache,
+    *,
+    include_local: bool = True,
+    preferred_order: list[tuple[str, str]] | None = None,
 ) -> list[AgentItem]:
     result = []
-    for host in cache.hosts():
+    hosts = cache.hosts()
+    for host in hosts:
         if not include_local and host["host_id"] == "local":
             continue
-        for agent in cache.agents(str(host["host_id"])):
+        host_agents = sorted(
+            cache.agents(str(host["host_id"])),
+            key=lambda agent: (
+                str(agent.get("created_at") or ""),
+                str(agent.get("agent_id") or ""),
+            ),
+            reverse=True,
+        )
+        for agent in host_agents:
             result.append(
                 AgentItem(
                     str(host["host_id"]),
@@ -208,7 +270,99 @@ def all_agent_items(
                     str(host.get("base_url") or ""),
                 )
             )
-    return result
+    if not preferred_order:
+        return result
+    rank = {key: index for index, key in enumerate(preferred_order)}
+    base_rank = {
+        (item.host_id, str(item.agent.get("agent_id") or "")): index
+        for index, item in enumerate(result)
+    }
+    host_rank = {
+        str(host["host_id"]): index for index, host in enumerate(hosts)
+    }
+    return sorted(
+        result,
+        key=lambda item: (
+            host_rank[item.host_id],
+            rank.get(
+                (item.host_id, str(item.agent.get("agent_id") or "")),
+                len(rank) + base_rank[
+                    (item.host_id, str(item.agent.get("agent_id") or ""))
+                ],
+            ),
+        ),
+    )
+
+
+def agent_item_key(item: AgentItem) -> tuple[str, str]:
+    return item.host_id, str(item.agent.get("agent_id") or "")
+
+
+def load_agent_order(path: Path = AGENT_ORDER_FILE) -> list[tuple[str, str]]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return []
+    values = payload.get("order") if isinstance(payload, dict) else None
+    if not isinstance(values, list):
+        return []
+    order: list[tuple[str, str]] = []
+    for value in values:
+        if (
+            isinstance(value, list)
+            and len(value) == 2
+            and all(isinstance(part, str) and part for part in value)
+        ):
+            order.append((value[0], value[1]))
+    return order
+
+
+def save_agent_order(
+    items: list[AgentItem],
+    previous_order: list[tuple[str, str]],
+    path: Path = AGENT_ORDER_FILE,
+) -> list[tuple[str, str]]:
+    current = [agent_item_key(item) for item in items]
+    current_set = set(current)
+    order = current + [key for key in previous_order if key not in current_set]
+    paths.ensure_private_dir(path.parent)
+    paths.write_private_text(
+        path,
+        json.dumps({"version": 1, "order": order}, ensure_ascii=False, indent=2)
+        + "\n",
+    )
+    return order
+
+
+def move_agent_item(
+    items: list[AgentItem],
+    visible_items: list[AgentItem],
+    current: AgentItem,
+    direction: int,
+) -> bool:
+    try:
+        visible_index = next(
+            index
+            for index, item in enumerate(visible_items)
+            if agent_item_key(item) == agent_item_key(current)
+        )
+        target = visible_items[visible_index + direction]
+    except (StopIteration, IndexError):
+        return False
+    if target.host_id != current.host_id:
+        return False
+    current_index = next(
+        index
+        for index, item in enumerate(items)
+        if agent_item_key(item) == agent_item_key(current)
+    )
+    target_index = next(
+        index
+        for index, item in enumerate(items)
+        if agent_item_key(item) == agent_item_key(target)
+    )
+    items[current_index], items[target_index] = items[target_index], items[current_index]
+    return True
 
 
 def peer_name_for_item(
@@ -611,8 +765,8 @@ def transcript_lines(
     ]
     for record in renderable[-MAX_RECORDS:]:
         role = str(record["role"])
-        label = "› You" if role == "user" else "• Assistant"
-        lines.append((label, f"{role}_label"))
+        activity = record.get("record_type") == "activity"
+        record_start = len(lines)
         paragraphs = [
             display_markdown_links(line)
             for line in (str(record.get("text") or "").splitlines() or [""])
@@ -620,6 +774,25 @@ def transcript_lines(
         index = 0
         while index < len(paragraphs):
             paragraph = paragraphs[index]
+            fence_match = FENCE_RE.match(paragraph)
+            if fence_match:
+                fence = str(fence_match.group("fence"))
+                language = str(fence_match.group("info") or "").strip()
+                lines.append((f"  {language or 'code'}", "code_label"))
+                index += 1
+                while index < len(paragraphs):
+                    code_line = paragraphs[index]
+                    if re.match(
+                        rf"^\s*{re.escape(fence[0])}{{{len(fence)},}}\s*$",
+                        code_line,
+                    ):
+                        index += 1
+                        break
+                    lines.append(
+                        ("  │ " + code_line.expandtabs(4), f"code:{language}")
+                    )
+                    index += 1
+                continue
             if (
                 index + 1 < len(paragraphs)
                 and "|" in paragraph
@@ -649,7 +822,8 @@ def transcript_lines(
                 break_long_words=True,
                 break_on_hyphens=True,
             ) or [""]
-            lines.extend(("  " + line, role) for line in wrapped)
+            style = "agent_activity" if activity else role
+            lines.extend(("  " + line, style) for line in wrapped)
             index += 1
         message_status = str(record.get("_status") or "")
         if message_status:
@@ -666,6 +840,16 @@ def transcript_lines(
                 )
                 for status_index, status_line in enumerate(status_lines)
             )
+        if role == "assistant":
+            for line_index in range(record_start, len(lines)):
+                line, style = lines[line_index]
+                if not line.strip():
+                    continue
+                lines[line_index] = (
+                    "• " + line[2:] if line.startswith("  ") else "• " + line,
+                    style,
+                )
+                break
         lines.append(("", f"{role}_gap"))
     return lines
 
@@ -818,6 +1002,44 @@ def semantic_spans(text: str) -> list[tuple[str, str | None]]:
     return spans or [(text, None)]
 
 
+def pygments_token_style(token: Any) -> str:
+    if token in Comment:
+        return "code_comment"
+    if token in Keyword:
+        return "code_keyword"
+    if token in String:
+        return "code_string"
+    if token in Number:
+        return "code_number"
+    if token in Name.Function or token in Name.Class or token in Name.Builtin:
+        return "code_name"
+    if token in Operator:
+        return "code_operator"
+    if token in Generic.Error:
+        return "code_error"
+    return "code"
+
+
+def highlighted_code_spans(
+    text: str, language: str
+) -> list[tuple[str, str]]:
+    try:
+        lexer = get_lexer_by_name(language) if language else TextLexer()
+    except ClassNotFound:
+        lexer = TextLexer()
+    spans: list[tuple[str, str]] = []
+    for token, value in lexer.get_tokens(text):
+        value = value.rstrip("\n")
+        if not value:
+            continue
+        style = pygments_token_style(token)
+        if spans and spans[-1][1] == style:
+            spans[-1] = (spans[-1][0] + value, style)
+        else:
+            spans.append((value, style))
+    return spans or [(text, "code")]
+
+
 def display_markdown_links(text: str) -> str:
     return MARKDOWN_LINK_RE.sub(lambda match: f"[{match.group('label')}]", text)
 
@@ -870,6 +1092,32 @@ def add_semantic_text(
         remaining -= len(shown)
 
 
+def add_highlighted_code(
+    window: Any,
+    y: int,
+    x: int,
+    text: str,
+    width: int,
+    language: str,
+    palette: dict[str, int],
+) -> None:
+    remaining = width
+    column = x
+    prefix, code = (text[:4], text[4:]) if text.startswith("  │ ") else ("", text)
+    if prefix:
+        add_text(window, y, column, prefix, remaining, palette["code_border"])
+        shown = min(len(prefix), remaining)
+        column += shown
+        remaining -= shown
+    for value, style in highlighted_code_spans(code, language):
+        if remaining <= 0:
+            break
+        shown = value[:remaining]
+        add_text(window, y, column, shown, remaining, palette.get(style, palette["code"]))
+        column += len(shown)
+        remaining -= len(shown)
+
+
 def show_status(window: Any, text: str, attr: int) -> None:
     height, width = window.getmaxyx()
     try:
@@ -881,10 +1129,8 @@ def show_status(window: Any, text: str, attr: int) -> None:
     window.refresh()
 
 
-def advance_interrupt(armed: bool, key: int) -> tuple[bool, bool]:
-    if key == 3:  # Ctrl-C in curses raw mode.
-        return True, armed
-    return False, False
+def requests_console_exit(key: int) -> bool:
+    return key == 3  # Ctrl-C in curses raw mode.
 
 
 def mouse_scroll_delta(button_state: int, amount: int = 3) -> int:
@@ -928,6 +1174,7 @@ def soft_color_definitions(color_count: int) -> dict[str, tuple[int, int]]:
         soft_lavender = 146
         user_background = 237
         selected_background = 238
+        code_background = 235
         table_blue = 67
         return {
             "normal": (warm_text, -1),
@@ -945,10 +1192,19 @@ def soft_color_definitions(color_count: int) -> dict[str, tuple[int, int]]:
             "composer_accent": (soft_blue, selected_background),
             "composer_muted": (muted_text, selected_background),
             "user": (warm_text, user_background),
-            "user_label": (soft_blue, user_background),
             "message_status": (muted_text, user_background),
             "assistant": (warm_text, -1),
-            "assistant_label": (soft_blue, -1),
+            "agent_activity": (soft_green, -1),
+            "code": (warm_text, code_background),
+            "code_label": (muted_text, code_background),
+            "code_border": (table_blue, code_background),
+            "code_comment": (muted_text, code_background),
+            "code_keyword": (soft_lavender, code_background),
+            "code_string": (soft_green, code_background),
+            "code_number": (soft_blue, code_background),
+            "code_name": (soft_gold, code_background),
+            "code_operator": (soft_coral, code_background),
+            "code_error": (soft_coral, code_background),
             "status": (muted_text, -1),
             "syntax_code": (soft_lavender, -1),
             "syntax_string": (soft_green, -1),
@@ -977,9 +1233,18 @@ def soft_color_definitions(color_count: int) -> dict[str, tuple[int, int]]:
         "composer_accent": (curses.COLOR_CYAN, curses.COLOR_BLACK),
         "composer_muted": (curses.COLOR_WHITE, curses.COLOR_BLACK),
         "user": (curses.COLOR_WHITE, curses.COLOR_BLACK),
-        "user_label": (curses.COLOR_CYAN, curses.COLOR_BLACK),
         "message_status": (curses.COLOR_WHITE, curses.COLOR_BLACK),
-        "assistant_label": (curses.COLOR_CYAN, -1),
+        "agent_activity": (curses.COLOR_GREEN, -1),
+        "code": (curses.COLOR_WHITE, curses.COLOR_BLACK),
+        "code_label": (curses.COLOR_WHITE, curses.COLOR_BLACK),
+        "code_border": (curses.COLOR_BLUE, curses.COLOR_BLACK),
+        "code_comment": (curses.COLOR_WHITE, curses.COLOR_BLACK),
+        "code_keyword": (curses.COLOR_MAGENTA, curses.COLOR_BLACK),
+        "code_string": (curses.COLOR_GREEN, curses.COLOR_BLACK),
+        "code_number": (curses.COLOR_CYAN, curses.COLOR_BLACK),
+        "code_name": (curses.COLOR_YELLOW, curses.COLOR_BLACK),
+        "code_operator": (curses.COLOR_RED, curses.COLOR_BLACK),
+        "code_error": (curses.COLOR_RED, curses.COLOR_BLACK),
         "syntax_code": (curses.COLOR_MAGENTA, -1),
         "syntax_string": (curses.COLOR_GREEN, -1),
         "syntax_number": (curses.COLOR_CYAN, -1),
@@ -1014,10 +1279,19 @@ def colors() -> dict[str, int]:
         "composer_accent": curses.A_BOLD,
         "composer_muted": curses.A_DIM,
         "user": curses.A_NORMAL,
-        "user_label": curses.A_BOLD,
         "message_status": curses.A_DIM,
         "assistant": curses.A_NORMAL,
-        "assistant_label": curses.A_BOLD,
+        "agent_activity": curses.A_DIM,
+        "code": curses.A_NORMAL,
+        "code_label": curses.A_DIM,
+        "code_border": curses.A_DIM,
+        "code_comment": curses.A_DIM,
+        "code_keyword": curses.A_BOLD,
+        "code_string": curses.A_NORMAL,
+        "code_number": curses.A_NORMAL,
+        "code_name": curses.A_NORMAL,
+        "code_operator": curses.A_NORMAL,
+        "code_error": curses.A_BOLD,
         "status": curses.A_DIM,
         "syntax_code": curses.A_NORMAL,
         "syntax_string": curses.A_NORMAL,
@@ -1050,9 +1324,12 @@ def colors() -> dict[str, int]:
     result["selected"] |= curses.A_BOLD
     result["active_dot"] |= curses.A_BOLD
     result["selected_active_dot"] |= curses.A_BOLD
-    result["user_label"] |= curses.A_BOLD
     result["message_status"] |= curses.A_DIM
-    result["assistant_label"] |= curses.A_BOLD
+    result["code_label"] |= curses.A_DIM
+    result["code_border"] |= curses.A_DIM
+    result["code_comment"] |= curses.A_DIM
+    result["code_keyword"] |= curses.A_BOLD
+    result["code_error"] |= curses.A_BOLD
     result["syntax_link"] |= curses.A_UNDERLINE
     result["user_syntax_link"] |= curses.A_UNDERLINE
     result["table_header"] |= curses.A_BOLD
@@ -1189,7 +1466,7 @@ def read_bracketed_paste(stdscr: Any) -> str:
 
 
 def escape_action(stdscr: Any) -> tuple[str, str]:
-    """Distinguish Escape, modified arrows, Alt-Enter, and paste."""
+    """Distinguish Escape, Alt keys, modified arrows, and paste."""
     try:
         stdscr.timeout(40)
         following = stdscr.get_wch()
@@ -1201,6 +1478,10 @@ def escape_action(stdscr: Any) -> tuple[str, str]:
         return "newline", ""
     if following in ("\b", "\x7f", curses.KEY_BACKSPACE):
         return "word_backspace", ""
+    if following in ("m", "M"):
+        return "maximize", ""
+    if isinstance(following, str) and following in "123456789":
+        return "agent", following
     if following == "[":
         suffix = ""
         try:
@@ -1222,6 +1503,10 @@ def escape_action(stdscr: Any) -> tuple[str, str]:
             return "word_left", ""
         if suffix in {"1;5C", "5C"}:
             return "word_right", ""
+        if suffix in {"1;3A", "3A"}:
+            return "move_agent_up", ""
+        if suffix in {"1;3B", "3B"}:
+            return "move_agent_down", ""
         if suffix == "1;2D":
             return "agents", ""
     return "cancel", ""
@@ -1411,7 +1696,12 @@ def run_console(
         sys.stdout.write("\x1b[?2004h")
         sys.stdout.flush()
         palette = colors()
-        items = all_agent_items(cache, include_local=include_local)
+        agent_order = load_agent_order()
+        items = all_agent_items(
+            cache,
+            include_local=include_local,
+            preferred_order=agent_order,
+        )
         query = ""
         selected = 0
         settings_selected = False
@@ -1420,7 +1710,6 @@ def run_console(
         focus = "conversation"
         maximized = False
         status = ""
-        interrupt_armed = False
         drafts: dict[tuple[str, str], ComposerBuffer] = {}
         outgoing, outbox_by_id = outbox_views(cache)
         optimistic: dict[tuple[str, str], list[OptimisticMessage]] = {}
@@ -1457,7 +1746,11 @@ def run_console(
                     if update.target == AutoSyncWorker._item_key(previous_current):
                         status = f"Automatic sync failed: {update.error}"
             if received_update:
-                items = all_agent_items(cache, include_local=include_local)
+                items = all_agent_items(
+                    cache,
+                    include_local=include_local,
+                    preferred_order=agent_order,
+                )
                 outgoing, outbox_by_id = outbox_views(cache)
                 selected = restored_selection(
                     filtered_items(items, query), previous_current
@@ -1477,13 +1770,8 @@ def run_console(
                 add_text(stdscr, 1, 2, "Agent Console needs a terminal at least 60×10.", width - 4, palette["status"])
                 stdscr.refresh()
                 key = stdscr.getch()
-                interrupt_armed, should_exit = advance_interrupt(
-                    interrupt_armed, key
-                )
-                if should_exit:
+                if requests_console_exit(key):
                     return finish()
-                if key == 3:
-                    status = "Press Ctrl-C again to quit."
                 continue
 
             sidebar = 0 if maximized else min(36, max(25, width // 3))
@@ -1609,13 +1897,22 @@ def run_console(
                         1,
                         attr,
                     )
-                    add_text(stdscr, row, 2, marker, 1, marker_attr)
+                    shortcut = str(index + 1) if index < 9 else " "
                     add_text(
                         stdscr,
                         row,
-                        3,
-                        " " + compact(title, sidebar - 6),
-                        sidebar - 4,
+                        2,
+                        shortcut,
+                        1,
+                        palette["muted"] if not selected_focused else attr,
+                    )
+                    add_text(stdscr, row, 4, marker, 1, marker_attr)
+                    add_text(
+                        stdscr,
+                        row,
+                        5,
+                        " " + compact(title, sidebar - 7),
+                        sidebar - 6,
                         attr,
                     )
                     row += 1
@@ -1624,12 +1921,13 @@ def run_console(
                         add_text(
                             stdscr,
                             row,
-                            4,
-                            compact_path_end(cwd, sidebar - 6),
-                            sidebar - 5,
+                            6,
+                            compact_path_end(cwd, sidebar - 8),
+                            sidebar - 7,
                             palette["path"],
                         )
                         row += 1
+                    row += 1
 
             if settings_selected:
                 heading = (
@@ -1733,10 +2031,21 @@ def run_console(
                     main_width - 4,
                     conversation_heading,
                 )
-                detail = f"{agent.get('status_label') or agent.get('status') or 'unknown'} · {current.host_name} · {agent.get('cwd') or 'no basedir'} · {agent.get('agent_id')}"
+                working = agent_is_working(agent)
+                state = str(
+                    agent.get("status_label") or agent.get("status") or "unknown"
+                )
+                if working:
+                    state = f"{working_frame()} Agent working…"
+                detail = f"{state} · {current.host_name} · {agent.get('cwd') or 'no basedir'} · {agent.get('agent_id')}"
                 if status:
                     detail = status
-                add_text(stdscr, 1, main_x + 2, detail, main_width - 4, palette["muted"])
+                detail_style = (
+                    palette["active_dot"]
+                    if working and not status
+                    else palette["muted"]
+                )
+                add_text(stdscr, 1, main_x + 2, detail, main_width - 4, detail_style)
                 agent_key = (current.host_id, str(agent["agent_id"]))
                 records = cache.records(*agent_key)
                 pending_messages = reconcile_optimistic_messages(
@@ -1747,7 +2056,14 @@ def run_console(
                 else:
                     optimistic.pop(agent_key, None)
                 displayed_records = records_with_optimistic_messages(
-                    records, pending_messages, outbox_by_id
+                    records,
+                    pending_messages,
+                    outbox_by_id,
+                    agent_working=working,
+                )
+                displayed_records = records_with_agent_activity(
+                    displayed_records,
+                    agent_working=working,
                 )
                 rendered = transcript_lines(displayed_records, main_width - 2)
                 composer_width = max(1, main_width - 6)
@@ -1760,7 +2076,7 @@ def run_console(
                 start = max(0, len(rendered) - viewport - scroll)
                 for offset, (line, style) in enumerate(rendered[start : start + viewport]):
                     y = 3 + offset
-                    if style in {"user", "user_label", "message_status"}:
+                    if style in {"user", "message_status"}:
                         add_text(
                             stdscr,
                             y,
@@ -1769,9 +2085,28 @@ def run_console(
                             main_width - 2,
                             palette["user"],
                         )
+                    if style == "code_label" or style.startswith("code:"):
+                        add_text(
+                            stdscr,
+                            y,
+                            main_x + 1,
+                            " " * (main_width - 2),
+                            main_width - 2,
+                            palette["code"],
+                        )
                     if style == "user_gap":
                         continue
-                    if style in {"user", "assistant", "table_header", "table_row"}:
+                    if style.startswith("code:"):
+                        add_highlighted_code(
+                            stdscr,
+                            y,
+                            main_x + 2,
+                            line,
+                            main_width - 4,
+                            style.partition(":")[2],
+                            palette,
+                        )
+                    elif style in {"user", "assistant", "table_header", "table_row"}:
                         add_semantic_text(
                             stdscr,
                             y,
@@ -1820,7 +2155,7 @@ def run_console(
                 )
 
             if not current and not settings_selected:
-                footer = status or "No agent selected · ^F find · ^S sync all · ^C×2 quit"
+                footer = status or "No agent selected · ^F find · ^S sync all · ^C quit"
                 add_text(stdscr, height - 1, 1, footer, width - 2, palette["status"])
             try:
                 curses.curs_set(
@@ -1840,13 +2175,62 @@ def run_console(
             finally:
                 stdscr.timeout(-1)
             code = key_code(key)
-            interrupt_armed, should_exit = advance_interrupt(
-                interrupt_armed, code if code is not None else -1
-            )
-            if should_exit:
+            if requests_console_exit(code if code is not None else -1):
                 return finish()
-            if code == 3:
-                status = "Press Ctrl-C again to quit."
+            extended_key = terminal_key_name(key)
+            if code == 27 or extended_key in {"kUP3", "kDN3"}:
+                if code == 27:
+                    action, pasted = escape_action(stdscr)
+                else:
+                    action = (
+                        "move_agent_up"
+                        if extended_key == "kUP3"
+                        else "move_agent_down"
+                    )
+                    pasted = ""
+                if action == "agent":
+                    shortcut_index = int(pasted) - 1
+                    if shortcut_index < len(shown):
+                        selected = shortcut_index
+                        settings_selected = False
+                        focus = "conversation"
+                        scroll = 0
+                elif action in {"move_agent_up", "move_agent_down"} and current:
+                    previous_items = list(items)
+                    direction = -1 if action == "move_agent_up" else 1
+                    if move_agent_item(items, shown, current, direction):
+                        try:
+                            agent_order = save_agent_order(items, agent_order)
+                        except OSError as exc:
+                            items = previous_items
+                            status = f"Could not save agent order: {exc}"
+                        selected = restored_selection(
+                            filtered_items(items, query), current
+                        )
+                elif current and focus == "conversation":
+                    draft_key = (
+                        current.host_id,
+                        str(current.agent["agent_id"]),
+                    )
+                    draft = drafts.setdefault(draft_key, ComposerBuffer())
+                    if action == "paste":
+                        draft.insert(pasted)
+                    elif action == "newline":
+                        draft.insert("\n")
+                    elif action == "word_left":
+                        move_composer_word(draft, -1)
+                    elif action == "word_right":
+                        move_composer_word(draft, 1)
+                    elif action == "word_backspace":
+                        delete_composer_word(draft)
+                    elif action == "maximize":
+                        focus, maximized = change_pane(
+                            focus, maximized, ord("m")
+                        )
+                    elif action == "agents":
+                        focus = "agents"
+                    else:
+                        focus = "agents"
                 continue
             if code == 9:
                 if current is not None or settings_selected:
@@ -1983,7 +2367,9 @@ def run_console(
                         if delivery_text:
                             status += f" Messages: {delivery_text}."
                     items = all_agent_items(
-                        cache, include_local=include_local
+                        cache,
+                        include_local=include_local,
+                        preferred_order=agent_order,
                     )
                     outgoing, outbox_by_id = outbox_views(cache)
                     selected = restored_selection(
@@ -2052,7 +2438,9 @@ def run_console(
                     if failures:
                         status += " Failed: " + "; ".join(failures)
                     items = all_agent_items(
-                        cache, include_local=include_local
+                        cache,
+                        include_local=include_local,
+                        preferred_order=agent_order,
                     )
                     outgoing, outbox_by_id = outbox_views(cache)
                     selected = restored_selection(
@@ -2063,23 +2451,6 @@ def run_console(
             elif current and focus == "conversation":
                 draft_key = (current.host_id, str(current.agent["agent_id"]))
                 draft = drafts.setdefault(draft_key, ComposerBuffer())
-                if code == 27:
-                    action, pasted = escape_action(stdscr)
-                    if action == "paste":
-                        draft.insert(pasted)
-                    elif action == "newline":
-                        draft.insert("\n")
-                    elif action == "word_left":
-                        move_composer_word(draft, -1)
-                    elif action == "word_right":
-                        move_composer_word(draft, 1)
-                    elif action == "word_backspace":
-                        delete_composer_word(draft)
-                    elif action == "agents":
-                        focus = "agents"
-                    else:
-                        focus = "agents"
-                    continue
                 action = edit_composer_buffer(
                     draft, key, max(1, main_width - 6)
                 )

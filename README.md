@@ -106,7 +106,9 @@ read their recent messages, search, scroll, and send or queue a message without
 leaving the terminal. The conversation pane starts with an always-available
 composer: type immediately, press Enter to send, and use Ctrl-J for a newline.
 It expands as text wraps, supports cursor editing and multiline paste, and
-keeps a separate unsent draft when you move between agents.
+keeps a separate unsent draft when you move between agents. Markdown fenced
+code blocks use Pygments syntax highlighting, preserve indentation, and render
+on a restrained terminal surface without showing the literal fences.
 
 Sent messages appear in the conversation immediately, including in manual
 sync mode. A muted line beneath the optimistic bubble reports whether the
@@ -121,8 +123,12 @@ between draft lines, while Ctrl-Left/Ctrl-Right move by word. Page Up/Down or
 the mouse wheel scrolls the conversation. Ctrl-R refreshes the selected agent,
 Ctrl-S refreshes all local sessions and configured peers, Ctrl-V opens the
 browser viewer, Ctrl-F searches, and Ctrl-X maximizes or restores the
-conversation. Press Ctrl-C twice to quit. With `--no-local`, Ctrl-S skips the
-local refresh.
+conversation; Alt-M does the same without consuming a typing key. Press Ctrl-C
+to quit. Agents keep a stable creation-time order instead of jumping after new
+activity; the first nine are numbered and Alt-1 through Alt-9 switches to them
+directly. Alt-Up and Alt-Down move the selected agent within its host group;
+the custom order persists across refreshes and console restarts. With
+`--no-local`, Ctrl-S skips the local refresh.
 
 The first item in the agent pane opens **Settings**. Its synchronization mode
 applies immediately and is saved as `agents.sync_mode` in the regular Codex
@@ -133,6 +139,13 @@ Tools configuration:
 - `adaptive` keeps a low-bandwidth incremental request open and backs off when
   the connection fails;
 - `live` favors the shortest update delay.
+
+When Codex reports that the selected session is active, the console shows a
+soft animated `Agent working…` indicator. Remote live sessions carry this
+daemon-reported state with their incremental event updates, so delivery alone
+is never mistaken for active work. While a turn is running, a transient
+animated `Working…` row also appears at the end of the conversation and
+disappears when the turn finishes; it is not stored in transcript history.
 
 `adaptive` is the default. Use `ct agents ui --sync MODE` for a temporary
 startup override. Automatic synchronization follows only the selected agent;

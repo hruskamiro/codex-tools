@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tempfile
 import threading
 import unittest
 from unittest.mock import ANY, patch
@@ -204,9 +205,58 @@ class AgentTuiTests(unittest.TestCase):
         self.assertEqual(records[0]["role"], "user")
         self.assertEqual(records[0]["text"], "Continue please")
         self.assertIn(
-            ("  ◌ Delivered · waiting for transcript", "message_status"),
+            ("  ◌ Delivered · waiting for agent", "message_status"),
             lines,
         )
+
+    def test_optimistic_message_reports_observed_agent_activity(self) -> None:
+        message = agents_tui.OptimisticMessage(
+            "Continue please", 0, "pending", "message-1"
+        )
+
+        status = agents_tui.optimistic_message_status(
+            message,
+            {"message-1": {"state": "delivered"}},
+            agent_working=True,
+        )
+
+        self.assertEqual(status, "Delivered · agent working…")
+
+    def test_working_indicator_requires_active_working_state(self) -> None:
+        self.assertTrue(
+            agents_tui.agent_is_working(
+                {"status": "active", "status_label": "working"}
+            )
+        )
+        self.assertFalse(
+            agents_tui.agent_is_working(
+                {"status": "active", "status_label": "needs-you"}
+            )
+        )
+        self.assertEqual(agents_tui.working_frame(0.0), "◐")
+        self.assertEqual(agents_tui.working_frame(0.2), "◓")
+
+    def test_working_agent_adds_transient_assistant_activity(self) -> None:
+        records = [{"role": "user", "text": "Please continue"}]
+
+        displayed = agents_tui.records_with_agent_activity(
+            records, agent_working=True, frame="◐"
+        )
+        lines = agents_tui.transcript_lines(displayed, 60)
+
+        self.assertIsNot(displayed, records)
+        self.assertEqual(displayed[-1]["record_type"], "activity")
+        self.assertEqual(displayed[-1]["text"], "◐ Working…")
+        self.assertIn(("• ◐ Working…", "agent_activity"), lines)
+
+    def test_idle_agent_does_not_add_transient_activity(self) -> None:
+        records = [{"role": "assistant", "text": "Done"}]
+
+        displayed = agents_tui.records_with_agent_activity(
+            records, agent_working=False
+        )
+
+        self.assertIs(displayed, records)
 
     def test_real_transcript_reconciles_one_identical_optimistic_message(self) -> None:
         messages = [
@@ -297,6 +347,12 @@ class AgentTuiTests(unittest.TestCase):
         )
         self.assertEqual((action, value), ("word_backspace", ""))
 
+        action, value = agents_tui.escape_action(Window(["m"]))  # type: ignore[arg-type]
+        self.assertEqual((action, value), ("maximize", ""))
+
+        action, value = agents_tui.escape_action(Window(["4"]))  # type: ignore[arg-type]
+        self.assertEqual((action, value), ("agent", "4"))
+
     def test_composer_recognizes_modified_arrow_sequences(self) -> None:
         class Window:
             def __init__(self, keys: list[str]) -> None:
@@ -312,6 +368,8 @@ class AgentTuiTests(unittest.TestCase):
             "1;5D": "word_left",
             "5C": "word_right",
             "1;2D": "agents",
+            "1;3A": "move_agent_up",
+            "3B": "move_agent_down",
         }
         for sequence, expected in cases.items():
             with self.subTest(sequence=sequence):
@@ -329,6 +387,7 @@ class AgentTuiTests(unittest.TestCase):
         self.assertEqual(palette["active_dot"], (114, -1))
         self.assertEqual(palette["selected"], (252, 238))
         self.assertEqual(palette["user"], (252, 237))
+        self.assertEqual(palette["code"], (252, 235))
 
     def test_basic_color_fallback_avoids_bright_blue_backgrounds(self) -> None:
         palette = agents_tui.soft_color_definitions(8)
@@ -373,6 +432,69 @@ class AgentTuiTests(unittest.TestCase):
         items = agents_tui.all_agent_items(Cache(), include_local=False)  # type: ignore[arg-type]
 
         self.assertEqual([item.host_id for item in items], ["remote-1"])
+
+    def test_agent_items_use_stable_creation_order_not_recent_activity(self) -> None:
+        class Cache:
+            def hosts(self) -> list[dict[str, str]]:
+                return [{"host_id": "local", "name": "This machine"}]
+
+            def agents(self, _host_id: str) -> list[dict[str, str]]:
+                return [
+                    {
+                        "agent_id": "older",
+                        "created_at": "2026-10-01T10:00:00Z",
+                        "updated_at": "2026-10-10T10:00:00Z",
+                    },
+                    {
+                        "agent_id": "newer",
+                        "created_at": "2026-10-02T10:00:00Z",
+                        "updated_at": "2026-10-02T10:00:00Z",
+                    },
+                ]
+
+        items = agents_tui.all_agent_items(Cache())  # type: ignore[arg-type]
+
+        self.assertEqual(
+            [item.agent["agent_id"] for item in items], ["newer", "older"]
+        )
+
+    def test_preferred_agent_order_overrides_creation_order_within_host(self) -> None:
+        class Cache:
+            def hosts(self) -> list[dict[str, str]]:
+                return [{"host_id": "local", "name": "This machine"}]
+
+            def agents(self, _host_id: str) -> list[dict[str, str]]:
+                return [
+                    {"agent_id": "newer", "created_at": "2026-10-02"},
+                    {"agent_id": "older", "created_at": "2026-10-01"},
+                ]
+
+        items = agents_tui.all_agent_items(  # type: ignore[arg-type]
+            Cache(), preferred_order=[("local", "older"), ("local", "newer")]
+        )
+
+        self.assertEqual(
+            [item.agent["agent_id"] for item in items], ["older", "newer"]
+        )
+
+    def test_agent_order_can_move_and_round_trip_through_state_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = agents_tui.Path(temporary) / "agent-order.json"
+            items = [
+                agents_tui.AgentItem("local", "Local", {"agent_id": "one"}),
+                agents_tui.AgentItem("local", "Local", {"agent_id": "two"}),
+                agents_tui.AgentItem("local", "Local", {"agent_id": "three"}),
+            ]
+
+            moved = agents_tui.move_agent_item(items, items, items[1], -1)
+            order = agents_tui.save_agent_order(items, [], path)
+
+            self.assertTrue(moved)
+            self.assertEqual(
+                [item.agent["agent_id"] for item in items],
+                ["two", "one", "three"],
+            )
+            self.assertEqual(agents_tui.load_agent_order(path), order)
 
     def test_remote_item_resolves_to_peer_by_base_url(self) -> None:
         item = agents_tui.AgentItem(
@@ -750,6 +872,40 @@ class AgentTuiTests(unittest.TestCase):
         self.assertIn(("true", "literal"), spans)
         self.assertIn(("1.5", "number"), spans)
 
+    def test_fenced_code_blocks_hide_fences_and_preserve_indentation(self) -> None:
+        records = [
+            {
+                "role": "assistant",
+                "text": (
+                    "Run this:\n"
+                    "```bash\n"
+                    "if [[ -f report.txt ]]; then\n"
+                    "    printf '%s\\n' \"ready\"\n"
+                    "fi\n"
+                    "```\n"
+                    "Done."
+                ),
+            }
+        ]
+
+        lines = agents_tui.transcript_lines(records, 80)
+
+        self.assertIn(("  bash", "code_label"), lines)
+        self.assertIn(
+            ("  │     printf '%s\\n' \"ready\"", "code:bash"), lines
+        )
+        self.assertNotIn("```", "\n".join(line for line, _ in lines))
+
+    def test_pygments_highlights_known_language_and_falls_back_to_text(self) -> None:
+        bash = agents_tui.highlighted_code_spans(
+            'if [[ "$count" -gt 2 ]]; then # enough', "bash"
+        )
+        unknown = agents_tui.highlighted_code_spans("value = 12", "made-up-lang")
+
+        self.assertTrue(any(style == "code_keyword" for _, style in bash))
+        self.assertTrue(any(style == "code_comment" for _, style in bash))
+        self.assertEqual(unknown, [("value = 12", "code")])
+
     def test_markdown_links_hide_destinations_and_style_labels(self) -> None:
         text = agents_tui.display_markdown_links(
             "Changed [localization.dart](/home/me/project/localization.dart)."
@@ -780,7 +936,7 @@ class AgentTuiTests(unittest.TestCase):
 
         lines = agents_tui.transcript_lines(records, 18)
 
-        self.assertTrue(any(line.startswith("  ┌") for line, _ in lines))
+        self.assertTrue(any(line.startswith("• ┌") for line, _ in lines))
         self.assertTrue(any(style == "table_header" for _, style in lines))
         self.assertTrue(any(style == "table_row" for _, style in lines))
         self.assertIn(("|", "table_border"), agents_tui.table_spans("| 12 |"))
@@ -827,30 +983,15 @@ class AgentTuiTests(unittest.TestCase):
         self.assertIn(("text", 23, 1, "Refreshing…", 78, 7), window.calls)
         self.assertEqual(window.calls[-1], ("refresh",))
 
-    def test_ctrl_c_must_be_pressed_twice_consecutively(self) -> None:
-        armed, should_exit = agents_tui.advance_interrupt(False, 3)
-        self.assertTrue(armed)
-        self.assertFalse(should_exit)
-
-        armed, should_exit = agents_tui.advance_interrupt(armed, ord("j"))
-        self.assertFalse(armed)
-        self.assertFalse(should_exit)
-
-        armed, should_exit = agents_tui.advance_interrupt(False, 3)
-        armed, should_exit = agents_tui.advance_interrupt(armed, 3)
-        self.assertTrue(should_exit)
+    def test_ctrl_c_requests_console_exit(self) -> None:
+        self.assertTrue(agents_tui.requests_console_exit(3))
+        self.assertFalse(agents_tui.requests_console_exit(ord("j")))
 
     def test_escape_does_not_request_console_exit(self) -> None:
-        armed, should_exit = agents_tui.advance_interrupt(True, 27)
-
-        self.assertFalse(armed)
-        self.assertFalse(should_exit)
+        self.assertFalse(agents_tui.requests_console_exit(27))
 
     def test_q_does_not_request_console_exit(self) -> None:
-        armed, should_exit = agents_tui.advance_interrupt(True, ord("q"))
-
-        self.assertFalse(armed)
-        self.assertFalse(should_exit)
+        self.assertFalse(agents_tui.requests_console_exit(ord("q")))
 
     def test_filter_matches_host_title_basedir_and_id(self) -> None:
         item = agents_tui.AgentItem(
@@ -875,8 +1016,11 @@ class AgentTuiTests(unittest.TestCase):
 
         lines = agents_tui.transcript_lines(records, 18)
 
-        self.assertEqual(lines[0], ("› You", "user_label"))
-        self.assertIn(("• Assistant", "assistant_label"), lines)
+        self.assertEqual(lines[0][1], "user")
+        self.assertIn(("• An answer", "assistant"), lines)
+        self.assertFalse(
+            any(style in {"user_label", "assistant_label"} for _, style in lines)
+        )
         self.assertIn(("", "user_gap"), lines)
         self.assertIn(("", "assistant_gap"), lines)
         self.assertNotIn("hidden", "\n".join(line for line, _ in lines))
