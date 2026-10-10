@@ -782,6 +782,67 @@ https://fenced.example/ignored
         self.assertIn("line=42", payload[0]["url"])
         self.assertIn("link=0", payload[0]["url"])
 
+    def test_source_and_markdown_links_are_safe_text_attachments(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dart = root / "game_packs.dart"
+            dart.write_text("const packs = <String>[];\n", encoding="utf-8")
+            readme = root / "README.md"
+            readme.write_text("# Packs\n", encoding="utf-8")
+            record = search.TextRecord(
+                "",
+                "assistant",
+                f"See [registry]({dart}) and [guide]({readme}).",
+                42,
+                "message",
+            )
+
+            payload = viewer.attachment_link_payload(root / "session.jsonl", record)
+            dart_file = viewer.validated_attachment(dart)
+            markdown_file = viewer.validated_attachment(readme)
+
+        self.assertEqual(
+            [(item["label"], item["kind"]) for item in payload],
+            [("registry", "DART"), ("guide", "MARKDOWN")],
+        )
+        self.assertEqual(dart_file[1], "text/plain; charset=utf-8")
+        self.assertEqual(markdown_file[1], "text/plain; charset=utf-8")
+
+    def test_relative_attachments_resolve_from_session_working_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            output = root / "output"
+            output.mkdir()
+            pdf = output / "report.pdf"
+            pdf.write_bytes(b"%PDF-1.4\n")
+            session_path = root / "session.jsonl"
+            record = search.TextRecord(
+                "",
+                "assistant",
+                "Open the [report](output/report.pdf).",
+                17,
+                "message",
+            )
+
+            payload = viewer.attachment_link_payload(
+                session_path, record, base_directory=root
+            )
+
+        self.assertEqual(
+            [(item["label"], item["kind"]) for item in payload],
+            [("report", "PDF")],
+        )
+        self.assertIn("line=17", payload[0]["url"])
+        self.assertIn("link=0", payload[0]["url"])
+
+    def test_relative_attachment_requires_an_absolute_working_directory(self) -> None:
+        markdown = "[report](output/report.pdf)"
+
+        self.assertEqual(viewer.local_attachment_links(markdown), [])
+        self.assertEqual(
+            viewer.local_attachment_links(markdown, Path("relative/work")), []
+        )
+
     def test_open_route_resolves_only_an_attachment_from_the_selected_record(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -818,6 +879,43 @@ https://fenced.example/ignored
                         state,
                         {**query, "link": ["1"], "target": ["/etc/passwd"]},
                     )
+
+    def test_open_route_resolves_relative_attachment_from_session_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            session_path = root / "session.jsonl"
+            pdf = root / "build" / "report.pdf"
+            pdf.parent.mkdir()
+            pdf.write_bytes(b"%PDF-1.4\n")
+            session = search.Session(
+                path=session_path,
+                cwd=str(root),
+                records=[
+                    search.TextRecord(
+                        "",
+                        "assistant",
+                        "[Built report](build/report.pdf)",
+                        42,
+                        "message",
+                    )
+                ],
+            )
+            state = SimpleNamespace()
+            query = {
+                "path": [str(session_path)],
+                "line": ["42"],
+                "link": ["0"],
+            }
+            with (
+                patch.object(viewer, "resolve_session_path", return_value=session_path),
+                patch.object(viewer, "read_session", return_value=session),
+            ):
+                resolved = viewer.resolve_linked_attachment(state, query)
+
+        self.assertEqual(
+            resolved,
+            (pdf.resolve(), "application/pdf", "Built report"),
+        )
 
     def test_attachment_response_uses_markdown_label_as_inline_filename(self) -> None:
         class Handler:
@@ -866,6 +964,53 @@ https://fenced.example/ignored
         )
         self.assertIn('title="Quarterly &lt;chart&gt;"', document)
         self.assertNotIn("<title>Quarterly <chart></title>", document)
+
+    def test_text_attachment_page_has_readable_escaped_source_surface(self) -> None:
+        document = viewer.attachment_page_document(
+            "README.md",
+            "/open/file?path=session",
+            text_content="# Heading\n<script>alert('no')</script>",
+        )
+
+        self.assertIn('<pre dir="auto">', document)
+        self.assertIn("color:#e8eaed", document)
+        self.assertIn("background:#202124", document)
+        self.assertIn("&lt;script&gt;alert", document)
+        self.assertNotIn("<script>alert", document)
+        self.assertNotIn("<iframe", document)
+
+    def test_attachment_page_response_embeds_small_text_attachment(self) -> None:
+        class Handler:
+            def __init__(self) -> None:
+                self.headers: dict[str, str] = {}
+                self.wfile = io.BytesIO()
+
+            def send_response(self, status: int) -> None:
+                self.status = status
+
+            def send_header(self, name: str, value: str) -> None:
+                self.headers[name] = value
+
+            def end_headers(self) -> None:
+                pass
+
+        with tempfile.TemporaryDirectory() as temporary:
+            markdown = Path(temporary) / "README.md"
+            markdown.write_text("# Readable\n", encoding="utf-8")
+            handler = Handler()
+
+            viewer.attachment_page_response(
+                handler,  # type: ignore[arg-type]
+                "README.md",
+                {"path": ["session"], "line": ["42"], "link": ["0"]},
+                attachment_path=markdown,
+                content_type="text/plain; charset=utf-8",
+            )
+
+        document = handler.wfile.getvalue().decode()
+        self.assertIn("<pre", document)
+        self.assertIn("# Readable", document)
+        self.assertNotIn("<iframe", document)
 
     def test_attachment_page_raw_url_excludes_untrusted_label_parameter(self) -> None:
         class Handler:

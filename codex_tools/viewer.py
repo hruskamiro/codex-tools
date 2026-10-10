@@ -95,6 +95,27 @@ ATTACHMENT_TYPES = {
     ".yaml": ("text/yaml; charset=utf-8", "YAML"),
     ".yml": ("text/yaml; charset=utf-8", "YAML"),
     ".toml": ("text/plain; charset=utf-8", "TOML"),
+    ".md": ("text/plain; charset=utf-8", "MARKDOWN"),
+    ".rst": ("text/plain; charset=utf-8", "RST"),
+    ".dart": ("text/plain; charset=utf-8", "DART"),
+    ".py": ("text/plain; charset=utf-8", "PYTHON"),
+    ".sh": ("text/plain; charset=utf-8", "SHELL"),
+    ".bash": ("text/plain; charset=utf-8", "SHELL"),
+    ".js": ("text/plain; charset=utf-8", "JAVASCRIPT"),
+    ".jsx": ("text/plain; charset=utf-8", "JSX"),
+    ".ts": ("text/plain; charset=utf-8", "TYPESCRIPT"),
+    ".tsx": ("text/plain; charset=utf-8", "TSX"),
+    ".rs": ("text/plain; charset=utf-8", "RUST"),
+    ".go": ("text/plain; charset=utf-8", "GO"),
+    ".java": ("text/plain; charset=utf-8", "JAVA"),
+    ".kt": ("text/plain; charset=utf-8", "KOTLIN"),
+    ".swift": ("text/plain; charset=utf-8", "SWIFT"),
+    ".c": ("text/plain; charset=utf-8", "C"),
+    ".h": ("text/plain; charset=utf-8", "C HEADER"),
+    ".cpp": ("text/plain; charset=utf-8", "C++"),
+    ".hpp": ("text/plain; charset=utf-8", "C++ HEADER"),
+    ".css": ("text/plain; charset=utf-8", "CSS"),
+    ".sql": ("text/plain; charset=utf-8", "SQL"),
 }
 TEXT_ATTACHMENT_SUFFIXES = {
     ".txt",
@@ -105,7 +126,29 @@ TEXT_ATTACHMENT_SUFFIXES = {
     ".yaml",
     ".yml",
     ".toml",
+    ".md",
+    ".rst",
+    ".dart",
+    ".py",
+    ".sh",
+    ".bash",
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".rs",
+    ".go",
+    ".java",
+    ".kt",
+    ".swift",
+    ".c",
+    ".h",
+    ".cpp",
+    ".hpp",
+    ".css",
+    ".sql",
 }
+INLINE_TEXT_ATTACHMENT_MAX_BYTES = 4 * 1024 * 1024
 
 
 def read_default_view(config_path: Path | None = None) -> str:
@@ -904,7 +947,15 @@ def handle_typeset(
             title = f"Assistant answer · {time_label}" if time_label else "Assistant answer"
             assistant_jobs.append((index, text, title))
             item["attachments"] = (
-                [] if is_relay or path is None else attachment_link_payload(path, record)
+                []
+                if is_relay or path is None
+                else attachment_link_payload(
+                    path,
+                    record,
+                    base_directory=Path(session.cwd).expanduser()
+                    if session.cwd
+                    else None,
+                )
             )
             item["externalLinks"] = external_link_payload(text)
         payload_records.append(item)
@@ -957,7 +1008,9 @@ def handle_typeset(
     }
 
 
-def local_attachment_links(markdown: str) -> list[tuple[str, Path]]:
+def local_attachment_links(
+    markdown: str, base_directory: Path | None = None
+) -> list[tuple[str, Path]]:
     links: list[tuple[str, Path]] = []
     for match in MARKDOWN_LINK_RE.finditer(markdown):
         label = match.group(1).strip()
@@ -965,10 +1018,11 @@ def local_attachment_links(markdown: str) -> list[tuple[str, Path]]:
         if target.startswith("<") and target.endswith(">"):
             target = target[1:-1].strip()
         candidate = Path(target).expanduser()
-        if (
-            not candidate.is_absolute()
-            or candidate.suffix.lower() not in ATTACHMENT_TYPES
-        ):
+        if not candidate.is_absolute():
+            if base_directory is None or not base_directory.is_absolute():
+                continue
+            candidate = base_directory / candidate
+        if candidate.suffix.lower() not in ATTACHMENT_TYPES:
             continue
         links.append((label or candidate.name, candidate))
     return links
@@ -1060,9 +1114,16 @@ def validated_attachment(path: Path) -> tuple[Path, str, str]:
     return candidate, attachment_type[0], attachment_type[1]
 
 
-def attachment_link_payload(session_path: Path, record: Any) -> list[dict[str, str]]:
+def attachment_link_payload(
+    session_path: Path,
+    record: Any,
+    *,
+    base_directory: Path | None = None,
+) -> list[dict[str, str]]:
     payload: list[dict[str, str]] = []
-    for index, (label, candidate) in enumerate(local_attachment_links(record.text)):
+    for index, (label, candidate) in enumerate(
+        local_attachment_links(record.text, base_directory)
+    ):
         try:
             _, _, kind = validated_attachment(candidate)
         except (FileNotFoundError, OSError):
@@ -1104,7 +1165,10 @@ def resolve_linked_attachment(
     ]
     if not matching:
         raise FileNotFoundError("attachment not found")
-    links = local_attachment_links(matching[-1].text)
+    base_directory = (
+        Path(session.cwd).expanduser() if session.cwd else None
+    )
+    links = local_attachment_links(matching[-1].text, base_directory)
     if link_index >= len(links):
         raise FileNotFoundError("attachment not found")
     label, linked_path = links[link_index]
@@ -1173,9 +1237,16 @@ def attachment_inline_filename(label: str, path: Path) -> str:
     return normalized
 
 
-def attachment_page_document(label: str, raw_url: str) -> str:
+def attachment_page_document(
+    label: str, raw_url: str, *, text_content: str | None = None
+) -> str:
     safe_label = html.escape(label)
     safe_url = html.escape(raw_url, quote=True)
+    content = (
+        f'<pre dir="auto">{html.escape(text_content)}</pre>'
+        if text_content is not None
+        else f'<iframe src="{safe_url}" title="{safe_label}"></iframe>'
+    )
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -1183,16 +1254,20 @@ def attachment_page_document(label: str, raw_url: str) -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{safe_label}</title>
 <style>
-html,body{{width:100%;height:100%;margin:0;background:#202124}}
-body{{display:grid;grid-template-rows:auto minmax(0,1fr);color:#ddd;
+html,body{{width:100%;height:100%;margin:0;background:#202124;color-scheme:dark}}
+body{{display:grid;grid-template-rows:auto minmax(0,1fr);color:#e8eaed;
 font:13px/1.4 system-ui,sans-serif}}
 header{{padding:8px 12px;background:#292b2f;border-bottom:1px solid #3a3d42;
 white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
-iframe{{width:100%;height:100%;min-height:0;border:0;background:#202124}}
+iframe{{width:100%;height:100%;min-height:0;border:0;background:#fff;color-scheme:light}}
+pre{{box-sizing:border-box;width:100%;height:100%;min-height:0;margin:0;
+padding:18px 22px;overflow:auto;background:#202124;color:#e8eaed;
+font:14px/1.55 ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace;
+tab-size:4;white-space:pre}}
 </style>
 </head>
 <body><header dir="auto">{safe_label}</header>
-<iframe src="{safe_url}" title="{safe_label}"></iframe></body>
+{content}</body>
 </html>"""
 
 
@@ -1200,14 +1275,29 @@ def attachment_page_response(
     handler: BaseHTTPRequestHandler,
     label: str,
     query: dict[str, list[str]],
+    *,
+    attachment_path: Path | None = None,
+    content_type: str = "",
 ) -> None:
     selector = {
         key: query[key][0]
         for key in ("path", "id", "line", "link")
         if query.get(key, [""])[0]
     }
+    text_content = None
+    if (
+        attachment_path is not None
+        and content_type.startswith("text/")
+        and attachment_path.stat().st_size <= INLINE_TEXT_ATTACHMENT_MAX_BYTES
+    ):
+        try:
+            text_content = attachment_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            text_content = None
     document = attachment_page_document(
-        label, "/open/file?" + urlencode(selector)
+        label,
+        "/open/file?" + urlencode(selector),
+        text_content=text_content,
     ).encode("utf-8")
     handler.send_response(HTTPStatus.OK)
     handler.send_header("Content-Type", "text/html; charset=utf-8")
@@ -1377,8 +1467,16 @@ def make_handler(state: ViewerState) -> type[BaseHTTPRequestHandler]:
                 elif parsed.path == "/api/version":
                     json_response(self, handle_version(state, query))
                 elif parsed.path == "/open":
-                    _, _, label = resolve_linked_attachment(state, query)
-                    attachment_page_response(self, label, query)
+                    attachment_path, content_type, label = resolve_linked_attachment(
+                        state, query
+                    )
+                    attachment_page_response(
+                        self,
+                        label,
+                        query,
+                        attachment_path=attachment_path,
+                        content_type=content_type,
+                    )
                 elif parsed.path == "/open/file":
                     attachment_path, content_type, label = resolve_linked_attachment(
                         state, query
