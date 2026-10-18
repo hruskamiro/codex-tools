@@ -172,8 +172,11 @@ machine's sessions and browse only cached remote agents.
 Viewer routes explicitly identify both presentation and source:
 `/v/local/SESSION` and `/t/local/SESSION` use local Codex JSONL data, while
 `/v/relay/HOST/AGENT` renders a synchronized remote conversation from the
-private relay cache. Remote typesetting is reserved under `/t/relay/...` but is
-not implemented yet.
+private relay cache. `/t/relay/HOST/AGENT` typesets the cached conversation
+locally. Attachments referenced by an assistant record are fetched from the
+authenticated peer only when opened, validated by record and link index, and
+kept in the private relay attachment cache for later offline viewing. Arbitrary
+remote paths are never accepted from the browser.
 
 The relay keeps normalized sessions, synchronization cursors, and an
 idempotent outgoing-message queue in a private local SQLite cache. Populate or
@@ -262,8 +265,9 @@ under `~/.local/state/codex-tools/viewer/` instead of claiming startup
 succeeded.
 
 **Markdown is the portable default.** Press `T` inside a conversation to switch
-between Markdown and the LaTeX view. In the LaTeX view, local attachments and
-external links from each assistant answer are collected in a footer below it.
+between Markdown and the LaTeX view. In the LaTeX view, local or synchronized
+remote attachments and external links from each assistant answer are collected
+in a footer below it.
 Relative Markdown attachment paths are resolved from the conversation's
 recorded working directory and use the same validated local opener.
 Hold `Shift` briefly to reveal `[1]`–`[9]` hints for footer links currently in

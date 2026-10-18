@@ -374,7 +374,7 @@ class ViewerCommandTests(unittest.TestCase):
                         relay_cache.CachedRecord(
                             "2026-10-07T11:00:00Z",
                             "assistant",
-                            "Remote answer with https://example.com/reference",
+                            "Remote [report](build/report.pdf) with https://example.com/reference",
                             42,
                             "message",
                         ),
@@ -415,13 +415,120 @@ class ViewerCommandTests(unittest.TestCase):
 
         self.assertEqual(payload["session"]["hostName"], "Desktop")
         self.assertEqual(payload["records"][0]["typeset"]["pdfUrl"], "/typeset/pdf/remote-pdf.pdf")
-        self.assertEqual(payload["records"][0]["attachments"], [])
+        self.assertEqual(
+            payload["records"][0]["attachments"],
+            [
+                {
+                    "label": "report",
+                    "kind": "PDF",
+                    "url": "/open?source=relay&host=remote-host&agent=agent-1&record="
+                    + viewer.attachments.attachment_record_key(
+                        "Remote [report](build/report.pdf) with https://example.com/reference"
+                    )
+                    + "&link=0",
+                }
+            ],
+        )
         self.assertEqual(
             payload["records"][0]["externalLinks"][0]["url"],
             "https://example.com/reference",
         )
         self.assertEqual(focused["isolatedLine"], 42)
         self.assertEqual(render.call_count, 2)
+
+    def test_remote_attachment_download_is_cached_for_offline_reuse(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache_path = root / "relay.sqlite3"
+            cache = relay_cache.RelayCache(cache_path)
+            cache.upsert_agent(
+                "remote-host",
+                "Desktop",
+                relay_cache.CachedAgent(
+                    agent_id="agent-1",
+                    session_id="session-1",
+                    thread_id="thread-1",
+                    rollout_id="rollout-1",
+                    title="Remote work",
+                    title_source="relay",
+                    cwd="/work/remote",
+                    source="cli",
+                    created_at="2026-10-07T10:00:00Z",
+                    updated_at="2026-10-07T11:00:00Z",
+                    origin_path="",
+                    records=(
+                        relay_cache.CachedRecord(
+                            "2026-10-07T11:00:00Z",
+                            "assistant",
+                            "Open [Quarterly report](build/report.pdf).",
+                            42,
+                            "message",
+                        ),
+                    ),
+                ),
+                base_url="https://desktop:8780",
+            )
+            state = viewer.ViewerState(
+                root,
+                root / "archive",
+                False,
+                root / "index.jsonl",
+                relay_cache_file=cache_path,
+                relay_config=root / "relay.json",
+            )
+            query = {
+                "source": ["relay"],
+                "host": ["remote-host"],
+                "agent": ["agent-1"],
+                "record": [
+                    viewer.attachments.attachment_record_key(
+                        "Open [Quarterly report](build/report.pdf)."
+                    )
+                ],
+                "link": ["0"],
+            }
+            peer = {"url": "https://desktop:8780", "token": "secret"}
+
+            with (
+                patch.object(viewer, "relay_peer_for_host", return_value=("desktop", peer)),
+                patch.object(
+                    viewer.relay_transport,
+                    "fetch_attachment",
+                    return_value=(b"%PDF-1.4\n", "application/pdf", ".pdf"),
+                ) as fetch,
+            ):
+                downloaded = viewer.resolve_linked_attachment(state, query)
+
+            with patch.object(
+                viewer.relay_transport,
+                "fetch_attachment",
+                side_effect=OSError("offline"),
+            ) as offline_fetch:
+                cached = viewer.resolve_linked_attachment(state, query)
+            downloaded_body = downloaded[0].read_bytes()
+
+        self.assertEqual(downloaded[1:], ("application/pdf", "Quarterly report"))
+        self.assertEqual(cached, downloaded)
+        self.assertEqual(downloaded_body, b"%PDF-1.4\n")
+        fetch.assert_called_once_with(peer, "agent-1", query["record"][0], 0)
+        offline_fetch.assert_not_called()
+
+    def test_remote_attachment_link_does_not_require_jsonl_line_number(self) -> None:
+        text = "Open [Report](build/report.pdf)."
+
+        payload = viewer.remote_attachment_link_payload(
+            "remote-host",
+            "agent-1",
+            {"role": "assistant", "text": text, "line_no": 0},
+            "/work/remote",
+        )
+
+        self.assertEqual(payload[0]["label"], "Report")
+        self.assertIn(
+            "record=" + viewer.attachments.attachment_record_key(text),
+            payload[0]["url"],
+        )
+        self.assertNotIn("line=", payload[0]["url"])
 
     def test_session_deduplication_prefers_the_codex_cli_thread_rollout(self) -> None:
         items = [
@@ -651,7 +758,9 @@ https://example.com/a_(b). The docs repeat at https://platform.openai.com/docs.
 `https://inline.example/ignored`
 
 ```text
-https://fenced.example/ignored
+https://fenced.example/resource
+
+curl https://embedded.example/ignored
 ```
 [Local file](/tmp/report.pdf) and [mail](mailto:person@example.com).
 """
@@ -670,6 +779,11 @@ https://fenced.example/ignored
                     "label": "https://example.com/a_(b)",
                     "url": "https://example.com/a_(b)",
                     "host": "example.com",
+                },
+                {
+                    "label": "https://fenced.example/resource",
+                    "url": "https://fenced.example/resource",
+                    "host": "fenced.example",
                 },
             ],
         )
@@ -762,21 +876,28 @@ https://fenced.example/ignored
             png.write_bytes(b"\x89PNG\r\n\x1a\nimage")
             csv = root / "results.csv"
             csv.write_text("name,value\na,1\n", encoding="utf-8")
+            page = root / "page.html"
+            page.write_text("<!doctype html><title>Review</title>\n", encoding="utf-8")
             record = search.TextRecord(
                 "",
                 "assistant",
                 f"[PDF plot]({pdf}), [PNG plot]({png}), [Results]({csv}), "
-                f"and [ignore]({root / 'page.html'}).",
+                f"and [Review page]({page}).",
                 42,
                 "message",
             )
 
             payload = viewer.attachment_link_payload(root / "session.jsonl", record)
 
-        self.assertEqual(len(payload), 3)
+        self.assertEqual(len(payload), 4)
         self.assertEqual(
             [(item["label"], item["kind"]) for item in payload],
-            [("PDF plot", "PDF"), ("PNG plot", "PNG"), ("Results", "CSV")],
+            [
+                ("PDF plot", "PDF"),
+                ("PNG plot", "PNG"),
+                ("Results", "CSV"),
+                ("Review page", "HTML"),
+            ],
         )
         self.assertIn("/open?", payload[0]["url"])
         self.assertIn("line=42", payload[0]["url"])

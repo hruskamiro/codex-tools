@@ -9,6 +9,7 @@ import hmac
 import ipaddress
 import json
 import os
+import re
 import secrets
 import ssl
 import threading
@@ -22,12 +23,13 @@ from urllib.error import HTTPError
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
-from codex_tools import paths, relay_cache, search
+from codex_tools import attachments, paths, relay_cache, search
 
 
 PROTOCOL_VERSION = 1
 MAX_SNAPSHOT_BYTES = 32 * 1024 * 1024
 MAX_MESSAGE_BYTES = 128 * 1024
+MAX_ATTACHMENT_BYTES = 128 * 1024 * 1024
 MAX_EVENT_SCAN_BYTES = 4 * 1024 * 1024
 MAX_EVENT_BATCH = 500
 MAX_EVENT_WAIT_SECONDS = 20.0
@@ -652,6 +654,46 @@ def fetch_agent_events(
     return fetch_json(peer, url, request_timeout)
 
 
+def fetch_attachment(
+    peer: dict[str, Any],
+    agent_id: str,
+    record_key: str,
+    link_index: int,
+    timeout: float = 30.0,
+) -> tuple[bytes, str, str]:
+    if not re.fullmatch(r"[a-f0-9]{64}", record_key) or link_index < 0:
+        raise ValueError("invalid attachment reference")
+    url = (
+        str(peer["url"]).rstrip("/")
+        + "/v1/agents/"
+        + quote(agent_id, safe="")
+        + f"/attachments/{record_key}/{link_index}"
+    )
+    request = Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {peer['token']}",
+            "Accept": "*/*",
+        },
+    )
+    context = None
+    if str(peer["url"]).startswith("https://"):
+        context = ssl.create_default_context(cafile=peer.get("ca_file") or None)
+    with urlopen(request, timeout=timeout, context=context) as response:
+        content_length = int(response.headers.get("Content-Length") or 0)
+        if content_length > MAX_ATTACHMENT_BYTES:
+            raise ValueError("relay attachment exceeds the 128 MiB safety limit")
+        body = response.read(MAX_ATTACHMENT_BYTES + 1)
+        content_type = str(response.headers.get("Content-Type") or "")
+        suffix = str(response.headers.get("X-Codex-Attachment-Suffix") or "").lower()
+    if len(body) > MAX_ATTACHMENT_BYTES:
+        raise ValueError("relay attachment exceeds the 128 MiB safety limit")
+    expected = attachments.ATTACHMENT_TYPES.get(suffix)
+    if expected is None or content_type != expected[0]:
+        raise ValueError("relay returned invalid attachment metadata")
+    return body, content_type, suffix
+
+
 def fetch_json(
     peer: dict[str, Any], url: str, timeout: float
 ) -> dict[str, Any]:
@@ -836,6 +878,30 @@ def agent_status_payload(
     }
 
 
+def resolve_relay_attachment(
+    cache: relay_cache.RelayCache,
+    agent_id: str,
+    record_key: str,
+    link_index: int,
+) -> tuple[Path, str, str]:
+    agent = next(
+        (
+            value
+            for value in cache.agents("local")
+            if str(value["agent_id"]) == agent_id
+        ),
+        None,
+    )
+    if agent is None:
+        raise FileNotFoundError("attachment not found")
+    session_path = Path(str(agent.get("origin_path") or ""))
+    if not session_path.is_file():
+        raise FileNotFoundError("attachment not found")
+    return attachments.resolve_session_attachment_by_key(
+        session_path, record_key, link_index
+    )
+
+
 def make_handler(
     cache: relay_cache.RelayCache,
     config: dict[str, Any],
@@ -860,10 +926,28 @@ def make_handler(
             if not hmac.compare_digest(supplied, f"Bearer {token}"):
                 self._json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
                 return
+            attachment_match = re.fullmatch(
+                r"/v1/agents/([^/]+)/attachments/([a-f0-9]{64})/(0|[1-9][0-9]*)",
+                request_path,
+            )
             if request_path == "/v1/snapshot":
                 if refresh is not None:
                     refresh()
                 self._json(snapshot_payload(cache, config))
+            elif attachment_match is not None:
+                agent_id = unquote(attachment_match.group(1))
+                try:
+                    path, content_type, label = resolve_relay_attachment(
+                        cache,
+                        agent_id,
+                        attachment_match.group(2),
+                        int(attachment_match.group(3)),
+                    )
+                    self._attachment(path, content_type, label)
+                except (FileNotFoundError, OSError):
+                    self._json(
+                        {"error": "attachment not found"}, HTTPStatus.NOT_FOUND
+                    )
             elif request_path.startswith("/v1/agents/") and request_path.endswith(
                 "/events"
             ):
@@ -1007,6 +1091,41 @@ def make_handler(
                 # A polling client may cancel an in-flight request when the UI
                 # changes agent, refreshes, or exits.  The response is no longer
                 # useful, and socketserver would otherwise print a noisy traceback.
+                return
+
+        def _attachment(self, path: Path, content_type: str, label: str) -> None:
+            filename = attachments.attachment_inline_filename(label, path)
+            encoded_name = quote(filename, safe="")
+            try:
+                with path.open("rb") as source:
+                    size = os.fstat(source.fileno()).st_size
+                    if size > MAX_ATTACHMENT_BYTES:
+                        self._json(
+                            {"error": "attachment exceeds the 128 MiB safety limit"},
+                            HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                        )
+                        return
+                    self.send_response(HTTPStatus.OK)
+                    self.send_header("Content-Type", content_type)
+                    self.send_header("Content-Length", str(size))
+                    self.send_header(
+                        "Content-Disposition",
+                        f"inline; filename*=UTF-8''{encoded_name}",
+                    )
+                    self.send_header(
+                        "X-Codex-Attachment-Suffix", path.suffix.lower()
+                    )
+                    self.send_header("Cache-Control", "private, no-store")
+                    self.send_header("X-Content-Type-Options", "nosniff")
+                    self.end_headers()
+                    remaining = size
+                    while remaining:
+                        chunk = source.read(min(64 * 1024, remaining))
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        remaining -= len(chunk)
+            except (BrokenPipeError, ConnectionResetError):
                 return
 
     return Handler

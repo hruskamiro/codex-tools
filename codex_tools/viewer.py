@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import curses
+import hashlib
 import html
 import ipaddress
 import json
@@ -17,7 +18,6 @@ import subprocess
 import sys
 import threading
 import time
-import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from datetime import datetime
@@ -29,7 +29,14 @@ from urllib.error import HTTPError
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 from urllib.request import urlopen
 
-from codex_tools import config, paths, relay_cache, relay_transport, typeset
+from codex_tools import (
+    attachments,
+    config,
+    paths,
+    relay_cache,
+    relay_transport,
+    typeset,
+)
 from codex_tools.browser import add_browser_args, browser_command, open_browser
 from codex_tools.search import (
     DEFAULT_ARCHIVE_ROOT,
@@ -73,81 +80,15 @@ SUMMARY_TAIL_LINES = 80
 TAIL_READ_BLOCK_SIZE = 64 * 1024
 VIEWER_PID_FILE = paths.VIEWER_STATE_DIR / "viewer.json"
 VIEWER_LOG_FILE = paths.VIEWER_STATE_DIR / "viewer.log"
-MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+MARKDOWN_LINK_RE = attachments.MARKDOWN_LINK_RE
 EXTERNAL_URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 FENCED_MARKDOWN_CODE_RE = re.compile(
     r"^[ \t]*(?:```|~~~)[^\n]*\n.*?^[ \t]*(?:```|~~~)[ \t]*$",
     re.MULTILINE | re.DOTALL,
 )
 INLINE_MARKDOWN_CODE_RE = re.compile(r"(?P<ticks>`+)[^\n]*?(?P=ticks)")
-ATTACHMENT_TYPES = {
-    ".pdf": ("application/pdf", "PDF"),
-    ".png": ("image/png", "PNG"),
-    ".jpg": ("image/jpeg", "JPEG"),
-    ".jpeg": ("image/jpeg", "JPEG"),
-    ".webp": ("image/webp", "WEBP"),
-    ".gif": ("image/gif", "GIF"),
-    ".txt": ("text/plain; charset=utf-8", "TEXT"),
-    ".log": ("text/plain; charset=utf-8", "LOG"),
-    ".csv": ("text/csv; charset=utf-8", "CSV"),
-    ".tsv": ("text/tab-separated-values; charset=utf-8", "TSV"),
-    ".json": ("application/json; charset=utf-8", "JSON"),
-    ".yaml": ("text/yaml; charset=utf-8", "YAML"),
-    ".yml": ("text/yaml; charset=utf-8", "YAML"),
-    ".toml": ("text/plain; charset=utf-8", "TOML"),
-    ".md": ("text/plain; charset=utf-8", "MARKDOWN"),
-    ".rst": ("text/plain; charset=utf-8", "RST"),
-    ".dart": ("text/plain; charset=utf-8", "DART"),
-    ".py": ("text/plain; charset=utf-8", "PYTHON"),
-    ".sh": ("text/plain; charset=utf-8", "SHELL"),
-    ".bash": ("text/plain; charset=utf-8", "SHELL"),
-    ".js": ("text/plain; charset=utf-8", "JAVASCRIPT"),
-    ".jsx": ("text/plain; charset=utf-8", "JSX"),
-    ".ts": ("text/plain; charset=utf-8", "TYPESCRIPT"),
-    ".tsx": ("text/plain; charset=utf-8", "TSX"),
-    ".rs": ("text/plain; charset=utf-8", "RUST"),
-    ".go": ("text/plain; charset=utf-8", "GO"),
-    ".java": ("text/plain; charset=utf-8", "JAVA"),
-    ".kt": ("text/plain; charset=utf-8", "KOTLIN"),
-    ".swift": ("text/plain; charset=utf-8", "SWIFT"),
-    ".c": ("text/plain; charset=utf-8", "C"),
-    ".h": ("text/plain; charset=utf-8", "C HEADER"),
-    ".cpp": ("text/plain; charset=utf-8", "C++"),
-    ".hpp": ("text/plain; charset=utf-8", "C++ HEADER"),
-    ".css": ("text/plain; charset=utf-8", "CSS"),
-    ".sql": ("text/plain; charset=utf-8", "SQL"),
-}
-TEXT_ATTACHMENT_SUFFIXES = {
-    ".txt",
-    ".log",
-    ".csv",
-    ".tsv",
-    ".json",
-    ".yaml",
-    ".yml",
-    ".toml",
-    ".md",
-    ".rst",
-    ".dart",
-    ".py",
-    ".sh",
-    ".bash",
-    ".js",
-    ".jsx",
-    ".ts",
-    ".tsx",
-    ".rs",
-    ".go",
-    ".java",
-    ".kt",
-    ".swift",
-    ".c",
-    ".h",
-    ".cpp",
-    ".hpp",
-    ".css",
-    ".sql",
-}
+ATTACHMENT_TYPES = attachments.ATTACHMENT_TYPES
+TEXT_ATTACHMENT_SUFFIXES = attachments.TEXT_ATTACHMENT_SUFFIXES
 INLINE_TEXT_ATTACHMENT_MAX_BYTES = 4 * 1024 * 1024
 
 
@@ -540,6 +481,9 @@ class ViewerState:
         self.web_assets = web_assets
         self.session_index = session_index.expanduser().resolve()
         self.relay_cache = relay_cache.RelayCache(relay_cache_file)
+        self.relay_attachment_dir = (
+            relay_cache_file.expanduser().resolve().parent / "attachments"
+        )
         self.relay_config = relay_config.expanduser()
         self._titles_lock = threading.Lock()
         self._titles_signature = self._session_index_signature()
@@ -855,7 +799,18 @@ def handle_relay_session(
         "shownCount": len(shown),
         "totalCount": len(records),
         "records": [
-            {**record, "timeLabel": format_time(str(record["timestamp"]))}
+            {
+                **record,
+                "timeLabel": format_time(str(record["timestamp"])),
+                "attachments": remote_attachment_link_payload(
+                    str(session["hostId"]),
+                    str(session["id"]),
+                    record,
+                    str(session.get("cwd") or ""),
+                )
+                if record.get("role") == "assistant"
+                else [],
+            }
             for record in shown
         ],
         "refreshWarning": refresh_warning,
@@ -947,8 +902,13 @@ def handle_typeset(
             title = f"Assistant answer · {time_label}" if time_label else "Assistant answer"
             assistant_jobs.append((index, text, title))
             item["attachments"] = (
-                []
-                if is_relay or path is None
+                remote_attachment_link_payload(
+                    str(session_payload["hostId"]),
+                    str(session_payload["id"]),
+                    record,
+                    str(session_payload.get("cwd") or ""),
+                )
+                if is_relay
                 else attachment_link_payload(
                     path,
                     record,
@@ -1011,30 +971,27 @@ def handle_typeset(
 def local_attachment_links(
     markdown: str, base_directory: Path | None = None
 ) -> list[tuple[str, Path]]:
-    links: list[tuple[str, Path]] = []
-    for match in MARKDOWN_LINK_RE.finditer(markdown):
-        label = match.group(1).strip()
-        target = match.group(2).strip()
-        if target.startswith("<") and target.endswith(">"):
-            target = target[1:-1].strip()
-        candidate = Path(target).expanduser()
-        if not candidate.is_absolute():
-            if base_directory is None or not base_directory.is_absolute():
-                continue
-            candidate = base_directory / candidate
-        if candidate.suffix.lower() not in ATTACHMENT_TYPES:
-            continue
-        links.append((label or candidate.name, candidate))
-    return links
+    return attachments.local_attachment_links(markdown, base_directory)
 
 
-def _without_markdown_code(markdown: str) -> str:
-    without_fences = FENCED_MARKDOWN_CODE_RE.sub("", markdown)
+def _external_link_text(markdown: str) -> str:
+    """Hide code while retaining URL-only lines used as link callouts."""
+    def replace_fence(match: re.Match[str]) -> str:
+        retained = []
+        for line in match.group(0).splitlines():
+            candidate = line.strip()
+            url = _external_url(candidate)
+            retained.append(candidate if url == candidate else "")
+        return "\n".join(retained)
+
+    without_fences = FENCED_MARKDOWN_CODE_RE.sub(replace_fence, markdown)
     return INLINE_MARKDOWN_CODE_RE.sub("", without_fences)
 
 
 def _external_url(target: str) -> str | None:
     candidate = target.strip()
+    if not candidate:
+        return None
     if candidate.startswith("<") and candidate.endswith(">"):
         candidate = candidate[1:-1].strip()
     else:
@@ -1052,7 +1009,7 @@ def _external_url(target: str) -> str | None:
 
 
 def external_link_payload(markdown: str) -> list[dict[str, str]]:
-    text = _without_markdown_code(markdown)
+    text = _external_link_text(markdown)
     candidates: list[tuple[int, int, str, str]] = []
     for match in MARKDOWN_LINK_RE.finditer(text):
         url = _external_url(match.group(2))
@@ -1080,38 +1037,7 @@ def external_link_payload(markdown: str) -> list[dict[str, str]]:
 
 
 def validated_attachment(path: Path) -> tuple[Path, str, str]:
-    candidate = path.resolve()
-    suffix = candidate.suffix.lower()
-    attachment_type = ATTACHMENT_TYPES.get(suffix)
-    if attachment_type is None or not candidate.is_file():
-        raise FileNotFoundError("attachment not found")
-    try:
-        with candidate.open("rb") as handle:
-            sample = handle.read(8192)
-    except OSError as exc:
-        raise FileNotFoundError("attachment not found") from exc
-
-    valid = False
-    if suffix == ".pdf":
-        valid = sample.startswith(b"%PDF-")
-    elif suffix == ".png":
-        valid = sample.startswith(b"\x89PNG\r\n\x1a\n")
-    elif suffix in {".jpg", ".jpeg"}:
-        valid = sample.startswith(b"\xff\xd8\xff")
-    elif suffix == ".gif":
-        valid = sample.startswith((b"GIF87a", b"GIF89a"))
-    elif suffix == ".webp":
-        valid = len(sample) >= 12 and sample[:4] == b"RIFF" and sample[8:12] == b"WEBP"
-    elif suffix in TEXT_ATTACHMENT_SUFFIXES and b"\x00" not in sample:
-        try:
-            sample.decode("utf-8")
-        except UnicodeDecodeError:
-            valid = False
-        else:
-            valid = True
-    if not valid:
-        raise FileNotFoundError("attachment not found")
-    return candidate, attachment_type[0], attachment_type[1]
+    return attachments.validated_attachment(path)
 
 
 def attachment_link_payload(
@@ -1145,9 +1071,153 @@ def attachment_link_payload(
     return payload
 
 
+def remote_attachment_link_payload(
+    host_id: str,
+    agent_id: str,
+    record: Any,
+    cwd: str,
+) -> list[dict[str, str]]:
+    text = str(record.get("text") if isinstance(record, dict) else record.text)
+    record_key = attachments.attachment_record_key(text)
+    base_directory = Path(cwd).expanduser() if cwd else None
+    payload = []
+    for index, (label, candidate) in enumerate(
+        local_attachment_links(text, base_directory)
+    ):
+        attachment_type = ATTACHMENT_TYPES.get(candidate.suffix.lower())
+        if attachment_type is None:
+            continue
+        payload.append(
+            {
+                "label": label,
+                "kind": attachment_type[1],
+                "url": "/open?"
+                + urlencode(
+                    {
+                        "source": "relay",
+                        "host": host_id,
+                        "agent": agent_id,
+                        "record": record_key,
+                        "link": index,
+                    }
+                ),
+            }
+        )
+    return payload
+
+
+def remote_attachment_reference(
+    state: ViewerState, query: dict[str, list[str]]
+) -> tuple[str, str, str, int, str, str, str]:
+    host_id = query.get("host", [""])[0]
+    agent_id = query.get("agent", [""])[0]
+    record_key = query.get("record", [""])[0]
+    link_raw = query.get("link", [""])[0]
+    if (
+        not host_id
+        or not agent_id
+        or not re.fullmatch(r"[a-f0-9]{64}", record_key)
+        or not link_raw.isdigit()
+    ):
+        raise FileNotFoundError("attachment not found")
+    link_index = int(link_raw)
+    agent = next(
+        (
+            item
+            for item in state.relay_cache.agents(host_id)
+            if str(item["agent_id"]) == agent_id
+        ),
+        None,
+    )
+    if agent is None:
+        raise FileNotFoundError("attachment not found")
+    records = state.relay_cache.records(host_id, agent_id)
+    matching = [
+        record
+        for record in records
+        if record.get("role") == "assistant"
+        and attachments.attachment_record_key(str(record.get("text") or ""))
+        == record_key
+    ]
+    if not matching:
+        raise FileNotFoundError("attachment not found")
+    cwd = str(agent.get("cwd") or "")
+    base_directory = Path(cwd).expanduser() if cwd else None
+    links = local_attachment_links(str(matching[-1].get("text") or ""), base_directory)
+    if link_index >= len(links):
+        raise FileNotFoundError("attachment not found")
+    label, candidate = links[link_index]
+    suffix = candidate.suffix.lower()
+    if suffix not in ATTACHMENT_TYPES:
+        raise FileNotFoundError("attachment not found")
+    return host_id, agent_id, record_key, link_index, label, suffix, str(candidate)
+
+
+def resolve_remote_attachment(
+    state: ViewerState, query: dict[str, list[str]]
+) -> tuple[Path, str, str]:
+    host_id, agent_id, record_key, link_index, label, expected_suffix, remote_path = (
+        remote_attachment_reference(state, query)
+    )
+    key = hashlib.sha256(
+        f"{host_id}\0{agent_id}\0{record_key}\0{link_index}\0{remote_path}".encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    cache_dir = state.relay_attachment_dir
+    metadata_path = cache_dir / f"{key}.json"
+    cached_path = cache_dir / f"{key}{expected_suffix}"
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        candidate, content_type, _ = validated_attachment(cached_path)
+        if (
+            candidate.suffix.lower() == expected_suffix
+            and str(metadata.get("file") or "") == cached_path.name
+            and str(metadata.get("label") or "") == label
+        ):
+            return candidate, content_type, label
+    except (FileNotFoundError, OSError, KeyError, TypeError, json.JSONDecodeError):
+        pass
+
+    _, peer = relay_peer_for_host(state, host_id)
+    body, content_type, suffix = relay_transport.fetch_attachment(
+        peer, agent_id, record_key, link_index
+    )
+    if suffix != expected_suffix:
+        raise ValueError(
+            "remote attachment changed since the conversation was synchronized"
+        )
+    paths.ensure_private_dir(cache_dir)
+    temporary_path = cache_dir / (
+        f".{key}.{threading.get_ident()}.{time.time_ns()}.part{suffix}"
+    )
+    temporary_path.write_bytes(body)
+    temporary_path.chmod(0o600)
+    try:
+        _, validated_type, _ = validated_attachment(temporary_path)
+    except (FileNotFoundError, OSError):
+        temporary_path.unlink(missing_ok=True)
+        raise
+    os.replace(temporary_path, cached_path)
+    if validated_type != content_type:
+        cached_path.unlink(missing_ok=True)
+        raise ValueError("relay returned inconsistent attachment content")
+    paths.write_private_text(
+        metadata_path,
+        json.dumps(
+            {"file": cached_path.name, "label": label, "content_type": content_type},
+            ensure_ascii=False,
+        )
+        + "\n",
+    )
+    return cached_path, content_type, label
+
+
 def resolve_linked_attachment(
     state: ViewerState, query: dict[str, list[str]]
 ) -> tuple[Path, str, str]:
+    if query.get("source", [""])[0] == "relay":
+        return resolve_remote_attachment(state, query)
     session_path = resolve_session_path(state, query)
     line_raw = query.get("line", [""])[0]
     link_raw = query.get("link", [""])[0]
@@ -1157,23 +1227,9 @@ def resolve_linked_attachment(
         raise FileNotFoundError("attachment not found")
     line = int(line_raw)
     link_index = int(link_raw)
-    session = read_session(session_path, include_tools=False, include_system=False)
-    matching = [
-        record
-        for record in session.records
-        if record.role == "assistant" and record.line_no == line
-    ]
-    if not matching:
-        raise FileNotFoundError("attachment not found")
-    base_directory = (
-        Path(session.cwd).expanduser() if session.cwd else None
+    return attachments.resolve_session_attachment(
+        session_path, line, link_index, read_session_fn=read_session
     )
-    links = local_attachment_links(matching[-1].text, base_directory)
-    if link_index >= len(links):
-        raise FileNotFoundError("attachment not found")
-    label, linked_path = links[link_index]
-    candidate, content_type, _ = validated_attachment(linked_path)
-    return candidate, content_type, label
 
 
 def handle_version(state: ViewerState, query: dict[str, list[str]]) -> dict[str, Any]:
@@ -1226,15 +1282,7 @@ def bytes_response(
 
 
 def attachment_inline_filename(label: str, path: Path) -> str:
-    normalized = unicodedata.normalize("NFC", label)
-    normalized = re.sub(r"[\\/]+", " - ", normalized)
-    normalized = re.sub(r"\s+", " ", normalized).strip(" .")
-    suffix = path.suffix
-    if not normalized:
-        normalized = path.stem or "attachment"
-    if suffix and not normalized.casefold().endswith(suffix.casefold()):
-        normalized += suffix
-    return normalized
+    return attachments.attachment_inline_filename(label, path)
 
 
 def attachment_page_document(
@@ -1281,7 +1329,16 @@ def attachment_page_response(
 ) -> None:
     selector = {
         key: query[key][0]
-        for key in ("path", "id", "line", "link")
+        for key in (
+            "path",
+            "id",
+            "source",
+            "host",
+            "agent",
+            "line",
+            "record",
+            "link",
+        )
         if query.get(key, [""])[0]
     }
     text_content = None

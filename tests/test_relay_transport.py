@@ -558,6 +558,146 @@ class RelayTransportTests(unittest.TestCase):
         self.assertIn("wait=20", request.full_url)
         self.assertEqual(opened.call_args.kwargs["timeout"], 25.0)
 
+    def test_fetch_attachment_uses_record_scoped_authenticated_route(self) -> None:
+        record_key = relay_transport.attachments.attachment_record_key("answer")
+        response = FakeResponse(b"%PDF-1.4\n")
+        response.headers = Message()
+        response.headers["Content-Type"] = "application/pdf"
+        response.headers["Content-Length"] = str(len(response.getvalue()))
+        response.headers["X-Codex-Attachment-Suffix"] = ".pdf"
+
+        with patch.object(relay_transport, "urlopen", return_value=response) as opened:
+            body, content_type, suffix = relay_transport.fetch_attachment(
+                {"url": "http://localhost:8780", "token": "pairing-key"},
+                "agent one",
+                record_key,
+                1,
+            )
+
+        request = opened.call_args.args[0]
+        self.assertEqual(body, b"%PDF-1.4\n")
+        self.assertEqual((content_type, suffix), ("application/pdf", ".pdf"))
+        self.assertEqual(
+            request.full_url,
+            f"http://localhost:8780/v1/agents/agent%20one/attachments/{record_key}/1",
+        )
+        self.assertEqual(request.get_header("Authorization"), "Bearer pairing-key")
+
+    def test_relay_attachment_resolution_uses_local_agent_session_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pdf = root / "report.pdf"
+            pdf.write_bytes(b"%PDF-1.4\n")
+            session_path = root / "session.jsonl"
+            session_path.write_text(
+                json.dumps(
+                    {
+                        "timestamp": "2026-10-09T12:00:00Z",
+                        "type": "session_meta",
+                        "payload": {"id": "agent-1", "cwd": str(root)},
+                    }
+                )
+                + "\n"
+                + json.dumps(
+                    {
+                        "timestamp": "2026-10-09T12:01:00Z",
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": "Open [Report](report.pdf)",
+                                }
+                            ],
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            cache = relay_cache.RelayCache(root / "relay.sqlite3")
+            cache.replace_host_snapshot(
+                "local",
+                "This machine",
+                [replace(agent(), origin_path=str(session_path))],
+            )
+
+            record_key = relay_transport.attachments.attachment_record_key(
+                "Open [Report](report.pdf)"
+            )
+            result = relay_transport.resolve_relay_attachment(
+                cache, "agent-1", record_key, 0
+            )
+            with self.assertRaises(FileNotFoundError):
+                relay_transport.resolve_relay_attachment(
+                    cache, "agent-1", record_key, 1
+                )
+
+        self.assertEqual(result, (pdf.resolve(), "application/pdf", "Report"))
+
+    def test_attachment_endpoint_serves_validated_record_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            record_key = "a" * 64
+            pdf = Path(temporary) / "report.pdf"
+            pdf.write_bytes(b"%PDF-1.4\n")
+            cache = object()
+            handler = relay_transport.make_handler(
+                cache,  # type: ignore[arg-type]
+                {"identity": {"token": "secret"}},
+            )
+            instance = handler.__new__(handler)
+            instance.path = f"/v1/agents/agent-1/attachments/{record_key}/0"
+            headers = Message()
+            headers["Authorization"] = "Bearer secret"
+            instance.headers = headers
+            served: list[tuple[Path, str, str]] = []
+            instance._attachment = (  # type: ignore[method-assign]
+                lambda path, content_type, label: served.append(
+                    (path, content_type, label)
+                )
+            )
+
+            with patch.object(
+                relay_transport,
+                "resolve_relay_attachment",
+                return_value=(pdf, "application/pdf", "Report"),
+            ) as resolve:
+                instance.do_GET()
+
+        self.assertEqual(served, [(pdf, "application/pdf", "Report")])
+        resolve.assert_called_once_with(cache, "agent-1", record_key, 0)
+
+    def test_attachment_endpoint_rejects_unauthenticated_request(self) -> None:
+        handler = relay_transport.make_handler(
+            object(),  # type: ignore[arg-type]
+            {"identity": {"token": "secret"}},
+        )
+        instance = handler.__new__(handler)
+        instance.path = f"/v1/agents/agent-1/attachments/{'a' * 64}/0"
+        instance.headers = Message()
+        responses: list[tuple[dict[str, str], object]] = []
+        instance._json = (  # type: ignore[method-assign]
+            lambda payload, status=relay_transport.HTTPStatus.OK: responses.append(
+                (payload, status)
+            )
+        )
+
+        with patch.object(relay_transport, "resolve_relay_attachment") as resolve:
+            instance.do_GET()
+
+        self.assertEqual(
+            responses,
+            [
+                (
+                    {"error": "unauthorized"},
+                    relay_transport.HTTPStatus.UNAUTHORIZED,
+                )
+            ],
+        )
+        resolve.assert_not_called()
+
     def test_post_message_uses_authenticated_json_request(self) -> None:
         response = FakeResponse(
             json.dumps({"delivery": "accepted", "message_id": "message-1"}).encode()
