@@ -121,6 +121,39 @@ class RelayTransportTests(unittest.TestCase):
 
             self.assertTrue(result["reset_required"])
 
+    def test_jsonl_cursor_skips_oversized_record_and_keeps_progressing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "session.jsonl"
+            path.write_text(session_event("user", "Existing") + "\n", encoding="utf-8")
+            cursor = relay_transport.event_cursor_for_path(
+                path, "agent-1", "secret"
+            )
+            oversized = json.dumps(
+                {
+                    "type": "response_item",
+                    "payload": {"type": "tool_result", "content": "x" * 1024},
+                }
+            )
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(oversized + "\n")
+                handle.write(session_event("assistant", "After the large record") + "\n")
+
+            with patch.object(relay_transport, "MAX_EVENT_SCAN_BYTES", 256):
+                skipped = relay_transport.read_jsonl_events(
+                    path, "agent-1", cursor, "secret"
+                )
+                recovered = relay_transport.read_jsonl_events(
+                    path, "agent-1", skipped["next_cursor"], "secret"
+                )
+
+            self.assertEqual(skipped["events"], [])
+            self.assertTrue(skipped["has_more"])
+            self.assertEqual(
+                [event["record"]["text"] for event in recovered["events"]],
+                ["After the large record"],
+            )
+            self.assertFalse(recovered["has_more"])
+
     def test_jsonl_cursor_requires_reset_after_same_inode_rewrite(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "session.jsonl"

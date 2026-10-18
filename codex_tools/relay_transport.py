@@ -132,20 +132,35 @@ def read_jsonl_events(
                 "next_cursor": cursor,
                 "has_more": False,
             }
-        prefix_start = max(0, offset - 64)
-        handle.seek(prefix_start)
-        fingerprint_prefix = handle.read(offset - prefix_start)
         handle.seek(offset)
         scan_size = min(MAX_EVENT_SCAN_BYTES, complete_size - offset)
         data = handle.read(scan_size)
+        next_offset = offset
         if offset + len(data) < complete_size:
             boundary = data.rfind(b"\n")
             if boundary < 0:
-                raise ValueError("relay JSONL record exceeds the 4 MiB safety limit")
-            data = data[: boundary + 1]
+                # Codex records can contain large inline tool results (notably
+                # images).  They are intentionally excluded from the relay's
+                # text event stream, but an old cursor must still be able to
+                # advance past one.  Scan for the boundary without retaining
+                # the oversized record in memory.
+                scanned_offset = offset + len(data)
+                while scanned_offset < complete_size:
+                    chunk = handle.read(
+                        min(MAX_EVENT_SCAN_BYTES, complete_size - scanned_offset)
+                    )
+                    boundary = chunk.find(b"\n")
+                    if boundary >= 0:
+                        next_offset = scanned_offset + boundary + 1
+                        break
+                    scanned_offset += len(chunk)
+                else:  # pragma: no cover - complete_size always ends at a newline
+                    next_offset = complete_size
+                data = b""
+            else:
+                data = data[: boundary + 1]
 
     events = []
-    next_offset = offset
     for raw_line in data.splitlines(keepends=True):
         next_offset += len(raw_line)
         if not raw_line.endswith(b"\n"):
@@ -179,10 +194,8 @@ def read_jsonl_events(
             )
         if len(events) >= max(1, min(limit, MAX_EVENT_BATCH)):
             break
-    consumed = next_offset - offset
-    fingerprint = hashlib.sha256(
-        (fingerprint_prefix + data[:consumed])[-64:]
-    ).hexdigest()[:24]
+    with path.open("rb") as handle:
+        fingerprint = relay_cache.jsonl_boundary_fingerprint(handle, next_offset)
     next_cursor = encode_event_cursor(
         agent_id, generation, next_offset, secret, fingerprint
     )
