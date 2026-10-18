@@ -639,7 +639,7 @@ class SummaryCommandTests(unittest.TestCase):
 
             self.assertEqual(result, 0)
             open_browser.assert_called_once()
-            self.assertEqual(open_browser.call_args.args[0], (site / "index.html").as_uri())
+        self.assertEqual(open_browser.call_args.args[0], (site / "index.html").resolve().as_uri())
 
 
 if __name__ == "__main__":

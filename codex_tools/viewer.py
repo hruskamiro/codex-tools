@@ -1928,14 +1928,15 @@ def viewer_startup_checks() -> list[tuple[str, bool, str]]:
         )
     )
 
-    display = os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")
-    checks.append(
-        (
-            "graphical session",
-            bool(display),
-            display or "DISPLAY and WAYLAND_DISPLAY are unset",
+    if sys.platform != "darwin":
+        display = os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY")
+        checks.append(
+            (
+                "graphical session",
+                bool(display),
+                display or "DISPLAY and WAYLAND_DISPLAY are unset",
+            )
         )
-    )
 
     state = running_daemon_state()
     if state:
@@ -1982,12 +1983,13 @@ def command_doctor(args: argparse.Namespace) -> int:
         print("Set it as the default with: codex-tools viewer --set-default-latex")
     else:
         print("LaTeX is unavailable; the Markdown viewer still works.")
-        print()
-        print("Ubuntu/Debian install hint:")
-        print(
-            "  sudo apt install texlive-xetex texlive-latex-extra "
-            "fonts-texgyre fonts-paratype fonts-dejavu-core"
-        )
+        if sys.platform != "darwin":
+            print()
+            print("Ubuntu/Debian install hint:")
+            print(
+                "  sudo apt install texlive-xetex texlive-latex-extra "
+                "fonts-texgyre fonts-paratype fonts-dejavu-core"
+            )
     return 0 if startup_ok and (default_view != "latex" or latex_ok) else 1
 
 

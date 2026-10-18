@@ -1136,7 +1136,7 @@ def requests_console_exit(key: int) -> bool:
 def mouse_scroll_delta(button_state: int, amount: int = 3) -> int:
     if button_state & curses.BUTTON4_PRESSED:
         return amount
-    if button_state & curses.BUTTON5_PRESSED:
+    if button_state & getattr(curses, "BUTTON5_PRESSED", 0):
         return -amount
     return 0
 

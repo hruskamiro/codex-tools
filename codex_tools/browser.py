@@ -65,6 +65,8 @@ def browser_command(configured_browser: str | None = None) -> list[str] | None:
     )
     if configured:
         return shlex.split(configured)
+    if sys.platform == "darwin":
+        return ["/usr/bin/open"]
     desktop_command = default_desktop_browser_command()
     if desktop_command and supports_new_window(desktop_command):
         return desktop_command

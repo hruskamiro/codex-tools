@@ -856,11 +856,16 @@ class AgentTuiTests(unittest.TestCase):
             agents_tui.mouse_scroll_delta(agents_tui.curses.BUTTON4_PRESSED),
             3,
         )
-        self.assertEqual(
-            agents_tui.mouse_scroll_delta(agents_tui.curses.BUTTON5_PRESSED),
-            -3,
-        )
+        with patch.object(agents_tui.curses, "BUTTON5_PRESSED", 1 << 21, create=True):
+            self.assertEqual(agents_tui.mouse_scroll_delta(1 << 21), -3)
         self.assertEqual(agents_tui.mouse_scroll_delta(0), 0)
+
+    def test_mouse_wheel_supports_curses_without_button_five(self) -> None:
+        with patch.object(agents_tui, "curses") as terminal:
+            terminal.BUTTON4_PRESSED = 1 << 16
+            del terminal.BUTTON5_PRESSED
+            self.assertEqual(agents_tui.mouse_scroll_delta(1 << 16), 3)
+            self.assertEqual(agents_tui.mouse_scroll_delta(0), 0)
 
     def test_semantic_spans_highlight_code_strings_numbers_and_literals(self) -> None:
         spans = agents_tui.semantic_spans(

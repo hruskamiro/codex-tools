@@ -16,6 +16,7 @@ from codex_tools import browser
 class BrowserTests(unittest.TestCase):
     def test_browser_command_uses_desktop_opener_by_default(self) -> None:
         with (
+            patch.object(browser.sys, "platform", "linux"),
             patch.dict(os.environ, {}, clear=True),
             patch.object(
                 browser.shutil,
@@ -43,6 +44,7 @@ class BrowserTests(unittest.TestCase):
                 args=[], returncode=0, stdout="brave-browser.desktop\n"
             )
             with (
+                patch.object(browser.sys, "platform", "linux"),
                 patch.dict(
                     os.environ,
                     {"XDG_DATA_HOME": temporary, "XDG_DATA_DIRS": ""},
@@ -60,6 +62,14 @@ class BrowserTests(unittest.TestCase):
                 command = browser.browser_command()
 
         self.assertEqual(command, ["/usr/bin/brave-browser-stable"])
+
+    def test_macos_uses_native_browser_opener(self) -> None:
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(browser.sys, "platform", "darwin"),
+        ):
+            self.assertEqual(browser.browser_command(), ["/usr/bin/open"])
+            self.assertEqual(browser.browser_command("firefox"), ["firefox"])
 
     def test_resolved_default_browser_opens_a_new_window(self) -> None:
         args = argparse.Namespace(browser=None, same_window=False)

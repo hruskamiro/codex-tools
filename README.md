@@ -20,7 +20,10 @@ OpenAI.
 
 ## Quick start
 
-**Requirements:** Linux and Python 3.10 or newer. Model-backed summaries and
+**Requirements:** Linux or macOS and Python 3.10 or newer. The Agent Console,
+relay client, and Markdown viewer also run on Intel macOS Monterey; they do not
+require Homebrew or LaTeX. The optional typeset viewer requires local XeLaTeX.
+Model-backed summaries and
 structured tasks also require an installed Codex CLI. The default `exec`
 backend uses its Codex login; the optional app-server backend uses a separate
 ChatGPT-plan connection.
@@ -32,6 +35,18 @@ pipx install git+https://github.com/hruskamiro/codex-tools.git
 ```
 
 You now have `codex-tools`, `codex-viewer`, and `codex-manager`.
+
+On older macOS releases, use prebuilt wheels for native Python dependencies
+to avoid compiling them and downloading build toolchains:
+
+```bash
+pipx install --pip-args='--only-binary=cryptography,cffi,rpds-py' git+https://github.com/hruskamiro/codex-tools.git
+```
+
+Monterey's bundled Python 3.9 is too old; select an installed Python 3.10 or
+newer with `pipx install --python /path/to/python3` when needed. The default browser opens through
+macOS's `open` command. Mouse-wheel-down support depends on the curses library
+provided by Python; Page Down remains available when that support is missing.
 
 ### Update an existing installation
 
