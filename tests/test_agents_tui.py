@@ -38,6 +38,50 @@ class AgentTuiTests(unittest.TestCase):
         self.assertEqual(update.target, ("local", "agent-1"))
         self.assertEqual(update.error, "")
 
+    def test_stop_agent_turn_uses_daemon_for_local_agent(self) -> None:
+        item = agents_tui.AgentItem(
+            "local",
+            "This machine",
+            {"agent_id": "agent-1", "thread_id": "thread-1"},
+        )
+        expected = {"status": "interrupt_requested", "turn_id": "turn-1"}
+        with patch.object(
+            agents_tui.codex_daemon, "interrupt_thread", return_value=expected
+        ) as interrupt:
+            result = agents_tui.stop_agent_turn(
+                item, agents_tui.Path("/control.sock"), agents_tui.Path("/relay.json")
+            )
+
+        self.assertEqual(result, expected)
+        interrupt.assert_called_once_with("thread-1", agents_tui.Path("/control.sock"))
+
+    def test_stop_agent_turn_uses_remote_peer_without_queueing(self) -> None:
+        item = agents_tui.AgentItem(
+            "host-1",
+            "Desktop",
+            {"agent_id": "agent-1"},
+            "https://desktop.example:8780",
+        )
+        peer = {"url": "https://desktop.example:8780", "token": "secret"}
+        config = {"peers": {"desktop": peer}}
+        expected = {"status": "interrupt_requested", "turn_id": "turn-1"}
+        with (
+            patch.object(
+                agents_tui.relay_transport, "load_config", return_value=config
+            ),
+            patch.object(
+                agents_tui.relay_transport,
+                "interrupt_agent",
+                return_value=expected,
+            ) as interrupt,
+        ):
+            result = agents_tui.stop_agent_turn(
+                item, None, agents_tui.Path("/relay.json")
+            )
+
+        self.assertEqual(result, expected)
+        interrupt.assert_called_once_with(peer, "agent-1")
+
     def test_adaptive_worker_long_polls_selected_remote_agent(self) -> None:
         synchronized = threading.Event()
         item = agents_tui.AgentItem(
@@ -247,7 +291,8 @@ class AgentTuiTests(unittest.TestCase):
         self.assertIsNot(displayed, records)
         self.assertEqual(displayed[-1]["record_type"], "activity")
         self.assertEqual(displayed[-1]["text"], "◐ Working…")
-        self.assertIn(("• ◐ Working…", "agent_activity"), lines)
+        self.assertIn(("  ◐ Working…", "agent_activity"), lines)
+        self.assertNotIn(("• ◐ Working…", "agent_activity"), lines)
 
     def test_idle_agent_does_not_add_transient_activity(self) -> None:
         records = [{"role": "assistant", "text": "Done"}]
@@ -368,8 +413,10 @@ class AgentTuiTests(unittest.TestCase):
             "1;5D": "word_left",
             "5C": "word_right",
             "1;2D": "agents",
-            "1;3A": "move_agent_up",
-            "3B": "move_agent_down",
+            "1;3A": "select_agent_up",
+            "3B": "select_agent_down",
+            "1;4A": "move_agent_up",
+            "4B": "move_agent_down",
         }
         for sequence, expected in cases.items():
             with self.subTest(sequence=sequence):
@@ -803,12 +850,18 @@ class AgentTuiTests(unittest.TestCase):
             ) as opened,
         ):
             url = agents_tui.open_agent_viewer(item)
+            typeset_url = agents_tui.open_agent_viewer(item, typeset=True)
 
         self.assertEqual(
             url,
             "http://127.0.0.1:8765/v/relay/remote-host/agent-1?tail=24",
         )
-        self.assertEqual(opened.call_args.args[0], url)
+        self.assertEqual(opened.call_args_list[0].args[0], url)
+        self.assertEqual(
+            typeset_url,
+            "http://127.0.0.1:8765/t/relay/remote-host/agent-1?tail=8",
+        )
+        self.assertEqual(opened.call_args_list[1].args[0], typeset_url)
 
     def test_pane_navigation_can_maximize_and_restore_conversation(self) -> None:
         focus, maximized = agents_tui.change_pane(

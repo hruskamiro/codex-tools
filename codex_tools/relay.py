@@ -10,7 +10,14 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from codex_tools import agents_ui, paths, relay_cache, relay_transport, search
+from codex_tools import (
+    agents_ui,
+    codex_daemon,
+    paths,
+    relay_cache,
+    relay_transport,
+    search,
+)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -340,6 +347,20 @@ def command_serve(args: argparse.Namespace) -> int:
             args.codex_bin,
         )
 
+    def interrupt_agent(agent_id: str) -> dict[str, object]:
+        try:
+            refreshed = relay_cache.refresh_local_agent(
+                cache,
+                agent_id,
+                args.sessions_root,
+                args.session_index,
+                args.control_socket,
+            )
+        except ValueError as exc:
+            raise FileNotFoundError(str(exc)) from exc
+        thread_id = str(refreshed.thread_id or refreshed.session_id or agent_id)
+        return codex_daemon.interrupt_thread(thread_id, args.control_socket)
+
     relay_transport.serve(
         cache,
         config,
@@ -362,6 +383,7 @@ def command_serve(args: argparse.Namespace) -> int:
             args.control_socket,
         ),
         deliver_message=deliver_message,
+        interrupt_agent=interrupt_agent,
     )
     return 0
 

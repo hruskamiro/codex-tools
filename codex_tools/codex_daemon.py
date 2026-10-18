@@ -194,3 +194,34 @@ def live_threads(path: Path | None = None) -> list[dict[str, Any]]:
                 threads.append(thread)
     threads.sort(key=lambda item: int(item.get("updatedAt") or 0), reverse=True)
     return threads
+
+
+def interrupt_thread(thread_id: str, path: Path | None = None) -> dict[str, str]:
+    """Interrupt the active turn in a loaded thread, if there is one."""
+    with DaemonClient(path) as client:
+        response = client.request(
+            "thread/read", {"threadId": thread_id, "includeTurns": True}
+        )
+        thread = response.get("thread")
+        if not isinstance(thread, dict):
+            raise RuntimeError("Codex daemon returned an invalid thread")
+        turns = thread.get("turns")
+        if not isinstance(turns, list):
+            turns = []
+        active = next(
+            (
+                turn
+                for turn in reversed(turns)
+                if isinstance(turn, dict)
+                and turn.get("status") == "inProgress"
+                and isinstance(turn.get("id"), str)
+            ),
+            None,
+        )
+        if active is None:
+            return {"status": "idle", "turn_id": ""}
+        turn_id = str(active["id"])
+        client.request(
+            "turn/interrupt", {"threadId": thread_id, "turnId": turn_id}
+        )
+        return {"status": "interrupt_requested", "turn_id": turn_id}

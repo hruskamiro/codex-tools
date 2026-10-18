@@ -722,6 +722,54 @@ class RelayTransportTests(unittest.TestCase):
         self.assertEqual(request.get_header("Authorization"), "Bearer pairing-key")
         self.assertEqual(json.loads(request.data), message)
 
+    def test_interrupt_agent_uses_authenticated_immediate_request(self) -> None:
+        response = FakeResponse(
+            json.dumps(
+                {"status": "interrupt_requested", "turn_id": "turn-1"}
+            ).encode()
+        )
+
+        with patch.object(relay_transport, "urlopen", return_value=response) as opened:
+            result = relay_transport.interrupt_agent(
+                {"url": "http://localhost:8780", "token": "pairing-key"},
+                "agent/one",
+            )
+
+        request = opened.call_args.args[0]
+        self.assertEqual(result["status"], "interrupt_requested")
+        self.assertEqual(
+            request.full_url,
+            "http://localhost:8780/v1/agents/agent%2Fone/interrupt",
+        )
+        self.assertEqual(request.method, "POST")
+        self.assertEqual(request.get_header("Authorization"), "Bearer pairing-key")
+
+    def test_interrupt_endpoint_calls_control_callback(self) -> None:
+        interrupted: list[str] = []
+        handler = relay_transport.make_handler(
+            object(),  # type: ignore[arg-type]
+            {"identity": {"token": "secret"}},
+            interrupt_agent=lambda agent_id: (
+                interrupted.append(agent_id)
+                or {"status": "interrupt_requested", "turn_id": "turn-1"}
+            ),
+        )
+        headers = Message()
+        headers["Authorization"] = "Bearer secret"
+        headers["Content-Type"] = "application/json"
+        headers["Content-Length"] = "2"
+        instance = handler.__new__(handler)
+        instance.path = "/v1/agents/agent-1/interrupt"
+        instance.headers = headers
+        instance.rfile = io.BytesIO(b"{}")
+        responses: list[tuple[dict[str, object], object]] = []
+        instance._json = lambda payload, status=relay_transport.HTTPStatus.OK: responses.append((payload, status))  # type: ignore[method-assign]
+
+        instance.do_POST()
+
+        self.assertEqual(interrupted, ["agent-1"])
+        self.assertEqual(responses[0][0]["status"], "interrupt_requested")
+
     def test_deliver_pending_marks_acknowledged_message_delivered(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             cache = relay_cache.RelayCache(Path(temporary) / "relay.sqlite3")

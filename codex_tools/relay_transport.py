@@ -746,6 +746,34 @@ def post_message(
     return payload
 
 
+def interrupt_agent(
+    peer: dict[str, Any], agent_id: str, timeout: float = 10.0
+) -> dict[str, Any]:
+    """Request an immediate interruption; unlike messages, this is never retried."""
+    request = Request(
+        str(peer["url"]).rstrip("/")
+        + f"/v1/agents/{quote(agent_id, safe='')}/interrupt",
+        data=b"{}",
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {peer['token']}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+    )
+    context = None
+    if str(peer["url"]).startswith("https://"):
+        context = ssl.create_default_context(cafile=peer.get("ca_file") or None)
+    with urlopen(request, timeout=timeout, context=context) as response:
+        response_body = response.read(MAX_MESSAGE_BYTES + 1)
+    if len(response_body) > MAX_MESSAGE_BYTES:
+        raise ValueError("relay response exceeds the 128 KiB safety limit")
+    payload = json.loads(response_body)
+    if not isinstance(payload, dict):
+        raise ValueError("relay returned an invalid interruption response")
+    return payload
+
+
 def deliver_pending(
     cache: relay_cache.RelayCache,
     peer: dict[str, Any],
@@ -908,6 +936,7 @@ def make_handler(
     refresh: Callable[[], None] | None = None,
     refresh_agent: Callable[[str], None] | None = None,
     deliver_message: Callable[[str, str, dict[str, Any]], None] | None = None,
+    interrupt_agent: Callable[[str], dict[str, Any]] | None = None,
     event_monitor: JsonlChangeMonitor | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     token = str(config["identity"]["token"])
@@ -1012,6 +1041,25 @@ def make_handler(
             supplied = self.headers.get("Authorization", "")
             if not hmac.compare_digest(supplied, f"Bearer {token}"):
                 self._json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
+                return
+            interrupt_match = re.fullmatch(
+                r"/v1/agents/([^/]+)/interrupt", request_path
+            )
+            if interrupt_match is not None and interrupt_agent is not None:
+                try:
+                    if (
+                        self.headers.get_content_type() != "application/json"
+                        or int(self.headers.get("Content-Length", "0")) > 1024
+                    ):
+                        raise ValueError("invalid interruption request")
+                    agent_id = unquote(interrupt_match.group(1))
+                    if not agent_id:
+                        raise ValueError("invalid agent ID")
+                    self._json(interrupt_agent(agent_id))
+                except FileNotFoundError as exc:
+                    self._json({"error": str(exc)}, HTTPStatus.GONE)
+                except (OSError, RuntimeError, ValueError) as exc:
+                    self._json({"error": str(exc)}, HTTPStatus.BAD_GATEWAY)
                 return
             if request_path != "/v1/messages" or deliver_message is None:
                 self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
@@ -1143,6 +1191,7 @@ def serve(
     refresh: Callable[[], None] | None = None,
     refresh_agent: Callable[[str], None] | None = None,
     deliver_message: Callable[[str, str, dict[str, Any]], None] | None = None,
+    interrupt_agent: Callable[[str], dict[str, Any]] | None = None,
 ) -> None:
     validate_server_transport(
         host,
@@ -1160,6 +1209,7 @@ def serve(
             refresh,
             refresh_agent,
             deliver_message,
+            interrupt_agent,
             event_monitor,
         ),
     )

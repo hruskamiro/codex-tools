@@ -215,6 +215,33 @@ class AgentCommandTests(unittest.TestCase):
         self.assertEqual(result, 2)
         self.assertIn("non-empty message", error.getvalue())
 
+    def test_stop_interrupts_the_active_turn(self) -> None:
+        output = io.StringIO()
+        args = argparse.Namespace(
+            agent="viewer",
+            json=False,
+            sessions_root=Path("/sessions"),
+            session_index=Path("/index"),
+            control_socket=Path("/control.sock"),
+        )
+        with (
+            patch.object(agents, "agent_summaries", return_value=[AGENT]),
+            patch.object(
+                agents.codex_daemon,
+                "interrupt_thread",
+                return_value={
+                    "status": "interrupt_requested",
+                    "turn_id": "turn-1",
+                },
+            ) as interrupt,
+            redirect_stdout(output),
+        ):
+            result = agents.command_stop(args)
+
+        self.assertEqual(result, 0)
+        interrupt.assert_called_once_with("01thread", Path("/control.sock"))
+        self.assertIn("Stop requested", output.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

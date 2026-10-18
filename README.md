@@ -109,6 +109,7 @@ exchange, or queue a message using the same session names and IDs:
 ct agents
 ct agents show SESSION
 ct agents send SESSION "Check the tests and report back."
+ct agents stop SESSION
 ct agents ui
 ```
 
@@ -137,11 +138,14 @@ the selected agent's composer. Ctrl-P/Ctrl-N move
 between draft lines, while Ctrl-Left/Ctrl-Right move by word. Page Up/Down or
 the mouse wheel scrolls the conversation. Ctrl-R refreshes the selected agent,
 Ctrl-S refreshes all local sessions and configured peers, Ctrl-V opens the
-browser viewer, Ctrl-F searches, and Ctrl-X maximizes or restores the
-conversation; Alt-M does the same without consuming a typing key. Press Ctrl-C
-to quit. Agents keep a stable creation-time order instead of jumping after new
+browser viewer, Ctrl-T opens the typeset viewer, Ctrl-F searches, and Ctrl-X
+maximizes or restores the conversation; Alt-M does the same without consuming
+a typing key. Ctrl-G stops the selected agent's active turn without discarding
+its queued prompts. Press Ctrl-C to quit. Agents keep a stable creation-time
+order instead of jumping after new
 activity; the first nine are numbered and Alt-1 through Alt-9 switches to them
-directly. Alt-Up and Alt-Down move the selected agent within its host group;
+directly. Alt-Up and Alt-Down select the previous or next agent, while
+Alt-Shift-Up and Alt-Shift-Down move it within its host group;
 the custom order persists across refreshes and console restarts. With
 `--no-local`, Ctrl-S skips the local refresh.
 
@@ -213,6 +217,13 @@ immediately to its `codex queue`; otherwise they remain pending. Ctrl-R,
 Ctrl-S, and `ct relay sync PEER` retry pending messages. `ct relay outbox`
 shows pending, delivered, and permanently failed messages; add `--json` for
 machine-readable status.
+
+Prompt delivery and execution control are intentionally separate. Codex's
+native per-thread queue is the execution source of truth: a prompt sent to a
+busy agent waits for its turn. `ct agents stop SESSION` or Ctrl-G interrupts
+only the turn currently running. A remote stop is an immediate authenticated
+request and is never saved for later replay, because a delayed stop could
+otherwise interrupt the wrong future turn.
 
 The receiver records each message ID before dispatch and acknowledges accepted
 IDs idempotently, so an ordinary reconnect or repeated sync does not submit the

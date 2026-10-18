@@ -27,6 +27,7 @@ from pygments.util import ClassNotFound
 
 from codex_tools import (
     agents_ui,
+    codex_daemon,
     config as user_config,
     paths,
     relay_cache,
@@ -671,7 +672,7 @@ def agent_delivery_counts(
     )
 
 
-def open_agent_viewer(item: AgentItem) -> str:
+def open_agent_viewer(item: AgentItem, *, typeset: bool = False) -> str:
     # Imported lazily because viewer reads the relay cache, whose local refresh
     # path imports the agents package.
     from codex_tools import viewer
@@ -708,13 +709,51 @@ def open_agent_viewer(item: AgentItem) -> str:
             or item.agent.get("thread_id")
             or agent_id
         )
-        url = viewer.view_url(base_url, "", 24, False, session_id, "markdown")
+        url = viewer.view_url(
+            base_url,
+            "",
+            8 if typeset else 24,
+            False,
+            session_id,
+            "latex" if typeset else "markdown",
+        )
     else:
-        url = base_url + viewer.relay_view_path(item.host_id, agent_id)
+        url = base_url + viewer.relay_view_path(
+            item.host_id,
+            agent_id,
+            mode="latex" if typeset else "markdown",
+            tail=8 if typeset else 24,
+        )
     browser_args = viewer.default_server_args()
     if not viewer.open_browser(url, browser_args):
         raise RuntimeError("browser could not be opened")
     return url
+
+
+def stop_agent_turn(
+    item: AgentItem,
+    control_socket: Path | None,
+    relay_config: Path,
+) -> dict[str, Any]:
+    """Request an immediate stop locally or through the selected relay peer."""
+    if item.host_id == "local":
+        thread_id = str(
+            item.agent.get("thread_id")
+            or item.agent.get("session_id")
+            or item.agent.get("agent_id")
+            or ""
+        )
+        if not thread_id:
+            raise ValueError("selected agent has no thread ID")
+        return codex_daemon.interrupt_thread(thread_id, control_socket)
+    config = relay_transport.load_config(relay_config)
+    peer_name = peer_name_for_item(config, item)
+    if peer_name is None:
+        raise ValueError(f"no configured peer matches {item.host_name}")
+    peer = config["peers"][peer_name]
+    return relay_transport.interrupt_agent(
+        peer, str(item.agent["agent_id"])
+    )
 
 
 def filtered_items(items: list[AgentItem], query: str) -> list[AgentItem]:
@@ -840,7 +879,7 @@ def transcript_lines(
                 )
                 for status_index, status_line in enumerate(status_lines)
             )
-        if role == "assistant":
+        if role == "assistant" and not activity:
             for line_index in range(record_start, len(lines)):
                 line, style = lines[line_index]
                 if not line.strip():
@@ -1504,8 +1543,12 @@ def escape_action(stdscr: Any) -> tuple[str, str]:
         if suffix in {"1;5C", "5C"}:
             return "word_right", ""
         if suffix in {"1;3A", "3A"}:
-            return "move_agent_up", ""
+            return "select_agent_up", ""
         if suffix in {"1;3B", "3B"}:
+            return "select_agent_down", ""
+        if suffix in {"1;4A", "4A"}:
+            return "move_agent_up", ""
+        if suffix in {"1;4B", "4B"}:
             return "move_agent_down", ""
         if suffix == "1;2D":
             return "agents", ""
@@ -2178,15 +2221,16 @@ def run_console(
             if requests_console_exit(code if code is not None else -1):
                 return finish()
             extended_key = terminal_key_name(key)
-            if code == 27 or extended_key in {"kUP3", "kDN3"}:
+            if code == 27 or extended_key in {"kUP3", "kDN3", "kUP4", "kDN4"}:
                 if code == 27:
                     action, pasted = escape_action(stdscr)
                 else:
-                    action = (
-                        "move_agent_up"
-                        if extended_key == "kUP3"
-                        else "move_agent_down"
-                    )
+                    action = {
+                        "kUP3": "select_agent_up",
+                        "kDN3": "select_agent_down",
+                        "kUP4": "move_agent_up",
+                        "kDN4": "move_agent_down",
+                    }[extended_key]
                     pasted = ""
                 if action == "agent":
                     shortcut_index = int(pasted) - 1
@@ -2195,6 +2239,14 @@ def run_console(
                         settings_selected = False
                         focus = "conversation"
                         scroll = 0
+                elif action in {"select_agent_up", "select_agent_down"} and shown:
+                    direction = -1 if action == "select_agent_up" else 1
+                    if settings_selected:
+                        selected = 0 if direction > 0 else len(shown) - 1
+                        settings_selected = False
+                    else:
+                        selected = max(0, min(len(shown) - 1, selected + direction))
+                    scroll = 0
                 elif action in {"move_agent_up", "move_agent_down"} and current:
                     previous_items = list(items)
                     direction = -1 if action == "move_agent_up" else 1
@@ -2316,6 +2368,22 @@ def run_console(
             elif code == curses.KEY_NPAGE:
                 focus = "conversation"
                 scroll = max(0, scroll - max(1, height - 7))
+            elif code == 7:  # Ctrl-G
+                if current is None:
+                    status = "No agent selected."
+                else:
+                    show_status(stdscr, "Requesting stop…", palette["status"])
+                    try:
+                        result = stop_agent_turn(
+                            current, control_socket, relay_config
+                        )
+                        status = (
+                            "Agent is already idle."
+                            if result.get("status") == "idle"
+                            else "Stop requested; queued messages remain queued."
+                        )
+                    except (OSError, RuntimeError, ValueError) as exc:
+                        status = f"Stop failed: {exc}"
             elif code == 6:  # Ctrl-F
                 entered = edit_line(stdscr, "Find: ", query)
                 if entered is not None:
@@ -2329,6 +2397,13 @@ def run_console(
                     status = "Opened conversation in viewer."
                 except (OSError, RuntimeError, ValueError) as exc:
                     status = f"Viewer failed: {exc}"
+            elif code == 20 and current:  # Ctrl-T
+                show_status(stdscr, "Opening typeset viewer…", palette["status"])
+                try:
+                    open_agent_viewer(current, typeset=True)
+                    status = "Opened conversation in typeset viewer."
+                except (OSError, RuntimeError, ValueError) as exc:
+                    status = f"Typeset viewer failed: {exc}"
             elif code == 24:  # Ctrl-X
                 focus, maximized = change_pane(focus, maximized, ord("m"))
             elif code == 18:  # Ctrl-R

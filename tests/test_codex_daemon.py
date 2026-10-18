@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import struct
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from codex_tools import codex_daemon
 
@@ -56,6 +56,48 @@ class CodexDaemonTests(unittest.TestCase):
 
         self.assertEqual(result, ["one", "two", "three"])
         self.assertEqual(client.request.call_count, 2)
+
+    def test_interrupt_thread_targets_the_active_turn(self) -> None:
+        client = Mock()
+        client.request.side_effect = [
+            {
+                "thread": {
+                    "turns": [
+                        {"id": "done", "status": "completed"},
+                        {"id": "active", "status": "inProgress"},
+                    ]
+                }
+            },
+            {},
+        ]
+        context = Mock()
+        context.__enter__ = Mock(return_value=client)
+        context.__exit__ = Mock(return_value=None)
+
+        with patch.object(codex_daemon, "DaemonClient", return_value=context):
+            result = codex_daemon.interrupt_thread("thread-1")
+
+        self.assertEqual(
+            result, {"status": "interrupt_requested", "turn_id": "active"}
+        )
+        client.request.assert_any_call(
+            "turn/interrupt", {"threadId": "thread-1", "turnId": "active"}
+        )
+
+    def test_interrupt_thread_is_a_noop_when_idle(self) -> None:
+        client = Mock()
+        client.request.return_value = {
+            "thread": {"turns": [{"id": "done", "status": "completed"}]}
+        }
+        context = Mock()
+        context.__enter__ = Mock(return_value=client)
+        context.__exit__ = Mock(return_value=None)
+
+        with patch.object(codex_daemon, "DaemonClient", return_value=context):
+            result = codex_daemon.interrupt_thread("thread-1")
+
+        self.assertEqual(result, {"status": "idle", "turn_id": ""})
+        self.assertEqual(client.request.call_count, 1)
 
 
 if __name__ == "__main__":

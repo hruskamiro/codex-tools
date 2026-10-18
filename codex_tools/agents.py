@@ -76,6 +76,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     send.add_argument("--codex-bin", default="codex", help=argparse.SUPPRESS)
     add_source_args(send)
 
+    stop = commands.add_parser("stop", help="Stop an agent's active turn.")
+    stop.add_argument("agent", help="Exact name or unique session-ID prefix.")
+    stop.add_argument("--json", action="store_true")
+    add_source_args(stop)
+
     ui = commands.add_parser(
         "ui",
         help="Open the terminal Agent Console.",
@@ -92,7 +97,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
   Ctrl-R / Ctrl-S          refresh selected / refresh everything
   Ctrl-F / Ctrl-V          find an agent / open in the viewer
   Ctrl-X                   maximize or restore the conversation
-  Ctrl-C twice             quit""",
+  Ctrl-G                   stop the active turn
+  Ctrl-C                   quit""",
     )
     ui.add_argument(
         "--no-refresh",
@@ -393,6 +399,28 @@ def command_send(args: argparse.Namespace) -> int:
     return result.returncode
 
 
+def command_stop(args: argparse.Namespace) -> int:
+    agent = resolve_agent(
+        agent_summaries(
+            args.sessions_root,
+            args.session_index,
+            getattr(args, "control_socket", None),
+        ),
+        args.agent,
+    )
+    identifier = agent_identifier(agent)
+    if not identifier:
+        raise ValueError("selected agent has no thread ID")
+    result = codex_daemon.interrupt_thread(identifier, args.control_socket)
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    elif result["status"] == "idle":
+        print(f"{display_name(agent)} is already idle.")
+    else:
+        print(f"Stop requested for {display_name(agent)}.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
@@ -402,6 +430,8 @@ def main(argv: list[str] | None = None) -> int:
             return command_show(args)
         if args.agents_command == "send":
             return command_send(args)
+        if args.agents_command == "stop":
+            return command_stop(args)
         if args.agents_command == "ui":
             return agents_tui.command_ui(args)
         raise AssertionError(f"unhandled agents command: {args.agents_command}")
