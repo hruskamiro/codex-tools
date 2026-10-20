@@ -194,6 +194,38 @@ def agent_is_working(agent: dict[str, Any]) -> bool:
     )
 
 
+def receipt_status(receipt: dict[str, Any]) -> str:
+    if receipt.get("record_key"):
+        return "Delivered · in conversation"
+    delivery = receipt["current_delivery"]
+    error = str(receipt.get("current_error") or "")
+    if delivery == "delivered":
+        return f"Delivered · start request failed: {error}" if error else "Delivered to Codex"
+    if delivery == "failed":
+        return f"Delivery failed · {error or 'unknown error'}"
+    if delivery == "sending":
+        return "Delivery unconfirmed · check conversation"
+    return "Not delivered · waiting to retry" if error else "Waiting to sync"
+
+
+def records_with_message_receipts(
+    records: list[dict[str, Any]], receipts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    associated = {receipt["record_key"]: receipt for receipt in receipts if receipt.get("record_key")}
+    result = []
+    for record in records:
+        receipt = associated.get(relay_cache.user_record_key(record)) if record.get("role") == "user" else None
+        result.append({**record, "_status": receipt_status(receipt),
+                       "_message_id": receipt["message_id"]} if receipt else record)
+    for receipt in receipts:
+        if receipt.get("record_key"):
+            continue
+        result.append({"role": "user", "text": receipt["text"],
+                       "timestamp": receipt["created_at"], "record_type": "outgoing",
+                       "_message_id": receipt["message_id"], "_status": receipt_status(receipt)})
+    return result
+
+
 def working_frame(now: float | None = None) -> str:
     moment = time.monotonic() if now is None else now
     return WORKING_FRAMES[int(moment * 5) % len(WORKING_FRAMES)]

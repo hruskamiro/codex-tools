@@ -16,6 +16,8 @@ from typing import Any, Iterator, Sequence
 from codex_tools import agents, paths, search
 
 
+# Metadata and receipt storage are additive v4 extensions: older readers/writers can keep
+# using the cache while a console or relay is being restarted.
 SCHEMA_VERSION = 4
 DEFAULT_CACHE_PATH = paths.RELAY_CACHE_FILE
 RECENT_RECORD_LIMIT = 20
@@ -49,10 +51,18 @@ class CachedAgent:
     status: str = "unknown"
     status_label: str = "unknown"
     event_cursor: str = ""
+    model: str = ""
+    reasoning_effort: str = ""
 
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def user_record_key(record: dict[str, Any]) -> str:
+    """Stable across transcript tail refreshes and local/relay line numbering."""
+    value = [str(record.get("timestamp") or ""), str(record.get("text") or "").strip()]
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
 class RelayCache:
@@ -156,6 +166,20 @@ class RelayCache:
                 last_error TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS relay_message_receipts (
+                message_id TEXT PRIMARY KEY,
+                host_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                text TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                delivery TEXT NOT NULL,
+                last_error TEXT NOT NULL DEFAULT '',
+                baseline_keys_json TEXT NOT NULL,
+                record_key TEXT
+            );
+            CREATE INDEX IF NOT EXISTS relay_receipts_agent
+                ON relay_message_receipts(host_id, agent_id, record_key);
+
             CREATE INDEX IF NOT EXISTS relay_agents_updated
                 ON relay_agents(host_id, updated_at DESC);
             CREATE INDEX IF NOT EXISTS relay_outbox_state
@@ -180,6 +204,11 @@ class RelayCache:
             connection.execute(
                 "ALTER TABLE relay_agents ADD COLUMN event_cursor TEXT NOT NULL DEFAULT ''"
             )
+        for column in ("model", "reasoning_effort", "synced_at"):
+            if column not in agent_columns:
+                connection.execute(
+                    f"ALTER TABLE relay_agents ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
+                )
         outbox_columns = {
             str(row[1])
             for row in connection.execute("PRAGMA table_info(relay_outbox)")
@@ -285,8 +314,8 @@ class RelayCache:
                 host_id, agent_id, session_id, thread_id, rollout_id,
                 title, title_source, cwd, source, created_at, updated_at,
                 origin_path, status, status_label
-                , event_cursor
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                , event_cursor, model, reasoning_effort, synced_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(host_id, agent_id) DO UPDATE SET
                 session_id = excluded.session_id,
                 thread_id = excluded.thread_id,
@@ -300,7 +329,10 @@ class RelayCache:
                 origin_path = excluded.origin_path,
                 status = excluded.status,
                 status_label = excluded.status_label,
-                event_cursor = excluded.event_cursor
+                event_cursor = excluded.event_cursor,
+                model = excluded.model,
+                reasoning_effort = excluded.reasoning_effort,
+                synced_at = excluded.synced_at
             """,
             (
                 host_id,
@@ -318,6 +350,9 @@ class RelayCache:
                 agent.status,
                 agent.status_label,
                 agent.event_cursor,
+                agent.model,
+                agent.reasoning_effort,
+                utc_now(),
             ),
         )
         connection.execute(
@@ -400,16 +435,22 @@ class RelayCache:
         status: str,
         status_label: str,
         updated_at: str | None = None,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> None:
         with self.connect() as connection, connection:
             cursor = connection.execute(
                 """
                 UPDATE relay_agents
                 SET status = ?, status_label = ?,
-                    updated_at = COALESCE(NULLIF(?, ''), updated_at)
+                    updated_at = COALESCE(NULLIF(?, ''), updated_at),
+                    model = COALESCE(?, model),
+                    reasoning_effort = COALESCE(?, reasoning_effort),
+                    synced_at = ?
                 WHERE host_id = ? AND agent_id = ?
                 """,
-                (status, status_label, updated_at or "", host_id, agent_id),
+                (status, status_label, updated_at or "", model, reasoning_effort,
+                 utc_now(), host_id, agent_id),
             )
             if cursor.rowcount != 1:
                 raise FileNotFoundError(f"cached agent not found: {agent_id}")
@@ -466,10 +507,10 @@ class RelayCache:
             connection.execute(
                 """
                 UPDATE relay_agents
-                SET event_cursor = ?, updated_at = ?
+                SET event_cursor = ?, updated_at = ?, synced_at = ?
                 WHERE host_id = ? AND agent_id = ?
                 """,
-                (event_cursor, utc_now(), host_id, agent_id),
+                (event_cursor, utc_now(), utc_now(), host_id, agent_id),
             )
         return len(records)
 
@@ -481,6 +522,7 @@ class RelayCache:
         *,
         kind: str = "message",
         message_id: str | None = None,
+        track: bool = False,
     ) -> str:
         selected_id = message_id or str(uuid.uuid4())
         now = utc_now()
@@ -502,7 +544,86 @@ class RelayCache:
                     now,
                 ),
             )
+            if track:
+                self._insert_message_receipt(
+                    connection, selected_id, host_id, agent_id,
+                    str(payload.get("text") or "").strip(), now, "pending",
+                )
         return selected_id
+
+    @staticmethod
+    def _insert_message_receipt(
+        connection: sqlite3.Connection, message_id: str, host_id: str,
+        agent_id: str, text: str, created_at: str, delivery: str,
+    ) -> None:
+        existing = connection.execute(
+            "SELECT timestamp, text FROM relay_records "
+            "WHERE host_id = ? AND agent_id = ? AND role = 'user'",
+            (host_id, agent_id),
+        ).fetchall()
+        baseline = [user_record_key(dict(row)) for row in existing
+                    if str(row["text"]).strip() == text]
+        connection.execute(
+            "INSERT OR IGNORE INTO relay_message_receipts "
+            "(message_id, host_id, agent_id, text, created_at, delivery, baseline_keys_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (message_id, host_id, agent_id, text, created_at, delivery, json.dumps(baseline)),
+        )
+
+    def record_message_receipt(self, host_id: str, agent_id: str, text: str) -> str:
+        message_id = str(uuid.uuid4())
+        with self.connect() as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._insert_message_receipt(
+                connection, message_id, host_id, agent_id, text.strip(), utc_now(), "sending"
+            )
+        return message_id
+
+    def update_message_receipt(self, message_id: str, *, delivery: str, error: str = "") -> None:
+        if delivery not in {"sending", "delivered", "failed"}:
+            raise ValueError(f"invalid receipt delivery state: {delivery}")
+        with self.connect() as connection, connection:
+            connection.execute(
+                "UPDATE relay_message_receipts SET delivery = ?, last_error = ? WHERE message_id = ?",
+                (delivery, error, message_id),
+            )
+
+    def reconcile_message_receipts(
+        self, host_id: str, agent_id: str, records: Sequence[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Persist transcript associations, retaining receipts outside the current tail."""
+        user_records = [(user_record_key(record), str(record.get("text") or "").strip())
+                        for record in records if record.get("role") == "user"]
+        keys = [key for key, _ in user_records]
+        visible_clause = "r.record_key IS NULL"
+        if keys:
+            visible_clause += " OR r.record_key IN (" + ",".join("?" for _ in keys) + ")"
+        with self.connect() as connection, connection:
+            rows = connection.execute(
+                "SELECT r.*, COALESCE(o.state, r.delivery) AS current_delivery, "
+                "COALESCE(o.last_error, r.last_error) AS current_error "
+                "FROM relay_message_receipts r LEFT JOIN relay_outbox o USING(message_id) "
+                "WHERE r.host_id = ? AND r.agent_id = ? AND (" + visible_clause + ") "
+                "ORDER BY r.created_at, r.rowid",
+                [host_id, agent_id, *keys],
+            ).fetchall()
+            receipts = [dict(row) for row in rows]
+            claimed = {row["record_key"] for row in receipts if row["record_key"]}
+            for receipt in receipts:
+                if receipt["record_key"] or receipt["current_delivery"] == "failed":
+                    continue
+                baseline = set(json.loads(receipt["baseline_keys_json"]))
+                match = next((key for key, text in user_records
+                              if text == receipt["text"] and key not in baseline and key not in claimed), None)
+                if match:
+                    connection.execute(
+                        "UPDATE relay_message_receipts SET record_key = ? "
+                        "WHERE message_id = ? AND record_key IS NULL",
+                        (match, receipt["message_id"]),
+                    )
+                    receipt["record_key"] = match
+                    claimed.add(match)
+        return receipts
 
     def pending(self, host_id: str | None = None) -> list[dict[str, Any]]:
         return self.outbox(host_id=host_id, states=("pending",))
@@ -656,6 +777,8 @@ def cached_agent_from_local(
         ),
         status=str(summary.get("status") or "unknown"),
         status_label=str(summary.get("statusLabel") or "unknown"),
+        model=str(summary.get("model") or ""),
+        reasoning_effort=str(summary.get("reasoningEffort") or ""),
     )
 
 

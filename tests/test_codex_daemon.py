@@ -18,6 +18,47 @@ def server_frame(value: dict[str, object], opcode: int = 1) -> bytes:
 
 
 class CodexDaemonTests(unittest.TestCase):
+    def test_start_queue_after_stop_targets_oldest_submission(self) -> None:
+        client = Mock()
+        client.request.side_effect = [
+            {"thread": {"status": {"type": "idle"}}},
+            {"data": [{"id": "oldest"}]}, {"turn": {"id": "new-turn"}},
+        ]
+        with patch.object(codex_daemon, "DaemonClient") as context:
+            context.return_value.__enter__.return_value = client
+            self.assertEqual(codex_daemon.start_queued_thread_if_idle("thread-1"), "started")
+        client.request.assert_any_call("thread/queue/start", {
+            "threadId": "thread-1", "queuedSubmissionId": "oldest",
+        })
+
+    def test_start_queue_never_interrupts_busy_or_blocked_agent(self) -> None:
+        for status in ("active", "notLoaded", "systemError"):
+            with self.subTest(status=status):
+                client = Mock()
+                client.request.return_value = {"thread": {"status": {"type": status}}}
+                with patch.object(codex_daemon, "DaemonClient") as context:
+                    context.return_value.__enter__.return_value = client
+                    self.assertEqual(codex_daemon.start_queued_thread_if_idle("thread-1"), "busy")
+                self.assertEqual(client.request.call_count, 1)
+
+    def test_start_queue_is_noop_when_already_consumed(self) -> None:
+        client = Mock()
+        client.request.side_effect = [{"thread": {"status": {"type": "idle"}}}, {"data": []}]
+        with patch.object(codex_daemon, "DaemonClient") as context:
+            context.return_value.__enter__.return_value = client
+            self.assertEqual(codex_daemon.start_queued_thread_if_idle("thread-1"), "empty")
+        self.assertEqual(client.request.call_count, 2)
+
+    def test_start_race_with_another_client_is_not_a_failure(self) -> None:
+        client = Mock()
+        client.request.side_effect = [
+            {"thread": {"status": {"type": "idle"}}}, {"data": [{"id": "one"}]},
+            RuntimeError("already running"), {"thread": {"status": {"type": "active"}}},
+        ]
+        with patch.object(codex_daemon, "DaemonClient") as context:
+            context.return_value.__enter__.return_value = client
+            self.assertEqual(codex_daemon.start_queued_thread_if_idle("thread-1"), "busy")
+
     def test_receives_websocket_json_and_answers_ping(self) -> None:
         class FakeSocket:
             def __init__(self, incoming: bytes) -> None:

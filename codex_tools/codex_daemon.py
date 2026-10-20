@@ -225,3 +225,41 @@ def interrupt_thread(thread_id: str, path: Path | None = None) -> dict[str, str]
             "turn/interrupt", {"threadId": thread_id, "turnId": turn_id}
         )
         return {"status": "interrupt_requested", "turn_id": turn_id}
+
+
+def start_queued_thread_if_idle(thread_id: str, path: Path | None = None) -> str:
+    """Wake an idle queue without interrupting a turn or bypassing older input."""
+    with DaemonClient(path) as client:
+        response = client.request(
+            "thread/read", {"threadId": thread_id, "includeTurns": False}
+        )
+        thread = response.get("thread")
+        if not isinstance(thread, dict):
+            raise RuntimeError("Codex daemon returned an invalid thread")
+        status = thread.get("status") or {}
+        if not isinstance(status, dict) or status.get("type") != "idle":
+            return "busy"
+        queued = client.request("thread/queue/list", {"threadId": thread_id, "limit": 1})
+        submissions = queued.get("data") or []
+        if not isinstance(submissions, list):
+            raise RuntimeError("Codex daemon returned an invalid queue")
+        if not submissions:
+            return "empty"
+        submission_id = submissions[0].get("id") if isinstance(submissions[0], dict) else None
+        if not isinstance(submission_id, str) or not submission_id:
+            raise RuntimeError("Codex daemon returned an invalid queued submission")
+        try:
+            client.request("thread/queue/start", {
+                "threadId": thread_id, "queuedSubmissionId": submission_id,
+            })
+        except RuntimeError:
+            # Another client may have started work between the read and start.
+            latest = client.request(
+                "thread/read", {"threadId": thread_id, "includeTurns": False}
+            )
+            latest_thread = latest.get("thread") or {}
+            latest_status = latest_thread.get("status") if isinstance(latest_thread, dict) else None
+            if isinstance(latest_status, dict) and latest_status.get("type") == "active":
+                return "busy"
+            raise
+        return "started"

@@ -19,6 +19,42 @@ def cached_agent() -> relay_cache.CachedAgent:
 
 
 class AgentUiTests(unittest.TestCase):
+    def test_enter_preserves_start_intent_in_remote_outbox(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = relay_cache.RelayCache(Path(temporary) / "cache.sqlite3")
+            cache.replace_host_snapshot("home", "Home", [cached_agent()])
+            agents_ui.send_message(cache, {"host": "home", "agent": "agent-1",
+                                          "message": "Continue", "start": True}, "codex")
+            self.assertEqual(cache.pending("home")[0]["payload"], {"text": "Continue", "start": True})
+
+    def test_enter_wakes_queue_but_tab_does_not(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = relay_cache.RelayCache(Path(temporary) / "cache.sqlite3")
+            cache.replace_host_snapshot("local", "Local", [cached_agent()])
+            with patch.object(agents_ui.subprocess, "run") as run, patch.object(
+                agents_ui.codex_daemon, "start_queued_thread_if_idle"
+            ) as start:
+                run.return_value.returncode = 0
+                for intent in (False, True):
+                    agents_ui.send_message(cache, {"host": "local", "agent": "agent-1",
+                        "message": "Continue", "start": intent}, "codex", control_socket=Path("/control"))
+                self.assertEqual(run.call_count, 2)
+                start.assert_called_once_with("thread-1", Path("/control"))
+
+    def test_start_failure_does_not_report_send_failure_or_requeue(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = relay_cache.RelayCache(Path(temporary) / "cache.sqlite3")
+            cache.replace_host_snapshot("local", "Local", [cached_agent()])
+            with patch.object(agents_ui.subprocess, "run") as run, patch.object(
+                agents_ui.codex_daemon, "start_queued_thread_if_idle", side_effect=RuntimeError("unavailable")
+            ):
+                run.return_value.returncode = 0
+                result = agents_ui.send_message(cache, {"host": "local", "agent": "agent-1",
+                    "message": "Continue", "start": True}, "codex")
+                run.assert_called_once()
+            self.assertEqual(result["delivery"], "sent")
+            self.assertEqual(result["start_error"], "unavailable")
+
     def test_console_only_accepts_loopback_hosts(self) -> None:
         self.assertTrue(agents_ui.is_loopback("127.0.0.1"))
         self.assertTrue(agents_ui.is_loopback("localhost"))

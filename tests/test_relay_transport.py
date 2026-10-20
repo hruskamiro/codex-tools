@@ -30,6 +30,8 @@ def agent() -> relay_cache.CachedAgent:
         origin_path="/private/session.jsonl",
         status="ready",
         status_label="Ready",
+        model="test-model",
+        reasoning_effort="high",
         records=(
             relay_cache.CachedRecord(
                 "2026-10-07T11:00:00Z", "assistant", "Done", 4, "message"
@@ -215,6 +217,8 @@ class RelayTransportTests(unittest.TestCase):
                     "status": "active",
                     "status_label": "working",
                     "updated_at": "2026-10-09T12:00:00Z",
+                    "model": "updated-model",
+                    "reasoning_effort": "low",
                 },
             }
 
@@ -229,6 +233,8 @@ class RelayTransportTests(unittest.TestCase):
                 cache.agents("host-1")[0]["event_cursor"], "new-cursor"
             )
             self.assertEqual(cache.agents("host-1")[0]["status"], "active")
+            self.assertEqual(cache.agents("host-1")[0]["model"], "updated-model")
+            self.assertEqual(cache.agents("host-1")[0]["reasoning_effort"], "low")
             self.assertEqual(
                 cache.agents("host-1")[0]["status_label"], "working"
             )
@@ -325,6 +331,8 @@ class RelayTransportTests(unittest.TestCase):
                     "status": "active",
                     "status_label": "working",
                     "updated_at": "2026-10-07T11:00:00Z",
+                    "model": "test-model",
+                    "reasoning_effort": "high",
                 },
             )
 
@@ -408,15 +416,16 @@ class RelayTransportTests(unittest.TestCase):
             ):
                 result = relay.command_serve(args)
                 deliver = serve.call_args.kwargs["deliver_message"]
-                deliver("message-1", "agent-1", {"text": "Continue"})
+                deliver("message-1", "agent-1", {"text": "Continue", "start": True})
 
         self.assertEqual(result, 0)
         refresh_agent.assert_called_once()
         self.assertEqual(
             send_message.call_args.args[1],
-            {"host": "local", "agent": "agent-1", "message": "Continue"},
+            {"host": "local", "agent": "agent-1", "message": "Continue", "start": True},
         )
         self.assertEqual(send_message.call_args.args[2], "codex-test")
+        self.assertEqual(send_message.call_args.kwargs, {"control_socket": None})
 
     def test_initialize_creates_private_identity_and_refuses_overwrite(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -498,6 +507,8 @@ class RelayTransportTests(unittest.TestCase):
             self.assertNotIn("origin_path", payload["agents"][0])
             self.assertEqual(target.hosts()[0]["base_url"], "https://desktop:8780")
             self.assertEqual(target.agents("host-1")[0]["title"], "Relay work")
+            self.assertEqual(target.agents("host-1")[0]["model"], "test-model")
+            self.assertEqual(target.agents("host-1")[0]["reasoning_effort"], "high")
             self.assertEqual(target.records("host-1", "agent-1")[0]["text"], "Done")
 
     def test_fetch_uses_bearer_key(self) -> None:
@@ -790,6 +801,49 @@ class RelayTransportTests(unittest.TestCase):
             self.assertEqual(result["delivered"], 1)
             self.assertEqual(cache.outbox()[0]["state"], "delivered")
             self.assertEqual(post.call_args.args[1]["message_id"], message_id)
+
+    def test_delivered_message_with_start_failure_is_not_enqueued_again(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = relay_cache.RelayCache(Path(temporary) / "relay.sqlite3")
+            cache.replace_host_snapshot("home", "Home", [agent()])
+            cache.enqueue("home", "agent-1", {"text": "Continue", "start": True})
+            with patch.object(relay_transport, "post_message", return_value={
+                "delivery": "accepted", "start_error": "start unavailable"
+            }) as post:
+                relay_transport.deliver_pending(cache, {}, "home")
+                relay_transport.deliver_pending(cache, {}, "home")
+            post.assert_called_once()
+            self.assertTrue(post.call_args.args[1]["payload"]["start"])
+            self.assertEqual(cache.outbox()[0]["state"], "delivered")
+            self.assertEqual(cache.outbox()[0]["last_error"], "start unavailable")
+
+    def test_message_endpoint_acknowledges_start_failure_without_duplicate_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = relay_cache.RelayCache(Path(temporary) / "relay.sqlite3")
+            delivered = []
+            def deliver(message_id, agent_id, payload):
+                delivered.append(payload)
+                return {"start_error": "start unavailable"}
+            handler = relay_transport.make_handler(
+                cache, {"identity": {"token": "secret"}}, deliver_message=deliver
+            )
+            body = json.dumps({"message_id": "one", "agent_id": "agent-1",
+                               "kind": "message", "payload": {"text": "Continue", "start": True}}).encode()
+            instance = handler.__new__(handler)
+            instance.path = "/v1/messages"
+            instance.headers = Message()
+            instance.headers["Authorization"] = "Bearer secret"
+            instance.headers["Content-Type"] = "application/json"
+            instance.headers["Content-Length"] = str(len(body))
+            replies = []
+            instance._json = lambda payload, status=200: replies.append(payload)
+            for _ in range(2):
+                instance.rfile = io.BytesIO(body)
+                instance.do_POST()
+            self.assertEqual(len(delivered), 1)
+            self.assertTrue(delivered[0]["start"])
+            self.assertEqual(replies[0]["start_error"], "start unavailable")
+            self.assertEqual(replies[1]["delivery"], "accepted")
 
     def test_deliver_pending_keeps_network_failure_for_retry(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

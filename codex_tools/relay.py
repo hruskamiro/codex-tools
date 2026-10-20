@@ -338,7 +338,7 @@ def command_serve(args: argparse.Namespace) -> int:
 
     def deliver_message(
         _message_id: str, agent_id: str, payload: dict[str, object]
-    ) -> None:
+    ) -> dict[str, str]:
         try:
             relay_cache.refresh_local_agent(
                 cache,
@@ -349,10 +349,12 @@ def command_serve(args: argparse.Namespace) -> int:
             )
         except ValueError as exc:
             raise FileNotFoundError(str(exc)) from exc
-        agents_ui.send_message(
+        return agents_ui.send_message(
             cache,
-            {"host": "local", "agent": agent_id, "message": payload.get("text")},
+            {"host": "local", "agent": agent_id, "message": payload.get("text"),
+             "start": payload.get("start", False)},
             args.codex_bin,
+            control_socket=args.control_socket,
         )
 
     def interrupt_agent(agent_id: str) -> dict[str, object]:

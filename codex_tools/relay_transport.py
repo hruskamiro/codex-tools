@@ -491,6 +491,8 @@ def cached_agent_from_payload(value: dict[str, Any]) -> relay_cache.CachedAgent:
         status=str(value.get("status") or "unknown"),
         status_label=str(value.get("status_label") or "unknown"),
         event_cursor=str(value.get("events_cursor") or ""),
+        model=str(value.get("model") or ""),
+        reasoning_effort=str(value.get("reasoning_effort") or ""),
         records=tuple(
             relay_cache.CachedRecord(
                 timestamp=str(record.get("timestamp") or ""),
@@ -610,6 +612,8 @@ def apply_agent_events(
                 status=status,
                 status_label=status_label,
                 updated_at=str(agent_status.get("updated_at") or ""),
+                model=agent_status.get("model"),
+                reasoning_effort=agent_status.get("reasoning_effort"),
             )
     return appended
 
@@ -935,7 +939,9 @@ def deliver_pending(
             result["errors"].append({"message_id": message_id, "error": error})
             break
         else:
-            cache.record_outbox_attempt(message_id, state="delivered")
+            cache.record_outbox_attempt(
+                message_id, state="delivered", error=str(response.get("start_error") or "")
+            )
             result["delivered"] += 1
     return result
 
@@ -1019,6 +1025,8 @@ def agent_status_payload(
         "status": str(agent.get("status") or "unknown"),
         "status_label": str(agent.get("status_label") or "unknown"),
         "updated_at": str(agent.get("updated_at") or ""),
+        "model": str(agent.get("model") or ""),
+        "reasoning_effort": str(agent.get("reasoning_effort") or ""),
     }
 
 
@@ -1051,7 +1059,7 @@ def make_handler(
     config: dict[str, Any],
     refresh: Callable[[], None] | None = None,
     refresh_agent: Callable[[str], None] | None = None,
-    deliver_message: Callable[[str, str, dict[str, Any]], None] | None = None,
+    deliver_message: Callable[[str, str, dict[str, Any]], dict[str, str] | None] | None = None,
     interrupt_agent: Callable[[str], dict[str, Any]] | None = None,
     event_monitor: JsonlChangeMonitor | None = None,
 ) -> type[BaseHTTPRequestHandler]:
@@ -1237,6 +1245,7 @@ def make_handler(
                     or not isinstance(payload, dict)
                     or not isinstance(payload.get("text"), str)
                     or not payload["text"].strip()
+                    or not isinstance(payload.get("start", False), bool)
                 ):
                     raise ValueError("invalid relay message")
                 reservation = cache.begin_incoming(
@@ -1252,7 +1261,7 @@ def make_handler(
                     )
                     return
                 try:
-                    deliver_message(message_id, agent_id, payload)
+                    delivery_result = deliver_message(message_id, agent_id, payload)
                 except FileNotFoundError as exc:
                     cache.finish_incoming(
                         message_id, accepted=False, error=str(exc)
@@ -1266,9 +1275,10 @@ def make_handler(
                     self._json({"error": str(exc)}, HTTPStatus.BAD_GATEWAY)
                     return
                 cache.finish_incoming(message_id, accepted=True)
-                self._json(
-                    {"delivery": "accepted", "message_id": message_id}
-                )
+                response = {"delivery": "accepted", "message_id": message_id}
+                if isinstance(delivery_result, dict) and delivery_result.get("start_error"):
+                    response["start_error"] = delivery_result["start_error"]
+                self._json(response)
             except ValueError as exc:
                 status = (
                     HTTPStatus.CONFLICT
@@ -1341,7 +1351,7 @@ def serve(
     allow_insecure_http: bool = False,
     refresh: Callable[[], None] | None = None,
     refresh_agent: Callable[[str], None] | None = None,
-    deliver_message: Callable[[str, str, dict[str, Any]], None] | None = None,
+    deliver_message: Callable[[str, str, dict[str, Any]], dict[str, str] | None] | None = None,
     interrupt_agent: Callable[[str], dict[str, Any]] | None = None,
 ) -> None:
     validate_server_transport(

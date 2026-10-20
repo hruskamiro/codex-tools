@@ -19,7 +19,7 @@ from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
 from urllib.request import urlopen
 
-from codex_tools import paths, relay_cache
+from codex_tools import codex_daemon, paths, relay_cache
 from codex_tools.browser import open_browser
 
 
@@ -103,27 +103,51 @@ def read_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
     return payload
 
 
-def send_message(cache: relay_cache.RelayCache, payload: dict[str, Any], codex_bin: str) -> dict[str, str]:
+def send_message(cache: relay_cache.RelayCache, payload: dict[str, Any], codex_bin: str,
+                 *, control_socket: Path | None = None) -> dict[str, str]:
     host_id = str(payload.get("host") or "")
     agent_id = str(payload.get("agent") or "")
     message = str(payload.get("message") or "").strip()
+    start = payload.get("start", False)
+    if not isinstance(start, bool):
+        raise ValueError("start must be a boolean")
     if not message:
         raise ValueError("a non-empty message is required")
     agent = next((item for item in cache.agents(host_id) if item["agent_id"] == agent_id), None)
     if agent is None:
         raise FileNotFoundError("cached agent not found")
     if host_id != "local":
-        message_id = cache.enqueue(host_id, agent_id, {"text": message})
+        queued_payload = {"text": message}
+        if start:
+            queued_payload["start"] = True
+        message_id = cache.enqueue(host_id, agent_id, queued_payload, track=True)
         return {"delivery": "queued", "message_id": message_id}
     thread_id = str(agent.get("thread_id") or agent.get("session_id") or agent_id)
-    completed = subprocess.run(
-        [codex_bin, "queue", "--thread", thread_id, "--message", message],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False,
-    )
+    message_id = cache.record_message_receipt(host_id, agent_id, message)
+    try:
+        completed = subprocess.run(
+            [codex_bin, "queue", "--thread", thread_id, "--message", message],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False,
+        )
+    except OSError as exc:
+        cache.update_message_receipt(message_id, delivery="failed", error=str(exc))
+        raise
     if completed.returncode:
         detail = completed.stderr.strip() or completed.stdout.strip() or f"exit status {completed.returncode}"
+        cache.update_message_receipt(message_id, delivery="failed", error=detail)
         raise RuntimeError(f"codex queue failed: {detail}")
-    return {"delivery": "sent", "message_id": ""}
+    # Persist acceptance before the separate start request, which can fail.
+    cache.update_message_receipt(message_id, delivery="delivered")
+    result = {"delivery": "sent", "message_id": message_id}
+    if start:
+        try:
+            codex_daemon.start_queued_thread_if_idle(thread_id, control_socket)
+        except (OSError, RuntimeError, ValueError) as exc:
+            # The input is already accepted. Never report a send failure that
+            # would cause callers to enqueue it again on retry.
+            result["start_error"] = str(exc)
+            cache.update_message_receipt(message_id, delivery="delivered", error=str(exc))
+    return result
 
 
 def make_handler(cache: relay_cache.RelayCache, sessions_root: Path, session_index: Path, codex_bin: str) -> type[BaseHTTPRequestHandler]:

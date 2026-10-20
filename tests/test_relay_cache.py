@@ -6,6 +6,7 @@ import json
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -45,6 +46,32 @@ def cached_agent(agent_id: str, title: str = "viewer") -> relay_cache.CachedAgen
 
 
 class RelayCacheTests(unittest.TestCase):
+    def test_model_settings_round_trip_and_legacy_updates_preserve_them(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = relay_cache.RelayCache(Path(temporary) / "relay.sqlite3")
+            cache.replace_host_snapshot("local", "Local", [replace(
+                cached_agent("one"), model="test-model", reasoning_effort="high"
+            )])
+            cache.update_agent_status("local", "one", status="idle", status_label="ready")
+            row = cache.agents("local")[0]
+            self.assertEqual((row["model"], row["reasoning_effort"]), ("test-model", "high"))
+            cache.update_agent_status("local", "one", status="idle", status_label="ready",
+                                      model="new-model", reasoning_effort="low")
+            row = cache.agents("local")[0]
+            self.assertEqual((row["model"], row["reasoning_effort"]), ("new-model", "low"))
+
+    def test_schema_four_migrates_without_losing_agents(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = relay_cache.RelayCache(Path(temporary) / "relay.sqlite3")
+            cache.replace_host_snapshot("local", "Local", [cached_agent("one")])
+            with cache.connect() as connection, connection:
+                connection.execute("ALTER TABLE relay_agents DROP COLUMN model")
+                connection.execute("ALTER TABLE relay_agents DROP COLUMN reasoning_effort")
+                connection.execute("PRAGMA user_version = 4")
+            row = cache.agents("local")[0]
+            self.assertEqual(row["agent_id"], "one")
+            self.assertEqual((row["model"], row["reasoning_effort"]), ("", ""))
+
     def test_existing_cache_parent_permissions_are_not_changed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             parent = Path(temporary) / "shared"
