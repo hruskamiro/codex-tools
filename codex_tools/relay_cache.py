@@ -833,8 +833,12 @@ def recent_records_from_lines(
     lines: Iterator[bytes], limit: int, line_limit: int
 ) -> list[search.TextRecord]:
     records: list[search.TextRecord] = []
+    activity_count = 0
     for line_count, raw_line in enumerate(lines, start=1):
-        if b'"response_item"' not in raw_line or b'"message"' not in raw_line:
+        if b'"response_item"' not in raw_line or not any(
+            marker in raw_line for marker in
+            (b'"message"', b'"function_call"', b'"custom_tool_call"', b'"web_search_call"')
+        ):
             if line_count >= line_limit:
                 break
             continue
@@ -847,6 +851,10 @@ def recent_records_from_lines(
         extracted = search.text_records_from_event(
             event, line_no=0, include_tools=False, include_system=False
         )
+        activity = search.tool_activity_record(event)
+        if activity is not None and activity_count < min(3, limit // 4):
+            extracted.append(activity)
+            activity_count += 1
         records.extend(reversed(extracted))
         if len(records) >= limit or line_count >= line_limit:
             break

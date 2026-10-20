@@ -15,6 +15,7 @@ import time
 import unicodedata
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,8 @@ from pygments.token import Comment, Generic, Keyword, Name, Number, Operator, St
 from pygments.util import ClassNotFound
 
 from codex_tools import (
+    agent_selection,
+    agent_selection_tui,
     agents_ui,
     codex_daemon,
     config as user_config,
@@ -62,7 +65,7 @@ TABLE_SEPARATOR_RE = re.compile(
 )
 FENCE_RE = re.compile(r"^\s*(?P<fence>`{3,}|~{3,})\s*(?P<info>[^\s`]*)?.*$")
 WORKING_FRAMES = ("◐", "◓", "◑", "◒")
-AGENT_ORDER_FILE = paths.AGENTS_UI_STATE_DIR / "agent-order.json"
+AGENT_ORDER_FILE = agent_selection.config_path()
 
 
 @dataclass(frozen=True)
@@ -106,6 +109,8 @@ class OptimisticMessage:
     baseline_matches: int
     delivery: str
     message_id: str = ""
+    queued: bool = False
+    start_error: str = ""
 
 
 def normalized_message_text(value: Any) -> str:
@@ -148,20 +153,25 @@ def optimistic_message_status(
     *,
     agent_working: bool = False,
 ) -> str:
+    # Activity belongs to the thread, not necessarily to this submission. Until
+    # reconciliation observes its real user record, only claim queue delivery.
+    del agent_working
     if message.message_id:
         item = outbox.get(message.message_id)
         state = str((item or {}).get("state") or message.delivery)
         if state == "delivered":
-            return (
-                "Delivered · agent working…"
-                if agent_working
-                else "Delivered · waiting for agent"
-            )
+            if (item or {}).get("last_error"):
+                return f"Queued · could not start: {item['last_error']}"
+            return "Delivered · queued for agent"
         if state == "failed":
             error = str((item or {}).get("last_error") or "delivery failed")
             return f"Delivery failed · {error}"
-        return "Queued offline · waiting to retry"
-    return "Agent working…" if agent_working else "Sent · waiting for agent"
+        if (item or {}).get("last_error"):
+            return "Not delivered · waiting to retry"
+        return "Waiting to sync"
+    if message.start_error:
+        return f"Queued · could not start: {message.start_error}"
+    return "Queued for agent"
 
 
 def records_with_optimistic_messages(
@@ -310,19 +320,11 @@ def all_agent_items(
         (item.host_id, str(item.agent.get("agent_id") or "")): index
         for index, item in enumerate(result)
     }
-    host_rank = {
-        str(host["host_id"]): index for index, host in enumerate(hosts)
-    }
     return sorted(
         result,
-        key=lambda item: (
-            host_rank[item.host_id],
-            rank.get(
-                (item.host_id, str(item.agent.get("agent_id") or "")),
-                len(rank) + base_rank[
-                    (item.host_id, str(item.agent.get("agent_id") or ""))
-                ],
-            ),
+        key=lambda item: rank.get(
+            (item.host_id, str(item.agent.get("agent_id") or "")),
+            len(rank) + base_rank[(item.host_id, str(item.agent.get("agent_id") or ""))],
         ),
     )
 
@@ -358,12 +360,9 @@ def save_agent_order(
     current = [agent_item_key(item) for item in items]
     current_set = set(current)
     order = current + [key for key in previous_order if key not in current_set]
-    paths.ensure_private_dir(path.parent)
-    paths.write_private_text(
-        path,
-        json.dumps({"version": 1, "order": order}, ensure_ascii=False, indent=2)
-        + "\n",
-    )
+    state = agent_selection.read(path)
+    state["order"] = [list(key) for key in order]
+    agent_selection.save(state, path)
     return order
 
 
@@ -379,10 +378,11 @@ def move_agent_item(
             for index, item in enumerate(visible_items)
             if agent_item_key(item) == agent_item_key(current)
         )
-        target = visible_items[visible_index + direction]
+        target_index = visible_index + direction
+        if not 0 <= target_index < len(visible_items):
+            return False
+        target = visible_items[target_index]
     except (StopIteration, IndexError):
-        return False
-    if target.host_id != current.host_id:
         return False
     current_index = next(
         index
@@ -534,6 +534,88 @@ def sync_agent(
 class AutoSyncUpdate:
     target: tuple[str, str]
     error: str = ""
+    completed_at: str = ""
+
+
+def parse_sync_time(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
+def sync_status_text(
+    agent: dict[str, Any], mode: str, result: AutoSyncUpdate | None = None,
+    *, syncing: bool = False, now: datetime | None = None,
+) -> tuple[str, str]:
+    """A quiet health indicator; routine polling must not animate the metadata."""
+    now = now or datetime.now(timezone.utc)
+    synced_at = parse_sync_time(str(agent.get("synced_at") or ""))
+    error_at = parse_sync_time(result.completed_at) if result else None
+    error = result.error if result else ""
+    if error and synced_at and error_at and synced_at > error_at:
+        error = ""  # Another successful sync superseded this earlier error.
+    age = max(0, (now - synced_at).total_seconds()) if synced_at else None
+    if error:
+        style = "info_sync_error"
+    elif mode == "manual" or age is None or age > 30:
+        style = "info_sync_unknown"
+    else:
+        style = "info_sync_ok"
+    return f"Sync {mode} · ●", style
+
+
+def metadata_groups(agent: dict[str, Any], sync_label: str, width: int) -> tuple[str, str]:
+    """Fit two distinct metadata groups on one terminal row."""
+    model = str(agent.get("model") or "Model unavailable")
+    effort = str(agent.get("reasoning_effort") or "unavailable")
+    model_label = f"{model} · reasoning: {effort}"
+
+    def cells(text: str) -> int:
+        return sum(character_cell_width(c) for c in text)
+
+    def clip(text: str, budget: int) -> str:
+        if cells(text) <= budget:
+            return text
+        prefix = ""
+        for character in text:
+            if cells(prefix) + character_cell_width(character) > budget - 1:
+                break
+            prefix += character
+        return prefix + "…" if budget > 0 else ""
+
+    if cells(model_label) + 5 + cells(sync_label) > width:
+        model_label = f"{model} · {effort}"
+    if cells(model_label) + 5 + cells(sync_label) > width:
+        model_label = clip(model_label, max(1, (width - 5) // 2))
+    return model_label, clip(sync_label, max(0, width - cells(model_label) - 5))
+
+
+def metadata_spans(model_label: str, sync_label: str, sync_style: str) -> list[tuple[str, str]]:
+    spans = []
+    for index, part in enumerate(model_label.split(" · ")):
+        if index:
+            spans.append((" · ", "muted"))
+        spans.append((part, "info_model" if index == 0 else "info_effort"))
+    spans.append(("  │  ", "muted"))
+    for index, part in enumerate(sync_label.split(" · ")):
+        if index:
+            spans.append((" · ", "muted"))
+        style = "info_sync_mode" if index == 0 else sync_style
+        spans.append((part, style))
+    return spans
+
+
+def draw_info_spans(window: Any, y: int, x: int, spans: list[tuple[str, str]],
+                    width: int, palette: dict[str, int]) -> None:
+    for text, style in spans:
+        if width <= 0:
+            break
+        add_text(window, y, x, text, width, palette.get(style, palette["muted"]))
+        cells = min(width, sum(character_cell_width(c) for c in text))
+        x += cells
+        width -= cells
 
 
 class AutoSyncWorker:
@@ -558,6 +640,7 @@ class AutoSyncWorker:
         self._mode = "manual"
         self._revision = 0
         self._stopped = False
+        self._syncing_target: tuple[str, str] | None = None
         self._thread = threading.Thread(
             target=self._run, name="agent-console-sync", daemon=True
         )
@@ -579,6 +662,10 @@ class AutoSyncWorker:
             self._stopped = True
             self._condition.notify_all()
         self._thread.join(timeout=0.25)
+
+    def is_syncing(self, item: AgentItem) -> bool:
+        with self._condition:
+            return self._syncing_target == self._item_key(item)
 
     @staticmethod
     def _item_key(item: AgentItem | None) -> tuple[str, str] | None:
@@ -605,6 +692,8 @@ class AutoSyncWorker:
             if target is None:
                 continue
             error = ""
+            with self._condition:
+                self._syncing_target = target
             try:
                 if item.host_id == "local":
                     relay_cache.refresh_local_agent(
@@ -622,18 +711,23 @@ class AutoSyncWorker:
                             f"no configured peer matches {item.host_name}"
                         )
                     wait = 8.0 if mode in {"adaptive", "live"} else 0.0
-                    sync_agent(
+                    host_name, _ = sync_agent(
                         self.cache,
                         config,
                         peer_name,
                         str(item.agent["agent_id"]),
                         wait=wait,
                     )
+                    if host_name is None:
+                        raise ValueError("Remote session is no longer active; showing cached copy")
                 failure_count = 0
             except (OSError, RuntimeError, ValueError) as exc:
                 failure_count += 1
                 error = str(exc)
-            self.updates.put(AutoSyncUpdate(target, error))
+            finally:
+                with self._condition:
+                    self._syncing_target = None
+            self.updates.put(AutoSyncUpdate(target, error, relay_cache.utc_now()))
             if error:
                 delay = min(
                     30.0,
@@ -828,15 +922,31 @@ def transcript_lines(
     renderable = [
         record
         for record in records
-        if record.get("role") in {"user", "assistant"}
+        if record.get("role") in {"user", "assistant"} or record.get("record_type") == "tool_activity"
+    ]
+    # Keep a few understated tool breadcrumbs, not the full CLI tool log.
+    activity_records = [record for record in renderable
+                        if record.get("record_type") == "tool_activity"]
+    recent_activity = {id(record) for record in activity_records[-3:]}
+    renderable = [
+        record for record in renderable
+        if (record.get("record_type") != "tool_activity" or id(record) in recent_activity)
         and not (
             record.get("role") == "user"
             and search.is_internal_prompt_text(str(record.get("text") or ""))
         )
     ]
+    previous_tool = False
     for record in renderable[-MAX_RECORDS:]:
         role = str(record["role"])
+        if record.get("record_type") == "tool_activity":
+            lines.append(("  · " + compact(str(record.get("text") or ""), content_width - 2), "muted"))
+            previous_tool = True
+            continue
         activity = record.get("record_type") == "activity"
+        if previous_tool and not activity:
+            lines.append(("", f"{role}_gap"))
+        previous_tool = False
         record_start = len(lines)
         paragraphs = [
             display_markdown_links(line)
@@ -1052,7 +1162,28 @@ def add_text(window: Any, y: int, x: int, text: str, width: int, attr: int = 0) 
     if width <= 0:
         return
     try:
-        window.addnstr(y, x, text, width, attr)
+        if sys.platform == "darwin":
+            # Some macOS Python/curses builds corrupt native window state when
+            # addnstr temporarily sets an attribute. The crash appears later,
+            # inside resize_term on zoom/resize. Draw first, then style cells
+            # with chgat, which avoids that attribute-setting path entirely.
+            characters = []
+            cells = 0
+            for character in text:
+                if character in "\r\n":
+                    break
+                size = character_cell_width(character)
+                if cells + size > width:
+                    break
+                characters.append(character)
+                cells += size
+            encoded = "".join(characters).encode("utf-8")
+            if encoded:
+                window.addnstr(y, x, encoded, len(encoded))
+                if cells:
+                    window.chgat(y, x, cells, attr)
+        else:
+            window.addnstr(y, x, text, width, attr)
     except curses.error:
         pass
 
@@ -1201,7 +1332,7 @@ def show_status(window: Any, text: str, attr: int) -> None:
 
 
 def requests_console_exit(key: int) -> bool:
-    return key == 3  # Ctrl-C in curses raw mode.
+    return key == 4  # Ctrl-D in curses raw mode; Ctrl-C stops the agent.
 
 
 def mouse_scroll_delta(button_state: int, amount: int = 3) -> int:
@@ -1210,6 +1341,13 @@ def mouse_scroll_delta(button_state: int, amount: int = 3) -> int:
     if button_state & getattr(curses, "BUTTON5_PRESSED", 0):
         return -amount
     return 0
+
+
+def mouse_protocol_sequence(enabled: bool) -> str:
+    """Older macOS curses cannot represent wheel-down: read SGR events ourselves."""
+    if hasattr(curses, "BUTTON5_PRESSED"):
+        return ""
+    return "\x1b[?1006h" if enabled else "\x1b[?1006l"
 
 
 def change_pane(
@@ -1253,6 +1391,12 @@ def soft_color_definitions(color_count: int) -> dict[str, tuple[int, int]]:
             "path": (muted_text, -1),
             "header": (warm_text, -1),
             "focus": (soft_blue, -1),
+            "info_model": (soft_blue, -1),
+            "info_effort": (soft_lavender, -1),
+            "info_sync_mode": (soft_gold, -1),
+            "info_sync_ok": (soft_green, -1),
+            "info_sync_unknown": (soft_gold, -1),
+            "info_sync_error": (soft_coral, -1),
             "selected": (warm_text, selected_background),
             "active_dot": (soft_green, -1),
             "ready_dot": (muted_text, -1),
@@ -1294,6 +1438,12 @@ def soft_color_definitions(color_count: int) -> dict[str, tuple[int, int]]:
         }
     return {
         "focus": (curses.COLOR_CYAN, -1),
+        "info_model": (curses.COLOR_CYAN, -1),
+        "info_effort": (curses.COLOR_MAGENTA, -1),
+        "info_sync_mode": (curses.COLOR_YELLOW, -1),
+        "info_sync_ok": (curses.COLOR_GREEN, -1),
+        "info_sync_unknown": (curses.COLOR_YELLOW, -1),
+        "info_sync_error": (curses.COLOR_RED, -1),
         "selected": (curses.COLOR_WHITE, curses.COLOR_BLACK),
         "active_dot": (curses.COLOR_GREEN, -1),
         "ready_dot": (curses.COLOR_WHITE, -1),
@@ -1340,6 +1490,12 @@ def colors() -> dict[str, int]:
         "path": curses.A_DIM,
         "header": curses.A_BOLD,
         "focus": curses.A_BOLD,
+        "info_model": curses.A_NORMAL,
+        "info_effort": curses.A_NORMAL,
+        "info_sync_mode": curses.A_NORMAL,
+        "info_sync_ok": curses.A_NORMAL,
+        "info_sync_unknown": curses.A_NORMAL,
+        "info_sync_error": curses.A_BOLD,
         "selected": curses.A_BOLD,
         "active_dot": curses.A_BOLD,
         "ready_dot": curses.A_DIM,
@@ -1431,14 +1587,37 @@ def composer_layout(
     positions = [(0, 0)] * (len(text) + 1)
     row = 0
     column = 0
+    soft_leading = False
     for index, value in enumerate(text):
         positions[index] = (row, column)
         if value == "\n":
             row += 1
             column = 0
             lines.append("")
+            soft_leading = False
             positions[index + 1] = (row, column)
             continue
+        if value.isspace() and column >= width:
+            row += 1
+            column = 0
+            lines.append("")
+            soft_leading = True
+        if value.isspace() and column == 0 and soft_leading:
+            positions[index] = positions[index + 1] = (row, column)
+            continue
+        # Wrap a whole word ahead of time when it fits on a fresh line.
+        # Overlong words/URLs still wrap by cells. Draft text is untouched.
+        if not value.isspace() and (index == 0 or text[index - 1].isspace()):
+            end = index
+            word_width = 0
+            while end < len(text) and not text[end].isspace() and word_width <= width:
+                word_width += character_cell_width(text[end])
+                end += 1
+            if column and word_width <= width and column + word_width > width:
+                row += 1
+                column = 0
+                lines.append("")
+                positions[index] = (row, column)
         cell_width = character_cell_width(value)
         if column and column + cell_width > width:
             row += 1
@@ -1446,8 +1625,13 @@ def composer_layout(
             lines.append("")
             positions[index] = (row, column)
         lines[row] += value
+        soft_leading = False
         column += cell_width
         positions[index + 1] = (row, column)
+    # Leave room for the insertion cursor after a completely filled final row.
+    if column >= width:
+        lines.append("")
+        positions[len(text)] = (row + 1, 0)
     return lines, positions
 
 
@@ -1542,9 +1726,25 @@ def escape_action(stdscr: Any) -> tuple[str, str]:
         stdscr.timeout(40)
         following = stdscr.get_wch()
     except curses.error:
-        return "cancel", ""
+        return "stop", ""
     finally:
         stdscr.timeout(-1)
+    # macOS Terminal may encode Option-arrows as Meta + an ordinary arrow.
+    # This also covers Command when a user's keyboard map swaps Cmd/Option.
+    meta_arrow = following == "\x1b"
+    if meta_arrow:
+        try:
+            stdscr.timeout(40)
+            following = stdscr.get_wch()
+        except curses.error:
+            return "cancel", ""
+        finally:
+            stdscr.timeout(-1)
+    # ncurses may already have decoded the arrow following the initial Meta
+    # Escape. Handle that form whether or not another raw Escape was seen.
+    if following in (curses.KEY_UP, curses.KEY_DOWN):
+        return ("select_agent_up" if following == curses.KEY_UP
+                else "select_agent_down"), ""
     if following in ("\n", "\r", curses.KEY_ENTER):
         return "newline", ""
     if following in ("\b", "\x7f", curses.KEY_BACKSPACE):
@@ -1553,11 +1753,11 @@ def escape_action(stdscr: Any) -> tuple[str, str]:
         return "maximize", ""
     if isinstance(following, str) and following in "123456789":
         return "agent", following
-    if following == "[":
+    if following == "[" or (meta_arrow and following == "O"):
         suffix = ""
         try:
             stdscr.timeout(20)
-            for _ in range(8):
+            for _ in range(32):
                 part = stdscr.get_wch()
                 if not isinstance(part, str):
                     return "cancel", ""
@@ -1570,13 +1770,19 @@ def escape_action(stdscr: Any) -> tuple[str, str]:
             stdscr.timeout(-1)
         if suffix == "200~":
             return "paste", read_bracketed_paste(stdscr)
+        mouse = re.fullmatch(r"<(\d{1,3});\d{1,6};\d{1,6}([Mm])", suffix)
+        if mouse and mouse[2] == "M":
+            # Ignore modifiers, but not motion, horizontal wheels, or clicks.
+            button = int(mouse[1]) & ~(4 | 8 | 16)
+            if button in (64, 65):
+                return ("scroll_up" if button == 64 else "scroll_down"), ""
         if suffix in {"1;5D", "5D"}:
             return "word_left", ""
         if suffix in {"1;5C", "5C"}:
             return "word_right", ""
-        if suffix in {"1;3A", "3A"}:
+        if suffix in {"1;3A", "3A", "1;9A", "9A"} or (meta_arrow and suffix == "A"):
             return "select_agent_up", ""
-        if suffix in {"1;3B", "3B"}:
+        if suffix in {"1;3B", "3B", "1;9B", "9B"} or (meta_arrow and suffix == "B"):
             return "select_agent_down", ""
         if suffix in {"1;4A", "4A"}:
             return "move_agent_up", ""
@@ -1606,9 +1812,11 @@ def terminal_key_name(key: Any) -> str:
 
 
 def edit_composer_buffer(buffer: ComposerBuffer, key: Any, width: int) -> str | None:
-    """Apply an editing key; return ``send`` when the draft should be sent."""
+    """Apply an editing key; return ``send`` or ``queue`` for submission."""
     code = key_code(key)
     name = terminal_key_name(key)
+    if code == 9:
+        return "queue" if buffer.text.strip() else None
     if key == "\r" or code == curses.KEY_ENTER:
         return "send"
     if key == "\n" or code == 10:  # Ctrl-J in raw terminal mode.
@@ -1649,6 +1857,11 @@ def edit_composer_buffer(buffer: ComposerBuffer, key: Any, width: int) -> str | 
     return None
 
 
+def composer_visible_rows(line_count: int, height: int) -> int:
+    """Reserve room for a blank background row above and below the draft."""
+    return max(1, min(8, height // 3 - 2, line_count))
+
+
 def draw_composer(
     stdscr: Any,
     palette: dict[str, int],
@@ -1663,13 +1876,14 @@ def draw_composer(
     left = max(0, min(x + 1, terminal_width - 4))
     available_width = max(4, min(pane_width - 2, terminal_width - left))
     inner_x = left + 2
-    inner_width = max(1, available_width - 4)
+    inner_width = max(1, available_width - 5)
     lines, positions = composer_layout(buffer.text, inner_width)
     cursor_row, cursor_column = positions[buffer.cursor]
-    visible_rows = max(1, min(8, height // 3, len(lines)))
+    visible_rows = composer_visible_rows(len(lines), height)
     first_line = max(0, cursor_row - visible_rows + 1)
-    panel_height = visible_rows
+    panel_height = visible_rows + 2
     top = max(3, height - panel_height)
+    text_top = top + 1
 
     for row in range(top, height):
         add_text(
@@ -1684,7 +1898,7 @@ def draw_composer(
     for offset, line in enumerate(visible_lines):
         add_text(
             stdscr,
-            top + offset,
+            text_top + offset,
             inner_x,
             "›" if offset == 0 else " ",
             1,
@@ -1692,7 +1906,7 @@ def draw_composer(
         )
         add_text(
             stdscr,
-            top + offset,
+            text_top + offset,
             inner_x + 2,
             line,
             inner_width,
@@ -1701,7 +1915,7 @@ def draw_composer(
     if focused:
         try:
             stdscr.move(
-                top + cursor_row - first_line,
+                text_top + cursor_row - first_line,
                 inner_x + 2 + min(cursor_column, inner_width - 1),
             )
         except curses.error:
@@ -1768,26 +1982,29 @@ def run_console(
             curses.mouseinterval(0)
         except curses.error:
             pass
-        sys.stdout.write("\x1b[?2004h")
+        sys.stdout.write("\x1b[?2004h" + mouse_protocol_sequence(True))
         sys.stdout.flush()
         palette = colors()
-        agent_order = load_agent_order()
         items = all_agent_items(
             cache,
             include_local=include_local,
-            preferred_order=agent_order,
         )
+        selection = agent_selection.load(items)
+        agent_order = [tuple(value) for value in selection["order"]]
+        items = agent_selection.ordered(selection, items)
         query = ""
         selected = 0
         settings_selected = False
+        settings_tab = "sync"
         settings_choice = SYNC_MODES.index(active_sync_mode)
+        settings_choices = {"sync": settings_choice, "agents": 0}
         scroll = 0
         focus = "conversation"
         maximized = False
         status = ""
+        sync_results: dict[tuple[str, str], AutoSyncUpdate] = {}
         drafts: dict[tuple[str, str], ComposerBuffer] = {}
         outgoing, outbox_by_id = outbox_views(cache)
-        optimistic: dict[tuple[str, str], list[OptimisticMessage]] = {}
         auto_sync = AutoSyncWorker(
             cache,
             sessions_root,
@@ -1795,7 +2012,48 @@ def run_console(
             control_socket,
             relay_config,
         )
-        previous_current: AgentItem | None = None
+        last_agent: AgentItem | None = None
+
+        def visible_items() -> list[AgentItem]:
+            return [item for item in filtered_items(items, query) if agent_selection.visible(selection, item)]
+
+        def remember_sync(item: AgentItem | None, error: str = "") -> None:
+            key = AutoSyncWorker._item_key(item)
+            if key is not None:
+                sync_results[key] = AutoSyncUpdate(key, error, relay_cache.utc_now())
+
+        def remember_host_sync(host_id: str, error: str = "") -> None:
+            for item in items:
+                if item.host_id == host_id:
+                    remember_sync(item, error)
+
+        def settings_options() -> list[tuple[str, str, str, bool]]:
+            if settings_tab == "sync":
+                return [("sync", mode, SYNC_MODE_DETAILS[mode], mode == active_sync_mode)
+                        for mode in SYNC_MODES]
+            return [
+                ("manage", "Choose and order agents…", "Space shows/hides; Alt-Up/Down reorders. Also Ctrl-B.", False),
+            ]
+
+        def manage_agents(target: AgentItem | None) -> str:
+            nonlocal selected, scroll, items, agent_order
+            action = agent_selection_tui.manage(stdscr, palette, selection, items, target)
+            agent_order = [tuple(value) for value in selection["order"]]
+            items = agent_selection.ordered(selection, items)
+            selected = restored_selection(visible_items(), target)
+            scroll = 0
+            return action
+
+        def request_stop(item: AgentItem | None) -> str:
+            if item is None:
+                return "No agent selected."
+            show_status(stdscr, "Requesting stop…", palette["status"])
+            try:
+                result = stop_agent_turn(item, control_socket, relay_config)
+                return ("Agent is already idle." if result.get("status") == "idle"
+                        else "Stop requested; queued messages remain queued.")
+            except (OSError, RuntimeError, ValueError) as exc:
+                return f"Stop failed: {exc}"
 
         def finish() -> int:
             auto_sync.close()
@@ -1809,16 +2067,30 @@ def run_console(
             curses.noraw()
             return 0
 
+        cache_signature = relay_transport.JsonlChangeMonitor.signature(cache.path)
+        next_cache_check = 0.0
         while True:
+            # A key may have changed selected since the previous frame. Keep
+            # that latest choice, not the previously rendered conversation,
+            # when a concurrent sync replaces the cached agent objects.
+            before_refresh = visible_items()
+            refresh_target = (before_refresh[max(0, min(selected, len(before_refresh) - 1))]
+                              if before_refresh else None)
             received_update = False
+            if time.monotonic() >= next_cache_check:
+                signature = relay_transport.JsonlChangeMonitor.signature(cache.path)
+                received_update = signature != cache_signature
+                cache_signature = signature
+                next_cache_check = time.monotonic() + 1.0
             while True:
                 try:
                     update = auto_sync.updates.get_nowait()
                 except queue.Empty:
                     break
                 received_update = True
-                if update.error and previous_current is not None:
-                    if update.target == AutoSyncWorker._item_key(previous_current):
+                sync_results[update.target] = update
+                if update.error and refresh_target is not None and not settings_selected:
+                    if update.target == AutoSyncWorker._item_key(refresh_target):
                         status = f"Automatic sync failed: {update.error}"
             if received_update:
                 items = all_agent_items(
@@ -1828,16 +2100,17 @@ def run_console(
                 )
                 outgoing, outbox_by_id = outbox_views(cache)
                 selected = restored_selection(
-                    filtered_items(items, query), previous_current
+                    visible_items(), refresh_target
                 )
-            shown = filtered_items(items, query)
+            shown = visible_items()
             selected = max(0, min(selected, len(shown) - 1)) if shown else 0
             current = (
                 None
                 if settings_selected
                 else (shown[selected] if shown else None)
             )
-            previous_current = current
+            if current is not None:
+                last_agent = current
             auto_sync.select(current, active_sync_mode)
             height, width = stdscr.getmaxyx()
             stdscr.erase()
@@ -1847,6 +2120,10 @@ def run_console(
                 key = stdscr.getch()
                 if requests_console_exit(key):
                     return finish()
+                if key in (3, 7):
+                    status = request_stop(current)
+                elif key == 27 and escape_action(stdscr)[0] == "stop":
+                    status = request_stop(current)
                 continue
 
             sidebar = 0 if maximized else min(36, max(25, width // 3))
@@ -1855,8 +2132,8 @@ def run_console(
             if not maximized:
                 sidebar_heading = palette["focus"] if focus == "agents" else palette["header"]
                 add_text(stdscr, 0, 1, "Agent Console", sidebar - 2, sidebar_heading)
-                working = sum(item.agent.get("status") == "active" for item in items)
-                ready = sum(item.agent.get("status") == "idle" for item in items)
+                working = sum(item.agent.get("status") == "active" for item in shown)
+                ready = sum(item.agent.get("status") == "idle" for item in shown)
                 add_text(
                     stdscr, 1, 1, f"{working} working · {ready} ready",
                     sidebar - 2, palette["muted"],
@@ -1917,16 +2194,14 @@ def run_console(
                     sidebar - 5,
                     palette["path"],
                 )
+                row += 1
+                chosen_count = sum(agent_selection.visible(selection, item) for item in items)
+                add_text(stdscr, row, 4, f"Agents: {chosen_count}/{len(items)}", sidebar - 5, palette["path"])
                 row += 2
-                previous_host = None
-                visible_start = max(0, selected - max(0, (height - 9) // 3))
+                visible_start = max(0, selected - max(0, (height - 10) // 3))
                 for index, item in enumerate(shown[visible_start:], visible_start):
                     if row >= height - 2:
                         break
-                    if item.host_id != previous_host:
-                        add_text(stdscr, row, 1, compact(item.host_name, sidebar - 3), sidebar - 2, palette["muted"] | curses.A_BOLD)
-                        row += 1
-                        previous_host = item.host_id
                     if row >= height - 2:
                         break
                     is_selected = index == selected
@@ -1992,12 +2267,14 @@ def run_console(
                     )
                     row += 1
                     cwd = str(item.agent.get("cwd") or "").strip()
-                    if cwd and row < height - 2:
+                    if row < height - 2:
+                        host = compact(item.host_name, max(5, (sidebar - 8) // 2))
+                        detail = host + (" · " + compact_path_end(cwd, max(1, sidebar - 11 - len(host))) if cwd else "")
                         add_text(
                             stdscr,
                             row,
                             6,
-                            compact_path_end(cwd, sidebar - 8),
+                            detail,
                             sidebar - 7,
                             palette["path"],
                         )
@@ -2018,7 +2295,8 @@ def run_console(
                     main_width - 4,
                     heading,
                 )
-                detail = status or "Agent Console preferences"
+                detail = status or ("Synchronization preferences" if settings_tab == "sync"
+                                    else "Choose visible agents and their order")
                 add_text(
                     stdscr,
                     1,
@@ -2027,17 +2305,20 @@ def run_console(
                     main_width - 4,
                     palette["muted"],
                 )
-                add_text(
-                    stdscr,
-                    3,
-                    main_x + 2,
-                    "Automatic synchronization",
-                    main_width - 4,
-                    palette["header"] | curses.A_BOLD,
-                )
+                tab_x = main_x + 2
+                for tab in ("sync", "agents"):
+                    label = f" {tab.capitalize()} "
+                    attr = ((palette["selected"] | curses.A_BOLD) if tab == settings_tab
+                            else palette["muted"])
+                    add_text(stdscr, 3, tab_x, label, min(len(label), width - tab_x - 1), attr)
+                    tab_x += len(label) + 2
+                options = settings_options()
+                settings_choice = min(settings_choice, len(options) - 1)
+                visible_count = max(1, (height - 6) // 3)
+                first_option = max(0, settings_choice - visible_count + 1)
                 row = 5
-                for index, mode in enumerate(SYNC_MODES):
-                    chosen = mode == active_sync_mode
+                for index in range(first_option, min(len(options), first_option + visible_count)):
+                    kind, name, description, chosen = options[index]
                     highlighted = (
                         index == settings_choice and focus == "conversation"
                     )
@@ -2056,16 +2337,16 @@ def run_console(
                         stdscr,
                         row,
                         main_x + 2,
-                        f"{marker} {mode.capitalize()}",
+                        f"{marker} {('Sync: ' + name) if kind == 'sync' else name}",
                         main_width - 4,
                         attr,
                     )
                     detail_lines = textwrap.wrap(
-                        SYNC_MODE_DETAILS[mode],
+                        description,
                         width=max(8, main_width - 6),
                         break_long_words=False,
                         break_on_hyphens=False,
-                    )[:2]
+                    )[:1]
                     for detail_offset, detail_line in enumerate(
                         detail_lines, start=1
                     ):
@@ -2084,7 +2365,7 @@ def run_console(
                     stdscr,
                     height - 1,
                     main_x + 2,
-                    "↑↓ choose · Enter apply · Tab switch pane",
+                    "←→ tabs · ↑↓ choose · Enter apply · Tab switch pane",
                     main_width - 4,
                     palette["status"],
                 )
@@ -2120,30 +2401,37 @@ def run_console(
                     if working and not status
                     else palette["muted"]
                 )
-                add_text(stdscr, 1, main_x + 2, detail, main_width - 4, detail_style)
-                agent_key = (current.host_id, str(agent["agent_id"]))
-                records = cache.records(*agent_key)
-                pending_messages = reconcile_optimistic_messages(
-                    records, optimistic.get(agent_key, [])
-                )
-                if pending_messages:
-                    optimistic[agent_key] = pending_messages
+                if status:
+                    add_text(stdscr, 1, main_x + 2, detail, main_width - 4, detail_style)
                 else:
-                    optimistic.pop(agent_key, None)
-                displayed_records = records_with_optimistic_messages(
-                    records,
-                    pending_messages,
-                    outbox_by_id,
-                    agent_working=working,
+                    draw_info_spans(stdscr, 1, main_x + 2, [
+                        (state, "active_dot" if working else "muted"), (" · ", "muted"),
+                        (current.host_name, "info_model"), (" · ", "muted"),
+                        (str(agent.get("cwd") or "no basedir"), "path"), (" · ", "muted"),
+                        (str(agent.get("agent_id") or ""), "muted"),
+                    ], main_width - 4, palette)
+                agent_key = (current.host_id, str(agent["agent_id"]))
+                sync_label, sync_style = sync_status_text(
+                    agent, active_sync_mode, sync_results.get(agent_key),
+                    syncing=auto_sync.is_syncing(current),
+                )
+                model_label, sync_label = metadata_groups(agent, sync_label, main_width - 4)
+                draw_info_spans(stdscr, 2, main_x + 2,
+                                metadata_spans(model_label, sync_label, sync_style),
+                                main_width - 4, palette)
+                records = cache.records(*agent_key)
+                receipts = cache.reconcile_message_receipts(*agent_key, records[-MAX_RECORDS:])
+                displayed_records = records_with_message_receipts(
+                    records, receipts,
                 )
                 displayed_records = records_with_agent_activity(
                     displayed_records,
                     agent_working=working,
                 )
                 rendered = transcript_lines(displayed_records, main_width - 2)
-                composer_width = max(1, main_width - 6)
+                composer_width = max(1, main_width - 7)
                 composer_lines, _ = composer_layout(draft.text, composer_width)
-                composer_rows = max(1, min(8, height // 3, len(composer_lines)))
+                composer_rows = composer_visible_rows(len(composer_lines), height) + 2
                 composer_top = max(3, height - composer_rows)
                 viewport = max(0, composer_top - 3)
                 max_scroll = max(0, len(rendered) - viewport)
@@ -2205,7 +2493,7 @@ def run_console(
                             palette.get(style, 0),
                         )
                 if not rendered:
-                    add_text(stdscr, 4, main_x + 2, "No renderable messages.", main_width - 4, palette["muted"])
+                    add_text(stdscr, 3, main_x + 2, "No renderable messages.", main_width - 4, palette["muted"])
                 draw_composer(
                     stdscr,
                     palette,
@@ -2216,6 +2504,8 @@ def run_console(
                 )
             else:
                 empty = (
+                    "No selected agents match. Press Ctrl-B to choose agents, or Ctrl-F to change the search."
+                    if items else
                     "No synchronized remote agents. Run `ct relay sync PEER`."
                     if not include_local
                     else "No cached agents."
@@ -2230,7 +2520,7 @@ def run_console(
                 )
 
             if not current and not settings_selected:
-                footer = status or "No agent selected · ^F find · ^S sync all · ^C quit"
+                footer = status or "No agent selected · ^B choose agents · ^F find · ^S sync all · ^D quit"
                 add_text(stdscr, height - 1, 1, footer, width - 2, palette["status"])
             try:
                 curses.curs_set(
@@ -2250,21 +2540,39 @@ def run_console(
             finally:
                 stdscr.timeout(-1)
             code = key_code(key)
+            if focus == "agents" and code in (14, 16):  # Ctrl-N / Ctrl-P
+                code = curses.KEY_DOWN if code == 14 else curses.KEY_UP
+            if code == curses.KEY_RESIZE:
+                # Terminal zoom can invalidate the physical screen even when
+                # the stored draft has not changed. Rewrap and repaint it all.
+                stdscr.clearok(True)
+                continue
             if requests_console_exit(code if code is not None else -1):
                 return finish()
             extended_key = terminal_key_name(key)
-            if code == 27 or extended_key in {"kUP3", "kDN3", "kUP4", "kDN4"}:
+            if code == 27 or extended_key in {"kUP3", "kDN3", "kUP9", "kDN9", "kUP4", "kDN4"}:
                 if code == 27:
                     action, pasted = escape_action(stdscr)
                 else:
                     action = {
                         "kUP3": "select_agent_up",
                         "kDN3": "select_agent_down",
+                        "kUP9": "select_agent_up",
+                        "kDN9": "select_agent_down",
                         "kUP4": "move_agent_up",
                         "kDN4": "move_agent_down",
                     }[extended_key]
                     pasted = ""
-                if action == "agent":
+                if action == "stop":
+                    status = request_stop(current)
+                elif action in {"scroll_up", "scroll_down"}:
+                    if current and not settings_selected:
+                        focus = "conversation"
+                        delta = 3 if action == "scroll_up" else -3
+                        scroll = max(0, min(max_scroll, scroll + delta))
+                elif action == "cancel":
+                    pass  # Unknown/truncated escape sequences are not stop requests.
+                elif action == "agent":
                     shortcut_index = int(pasted) - 1
                     if shortcut_index < len(shown):
                         selected = shortcut_index
@@ -2277,7 +2585,7 @@ def run_console(
                         selected = 0 if direction > 0 else len(shown) - 1
                         settings_selected = False
                     else:
-                        selected = max(0, min(len(shown) - 1, selected + direction))
+                        selected = (selected + direction) % len(shown)
                     scroll = 0
                 elif action in {"move_agent_up", "move_agent_down"} and current:
                     previous_items = list(items)
@@ -2285,11 +2593,12 @@ def run_console(
                     if move_agent_item(items, shown, current, direction):
                         try:
                             agent_order = save_agent_order(items, agent_order)
+                            selection["order"] = [list(key) for key in agent_order]
                         except OSError as exc:
                             items = previous_items
                             status = f"Could not save agent order: {exc}"
                         selected = restored_selection(
-                            filtered_items(items, query), current
+                            visible_items(), current
                         )
                 elif current and focus == "conversation":
                     draft_key = (
@@ -2316,9 +2625,19 @@ def run_console(
                     else:
                         focus = "agents"
                 continue
-            if code == 9:
+            if code == 2:  # Ctrl-B: choose available agents and reorder them.
+                if manage_agents(current or last_agent) == "exit":
+                    return finish()
+            elif code == curses.KEY_BTAB or (
+                code == 9 and not (
+                    current and focus == "conversation" and not settings_selected
+                    and drafts.get(
+                        (current.host_id, str(current.agent["agent_id"])), ComposerBuffer()
+                    ).text.strip()
+                )
+            ):
                 if current is not None or settings_selected:
-                    focus, maximized = change_pane(focus, maximized, code)
+                    focus, maximized = change_pane(focus, maximized, 9)
                 else:
                     focus = "agents"
             elif code == curses.KEY_MOUSE and shown:
@@ -2340,26 +2659,32 @@ def run_console(
             elif (
                 settings_selected
                 and focus == "conversation"
-                and code in (curses.KEY_LEFT, curses.KEY_UP, curses.KEY_DOWN, 10, 13, curses.KEY_ENTER)
+                and code in (curses.KEY_LEFT, curses.KEY_RIGHT, curses.KEY_UP, curses.KEY_DOWN, 10, 13, curses.KEY_ENTER)
             ):
-                if code == curses.KEY_LEFT:
-                    focus = "agents"
+                if code in (curses.KEY_LEFT, curses.KEY_RIGHT):
+                    settings_choices[settings_tab] = settings_choice
+                    settings_tab = "sync" if code == curses.KEY_LEFT else "agents"
+                    settings_choice = min(settings_choices[settings_tab], len(settings_options()) - 1)
                 elif code in (curses.KEY_UP, curses.KEY_DOWN):
                     settings_choice = max(
                         0,
                         min(
-                            len(SYNC_MODES) - 1,
+                            len(settings_options()) - 1,
                             settings_choice
                             + (-1 if code == curses.KEY_UP else 1),
                         ),
                     )
                 else:
-                    selected_mode = SYNC_MODES[settings_choice]
+                    kind, name, _, _ = settings_options()[settings_choice]
                     try:
-                        user_config.set_value("agents.sync_mode", selected_mode)
-                        active_sync_mode = selected_mode
-                        auto_sync.select(None, active_sync_mode)
-                        status = f"Automatic sync set to {selected_mode}."
+                        if kind == "sync":
+                            user_config.set_value("agents.sync_mode", name)
+                            active_sync_mode = name
+                            auto_sync.select(None, active_sync_mode)
+                            status = f"Automatic sync set to {name}."
+                        elif kind == "manage":
+                            if manage_agents(last_agent) == "exit":
+                                return finish()
                     except (OSError, ValueError) as exc:
                         status = f"Could not save setting: {exc}"
             elif code == curses.KEY_LEFT and focus == "conversation" and current:
@@ -2376,7 +2701,7 @@ def run_console(
                             selected = 0
                     elif code == curses.KEY_UP and selected == 0:
                         settings_selected = True
-                        settings_choice = SYNC_MODES.index(active_sync_mode)
+                        settings_choice = min(settings_choice, len(settings_options()) - 1)
                     elif shown:
                         selected = max(
                             0,
@@ -2391,7 +2716,7 @@ def run_console(
                     draft = drafts[(current.host_id, str(current.agent["agent_id"]))]
                     move_composer_vertical(
                         draft,
-                        max(1, main_width - 6),
+                        max(1, main_width - 7),
                         -1 if code == curses.KEY_UP else 1,
                     )
             elif code == curses.KEY_PPAGE:
@@ -2400,22 +2725,8 @@ def run_console(
             elif code == curses.KEY_NPAGE:
                 focus = "conversation"
                 scroll = max(0, scroll - max(1, height - 7))
-            elif code == 7:  # Ctrl-G
-                if current is None:
-                    status = "No agent selected."
-                else:
-                    show_status(stdscr, "Requesting stop…", palette["status"])
-                    try:
-                        result = stop_agent_turn(
-                            current, control_socket, relay_config
-                        )
-                        status = (
-                            "Agent is already idle."
-                            if result.get("status") == "idle"
-                            else "Stop requested; queued messages remain queued."
-                        )
-                    except (OSError, RuntimeError, ValueError) as exc:
-                        status = f"Stop failed: {exc}"
+            elif code in (3, 7):  # Ctrl-C / Ctrl-G
+                status = request_stop(current)
             elif code == 6:  # Ctrl-F
                 entered = edit_line(stdscr, "Find: ", query)
                 if entered is not None:
@@ -2452,6 +2763,7 @@ def run_console(
                             control_socket,
                         )
                         status = f"Refreshed {refreshed.title}."
+                        remember_sync(current)
                     else:
                         config = relay_transport.load_config(relay_config)
                         peer_name = peer_name_for_item(config, current)
@@ -2465,6 +2777,7 @@ def run_console(
                             peer_name,
                             str(current.agent["agent_id"]),
                         )
+                        remember_sync(current, "" if host_name else "Remote session is no longer active")
                         status = (
                             f"Refreshed conversation from {host_name}."
                             if host_name
@@ -2480,9 +2793,10 @@ def run_console(
                     )
                     outgoing, outbox_by_id = outbox_views(cache)
                     selected = restored_selection(
-                        filtered_items(items, query), current
+                        visible_items(), current
                     )
                 except (OSError, RuntimeError, ValueError) as exc:
+                    remember_sync(current, str(exc))
                     status = f"Refresh failed: {exc}"
             elif code == 19:  # Ctrl-S
                 show_status(stdscr, "Refreshing everything…", palette["status"])
@@ -2497,7 +2811,9 @@ def run_console(
                                 session_index,
                                 control_socket,
                             )
+                            remember_host_sync("local")
                         except (OSError, RuntimeError, ValueError) as exc:
+                            remember_host_sync("local", str(exc))
                             failures.append(f"local: {exc}")
                     if relay_config.expanduser().exists():
                         config = relay_transport.load_config(relay_config)
@@ -2515,12 +2831,18 @@ def run_console(
                             count, _, delivery = sync_peer(
                                 cache, config, peer_name
                             )
+                            for item in items:
+                                if peer_name_for_item(config, item) == peer_name:
+                                    remember_sync(item)
                             synchronized += 1
                             agents_count += count
                             delivered_count += int(delivery["delivered"])
                             pending_count += int(delivery["pending"])
                             failed_count += int(delivery["failed"])
                         except (OSError, RuntimeError, ValueError) as exc:
+                            for item in items:
+                                if peer_name_for_item(config, item) == peer_name:
+                                    remember_sync(item, str(exc))
                             failures.append(f"{peer_name}: {exc}")
                     parts = []
                     if local_count is not None:
@@ -2551,21 +2873,19 @@ def run_console(
                     )
                     outgoing, outbox_by_id = outbox_views(cache)
                     selected = restored_selection(
-                        filtered_items(items, query), current
+                        visible_items(), current
                     )
                 except (OSError, RuntimeError, ValueError) as exc:
+                    remember_sync(current, str(exc))
                     status = f"Synchronization failed: {exc}"
             elif current and focus == "conversation":
                 draft_key = (current.host_id, str(current.agent["agent_id"]))
                 draft = drafts.setdefault(draft_key, ComposerBuffer())
                 action = edit_composer_buffer(
-                    draft, key, max(1, main_width - 6)
+                    draft, key, max(1, main_width - 7)
                 )
-                if action == "send" and draft.text.strip():
+                if action in {"send", "queue"} and draft.text.strip():
                     message = draft.text.strip()
-                    baseline_matches = user_message_count(
-                        cache.records(*draft_key), message
-                    )
                     try:
                         result = agents_ui.send_message(
                             cache,
@@ -2573,24 +2893,20 @@ def run_console(
                                 "host": current.host_id,
                                 "agent": current.agent["agent_id"],
                                 "message": message,
+                                "start": action == "send",
                             },
                             codex_bin,
+                            control_socket=control_socket,
                         )
                         drafts[draft_key] = ComposerBuffer()
                         scroll = 0
-                        optimistic.setdefault(draft_key, []).append(
-                            OptimisticMessage(
-                                text=message,
-                                baseline_matches=baseline_matches,
-                                delivery=str(result["delivery"]),
-                                message_id=str(result.get("message_id") or ""),
-                            )
-                        )
                         status = (
-                            "Message sent."
+                            "Message queued for agent."
                             if result["delivery"] == "sent"
                             else "Message queued for synchronization."
                         )
+                        if result.get("start_error"):
+                            status = "Message queued, but could not start: " + result["start_error"]
                         if result["delivery"] == "queued":
                             try:
                                 config = relay_transport.load_config(relay_config)
@@ -2605,6 +2921,8 @@ def run_console(
                                 )
                                 if queued and queued["state"] == "delivered":
                                     status = "Message delivered to remote Codex queue."
+                                    if queued.get("last_error"):
+                                        status = "Message queued, but could not start: " + str(queued["last_error"])
                                 elif queued and queued["state"] == "failed":
                                     status = (
                                         "Remote delivery failed: "
@@ -2625,7 +2943,14 @@ def run_console(
                         status = f"Send failed: {exc}"
         return 0
 
-    return int(curses.wrapper(run))
+    try:
+        return int(curses.wrapper(run))
+    finally:
+        # Restore the terminal even if the console raises unexpectedly.
+        sequence = mouse_protocol_sequence(False)
+        if sequence:
+            sys.stdout.write(sequence)
+            sys.stdout.flush()
 
 
 def command_ui(args: argparse.Namespace) -> int:

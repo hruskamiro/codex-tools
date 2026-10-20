@@ -446,6 +446,36 @@ def first_text(value: Any) -> str | None:
     return None
 
 
+def tool_activity_record(event: dict[str, Any], line_no: int = 0) -> TextRecord | None:
+    """Summarize tool starts, never tool results or arbitrary tool arguments."""
+    payload = event.get("payload")
+    if event.get("type") != "response_item" or not isinstance(payload, dict):
+        return None
+    kind = payload.get("type")
+    if kind not in {"function_call", "custom_tool_call", "web_search_call"}:
+        return None
+    name = str(payload.get("name") or kind).rsplit(".", 1)[-1]
+    labels = {
+        "exec_command": "Running a command", "write_stdin": "Checking a running command",
+        "apply_patch": "Editing files", "web_search_call": "Searching the web",
+        "run": "Using a tool", "imagegen": "Generating an image",
+        "view_image": "Inspecting an image", "exec": "Running tools",
+    }
+    label = labels.get(name, "Using " + name)
+    if name == "exec":
+        arguments = str(payload.get("arguments") or "")
+        # The orchestration wrapper contains code, not a plain command. Only
+        # inspect tool names; do not transmit code, arguments, or their results.
+        if "tools.exec_command(" in arguments:
+            label = "Running a command"
+        elif "tools.apply_patch(" in arguments:
+            label = "Editing files"
+        elif "tools.web__run(" in arguments:
+            label = "Browsing the web"
+    label = "".join(character for character in " ".join(label.split()) if character.isprintable())[:100]
+    return TextRecord(str(event.get("timestamp") or ""), "activity", label, line_no, "tool_activity")
+
+
 def text_records_from_event(
     event: dict[str, Any],
     line_no: int,

@@ -179,6 +179,9 @@ def read_jsonl_events(
         records = search.text_records_from_event(
             value, line_no=0, include_tools=False, include_system=False
         )
+        activity = search.tool_activity_record(value)
+        if activity is not None:
+            records.append(activity)
         for record in records:
             if record.role == "user" and search.is_internal_prompt_text(
                 record.text

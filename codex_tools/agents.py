@@ -96,9 +96,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
   Page Up / Page Down      scroll the conversation
   Ctrl-R / Ctrl-S          refresh selected / refresh everything
   Ctrl-F / Ctrl-V          find an agent / open in the viewer
+  Ctrl-B                   choose visible agents and reorder them
   Ctrl-X                   maximize or restore the conversation
-  Ctrl-G                   stop the active turn
-  Ctrl-C                   quit""",
+  Ctrl-C / Esc / Ctrl-G    stop the selected agent's active turn
+  Ctrl-D                   quit""",
     )
     ui.add_argument(
         "--no-refresh",

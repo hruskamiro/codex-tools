@@ -3,13 +3,35 @@ from __future__ import annotations
 import tempfile
 import threading
 import unittest
-from unittest.mock import ANY, patch
+from unittest.mock import ANY, Mock, patch
 
 from codex_tools import agents_tui, viewer
 
 
 class AgentTuiTests(unittest.TestCase):
     DELIVERY = {"delivered": 0, "pending": 0, "failed": 0, "errors": []}
+
+    def test_macos_draws_text_without_inline_attributes(self) -> None:
+        window = Mock()
+        with patch.object(agents_tui.sys, "platform", "darwin"):
+            agents_tui.add_text(window, 2, 3, "› Café", 20, 17)
+        window.addnstr.assert_called_once_with(2, 3, "› Café".encode(), 9)
+        window.chgat.assert_called_once_with(2, 3, 6, 17)
+
+    def test_macos_style_is_clipped_to_display_cells(self) -> None:
+        window = Mock()
+        with patch.object(agents_tui.sys, "platform", "darwin"):
+            agents_tui.add_text(window, 0, 0, "界e\u0301界", 3, 7)
+        encoded = "界e\u0301".encode()
+        window.addnstr.assert_called_once_with(0, 0, encoded, len(encoded))
+        window.chgat.assert_called_once_with(0, 0, 3, 7)
+
+    def test_macos_text_write_does_not_cross_lines(self) -> None:
+        window = Mock()
+        with patch.object(agents_tui.sys, "platform", "darwin"):
+            agents_tui.add_text(window, 0, 0, "one\ntwo", 20, 0)
+        window.addnstr.assert_called_once_with(0, 0, b"one", 3)
+        window.chgat.assert_called_once_with(0, 0, 3, 0)
 
     def test_auto_sync_worker_refreshes_selected_local_agent(self) -> None:
         refreshed = threading.Event()
@@ -152,6 +174,24 @@ class AgentTuiTests(unittest.TestCase):
         agents_tui.move_composer_vertical(buffer, 3, -1)
         self.assertEqual(buffer.cursor, 2)
 
+    def test_composer_cursor_wraps_at_exact_boundary(self) -> None:
+        for text, width in (("abcdef", 3), ("界界", 4)):
+            with self.subTest(text=text):
+                lines, positions = agents_tui.composer_layout(text, width)
+                self.assertEqual(lines[-1], "")
+                self.assertEqual(positions[-1], (len(lines) - 1, 0))
+
+    def test_composer_reflows_without_changing_draft_on_resize(self) -> None:
+        buffer = agents_tui.ComposerBuffer("abcdef\nghij", 11)
+        for width in (12, 3, 6, 2, 12):
+            lines, positions = agents_tui.composer_layout(buffer.text, width)
+            self.assertTrue(all(sum(agents_tui.character_cell_width(c) for c in line)
+                                <= width for line in lines))
+            row, column = positions[buffer.cursor]
+            self.assertLess(row, len(lines))
+            self.assertLess(column, width)
+        self.assertEqual(buffer.text, "abcdef\nghij")
+
     def test_ctrl_p_and_ctrl_n_move_between_visual_lines(self) -> None:
         buffer = agents_tui.ComposerBuffer("abcdef", 2)
 
@@ -199,12 +239,44 @@ class AgentTuiTests(unittest.TestCase):
             "send",
         )
 
-    def test_tab_is_reserved_for_pane_switching_not_inserted(self) -> None:
+    def test_tab_queues_draft_without_inserting_a_tab(self) -> None:
         buffer = agents_tui.ComposerBuffer("draft", 5)
 
-        agents_tui.edit_composer_buffer(buffer, "\t", 40)
+        self.assertEqual(agents_tui.edit_composer_buffer(buffer, "\t", 40), "queue")
 
         self.assertEqual(buffer.text, "draft")
+
+    def test_tab_does_not_submit_an_empty_draft(self) -> None:
+        self.assertIsNone(agents_tui.edit_composer_buffer(
+            agents_tui.ComposerBuffer("  ", 2), "\t", 40
+        ))
+
+    def test_explicit_queue_status_distinguishes_delivery_from_execution(self) -> None:
+        message = agents_tui.OptimisticMessage("later", 0, "sent", queued=True)
+        self.assertEqual(agents_tui.optimistic_message_status(message, {}, agent_working=True),
+                         "Queued for agent")
+        message = agents_tui.OptimisticMessage("later", 0, "queued", "message-id", queued=True)
+        self.assertEqual(agents_tui.optimistic_message_status(message, {}),
+                         "Waiting to sync")
+        self.assertEqual(agents_tui.optimistic_message_status(
+            message, {"message-id": {"state": "delivered"}}, agent_working=True),
+            "Delivered · queued for agent")
+
+    def test_composer_has_background_padding_above_and_below(self) -> None:
+        window = Mock()
+        window.getmaxyx.return_value = (20, 80)
+        top, _ = agents_tui.draw_composer(
+            window, {"composer": 0, "composer_accent": 0, "composer_muted": 0},
+            agents_tui.ComposerBuffer("draft", 5), 20, 60, focused=True,
+        )
+        self.assertEqual(top, 17)
+        writes = window.addnstr.call_args_list
+        for row in (17, 19):
+            self.assertTrue(any(call.args[0] == row and not call.args[2].strip()
+                                for call in writes))
+            self.assertFalse(any(call.args[0] == row and call.args[2].strip()
+                                 for call in writes))
+        self.assertEqual(window.move.call_args.args[0], 18)
 
     def test_agent_drafts_remain_independent_when_switching(self) -> None:
         drafts = {
@@ -249,11 +321,11 @@ class AgentTuiTests(unittest.TestCase):
         self.assertEqual(records[0]["role"], "user")
         self.assertEqual(records[0]["text"], "Continue please")
         self.assertIn(
-            ("  ◌ Delivered · waiting for agent", "message_status"),
+            ("  ◌ Delivered · queued for agent", "message_status"),
             lines,
         )
 
-    def test_optimistic_message_reports_observed_agent_activity(self) -> None:
+    def test_agent_activity_does_not_imply_queued_message_has_started(self) -> None:
         message = agents_tui.OptimisticMessage(
             "Continue please", 0, "pending", "message-1"
         )
@@ -264,7 +336,38 @@ class AgentTuiTests(unittest.TestCase):
             agent_working=True,
         )
 
-        self.assertEqual(status, "Delivered · agent working…")
+        self.assertEqual(status, "Delivered · queued for agent")
+
+    def test_enter_and_tab_have_consistent_queue_status_after_stop(self) -> None:
+        for explicit_queue in (False, True):
+            for working in (False, True):
+                with self.subTest(queued=explicit_queue, working=working):
+                    local = agents_tui.OptimisticMessage("Continue", 0, "sent", queued=explicit_queue)
+                    self.assertEqual(agents_tui.optimistic_message_status(
+                        local, {}, agent_working=working), "Queued for agent")
+                    remote = agents_tui.OptimisticMessage("Continue", 0, "queued", "id", queued=explicit_queue)
+                    self.assertEqual(agents_tui.optimistic_message_status(
+                        remote, {"id": {"state": "delivered"}}, agent_working=working),
+                        "Delivered · queued for agent")
+
+    def test_pending_messages_distinguish_waiting_from_delivery_errors(self) -> None:
+        message = agents_tui.OptimisticMessage("Continue", 0, "queued", "id")
+        self.assertEqual(agents_tui.optimistic_message_status(
+            message, {"id": {"state": "pending"}}), "Waiting to sync")
+        self.assertEqual(agents_tui.optimistic_message_status(
+            message, {"id": {"state": "pending", "last_error": "timeout"}}),
+            "Not delivered · waiting to retry")
+        self.assertEqual(agents_tui.optimistic_message_status(
+            message, {"id": {"state": "failed", "last_error": "session unavailable"}}),
+            "Delivery failed · session unavailable")
+
+    def test_start_failure_is_visible_without_implying_delivery_failed(self) -> None:
+        local = agents_tui.OptimisticMessage("Continue", 0, "sent", start_error="unavailable")
+        remote = agents_tui.OptimisticMessage("Continue", 0, "queued", "id")
+        expected = "Queued · could not start: unavailable"
+        self.assertEqual(agents_tui.optimistic_message_status(local, {}), expected)
+        self.assertEqual(agents_tui.optimistic_message_status(
+            remote, {"id": {"state": "delivered", "last_error": "unavailable"}}), expected)
 
     def test_working_indicator_requires_active_working_state(self) -> None:
         self.assertTrue(
@@ -346,8 +449,11 @@ class AgentTuiTests(unittest.TestCase):
             def getmaxyx(self) -> tuple[int, int]:
                 return (20, 80)
 
-            def addnstr(self, y: int, x: int, text: str, width: int, attr: int) -> None:
-                self.writes.append(text[:width])
+            def addnstr(self, y: int, x: int, text: str | bytes, width: int, attr: int = 0) -> None:
+                self.writes.append(text[:width].decode() if isinstance(text, bytes) else text[:width])
+
+            def chgat(self, *args: object) -> None:
+                pass
 
             def move(self, y: int, x: int) -> None:
                 pass
@@ -1031,19 +1137,32 @@ class AgentTuiTests(unittest.TestCase):
             def addnstr(self, *args: object) -> None:
                 self.calls.append(("text", *args))
 
+            def chgat(self, *args: object) -> None:
+                self.calls.append(("style", *args))
+
             def refresh(self) -> None:
                 self.calls.append(("refresh",))
 
         window = Window()
 
-        agents_tui.show_status(window, "Refreshing…", 7)
+        with patch.object(agents_tui.sys, "platform", "linux"):
+            agents_tui.show_status(window, "Refreshing…", 7)
 
         self.assertIn(("text", 23, 1, "Refreshing…", 78, 7), window.calls)
         self.assertEqual(window.calls[-1], ("refresh",))
 
-    def test_ctrl_c_requests_console_exit(self) -> None:
-        self.assertTrue(agents_tui.requests_console_exit(3))
+    def test_ctrl_d_requests_console_exit_but_ctrl_c_does_not(self) -> None:
+        self.assertTrue(agents_tui.requests_console_exit(4))
+        self.assertFalse(agents_tui.requests_console_exit(3))
         self.assertFalse(agents_tui.requests_console_exit(ord("j")))
+
+    def test_bare_escape_requests_stop_but_unknown_alt_sequence_does_not(self) -> None:
+        window = Mock()
+        window.get_wch.side_effect = agents_tui.curses.error
+        self.assertEqual(agents_tui.escape_action(window), ("stop", ""))
+        window.get_wch.side_effect = None
+        window.get_wch.return_value = "z"
+        self.assertEqual(agents_tui.escape_action(window), ("cancel", ""))
 
     def test_escape_does_not_request_console_exit(self) -> None:
         self.assertFalse(agents_tui.requests_console_exit(27))
