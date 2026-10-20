@@ -22,7 +22,8 @@ OpenAI.
 
 **Requirements:** Linux or macOS and Python 3.10 or newer. The Agent Console,
 relay client, and Markdown viewer also run on Intel macOS Monterey; they do not
-require Homebrew or LaTeX. The optional typeset viewer requires local XeLaTeX.
+require Homebrew or LaTeX. The optional typeset viewer needs XeLaTeX locally
+or on its relay peer.
 Model-backed summaries and
 structured tasks also require an installed Codex CLI. The default `exec`
 backend uses its Codex login; the optional app-server backend uses a separate
@@ -120,36 +121,93 @@ refreshes the local relay cache and opens the terminal **Agent Console**,
 styled after the Codex CLI. You can switch among cached local or remote agents,
 read their recent messages, search, scroll, and send or queue a message without
 leaving the terminal. The conversation pane starts with an always-available
-composer: type immediately, press Enter to send, and use Ctrl-J for a newline.
+composer: type immediately, press Enter to send, Tab to queue the draft, and
+use Ctrl-J for a newline. Queued drafts appear in the conversation with their
+delivery status; remote drafts remain safely queued if the connection is down.
+Enter also starts the oldest waiting input when the agent is idle, including
+after an interruption. Tab only queues, without explicitly restarting stopped
+work. A busy agent is never interrupted by either key.
 It expands as text wraps, supports cursor editing and multiline paste, and
 keeps a separate unsent draft when you move between agents. Markdown fenced
 code blocks use Pygments syntax highlighting, preserve indentation, and render
 on a restrained terminal surface without showing the literal fences.
 
 Sent messages appear in the conversation immediately, including in manual
-sync mode. A muted line beneath the optimistic bubble reports whether the
-message was sent locally, queued offline, delivered to a relay, or failed.
-When synchronization finds the corresponding real transcript record, the
-temporary bubble is reconciled away instead of appearing twice.
+sync mode. A muted line beneath the message reports whether the
+message is waiting to sync, awaiting a delivery retry, accepted into Codex's
+queue, or failed. Delivery does not mean the agent has started that message;
+the thread's separate working indicator is not attributed to a queued draft.
+Delivery receipts are stored in the private local relay cache, including for
+local sends, so statuses survive refreshes and console restarts. When sync
+finds the corresponding real transcript record, the status stays attached to
+that message, marked “Delivered · in conversation,” instead of disappearing
+or creating a duplicate bubble. This is delivery/observation status, not a
+claim that the assistant's turn completed. Existing messages sent before
+receipt tracking was enabled are not retroactively assigned a status.
 
-Press Tab to switch between the agent list and composer. Shift-Left also
-selects the agent list from anywhere in a draft; use Up/Down and Right to enter
-the selected agent's composer. Ctrl-P/Ctrl-N move
-between draft lines, while Ctrl-Left/Ctrl-Right move by word. Page Up/Down or
+Beside the model and reasoning effort, separated by a vertical divider, the
+console shows the sync mode and a steady health dot: green for a recent
+successful sync, yellow for manual/cached, stale, or not-yet-checked state,
+and red after a failed sync until a newer success. Routine checks do not
+change the label or animate the dot. The last-success time is still stored
+locally, including successful incremental polls with no new messages.
+
+The conversation shows up to three muted tool-activity breadcrumbs, such as
+“Running a command” or “Editing files,” alongside the working indicator.
+These compact summaries sync through the relay; tool arguments and output
+are not included. In manual sync mode they update only when you refresh.
+The composer wraps at word boundaries (splitting only overlong words/URLs),
+preserves your actual draft text, and leaves a cell of background padding on
+the right. Explicit newlines and cursor navigation follow the visual layout.
+
+Press Tab with an empty draft to switch between the agent list and composer;
+Shift-Tab switches panes even with a draft. Alt-Up/Down selects the previous/next agent without
+reordering, wrapping from the first to the last and vice versa (also Command-Up/Down
+in macOS Terminal when Cmd/Option are swapped).
+Shift-Left selects the agent list from anywhere in a draft; use Up/Down and Right to enter
+the selected agent's composer. Ctrl-P/Ctrl-N move between agents in the agent
+list, or between draft lines in the composer. Ctrl-Left/Ctrl-Right move by word. Page Up/Down or
 the mouse wheel scrolls the conversation. Ctrl-R refreshes the selected agent,
 Ctrl-S refreshes all local sessions and configured peers, Ctrl-V opens the
 browser viewer, Ctrl-T opens the typeset viewer, Ctrl-F searches, and Ctrl-X
 maximizes or restores the conversation; Alt-M does the same without consuming
-a typing key. Ctrl-G stops the selected agent's active turn without discarding
-its queued prompts. Press Ctrl-C to quit. Agents keep a stable creation-time
+a typing key. Ctrl-C, Escape, or Ctrl-G stops the selected agent's active turn
+without discarding its queued prompts. Press Ctrl-D to quit the console (the
+background SSH connection and remote agents keep running). Agents keep a stable creation-time
 order instead of jumping after new
 activity; the first nine are numbered and Alt-1 through Alt-9 switches to them
 directly. Alt-Up and Alt-Down select the previous or next agent, while
-Alt-Shift-Up and Alt-Shift-Down move it within its host group;
+Alt-Shift-Up and Alt-Shift-Down reorder it in the single agent list, across hosts;
 the custom order persists across refreshes and console restarts. With
 `--no-local`, Ctrl-S skips the local refresh.
 
-The first item in the agent pane opens **Settings**. Its synchronization mode
+Press **Ctrl-B** to choose which available agents appear in the console:
+
+- **Up/Down** selects an agent; **Space/Enter** shows or hides it.
+- **Alt-Up/Down** reorders the selected agent, including across hosts.
+- **a** shows all currently available agents.
+- **Esc/Ctrl-B** returns to the console; **Ctrl-D** quits.
+
+The console follows this one flat list. No named groups, workdir grouping,
+membership rules, or group filters are involved. New agents appear by default;
+unchecked agents can always be restored from the same chooser. Hiding an agent
+does not stop it, delete its conversation, or change relay access or syncing.
+
+Visibility and order persist per client in
+`~/.config/codex-tools/agent-selection.json`, using stable host/session IDs.
+Missing agents are not shown, but retain their preferences if they return.
+The first run copies explicit Hidden choices and order from the previous group
+setup, but discards group filters. The original `agent-groups.json` and
+`agent-order.json` files are left untouched as backups. Group commands and
+group-filter CLI flags were removed.
+
+**Settings** has separate **Sync** and **Agents** tabs. With the Settings pane
+focused, use **Left/Right** to select a tab and **Up/Down** to choose an option;
+**Enter** applies it. **Tab** still switches panes, and **Shift-Left** selects
+the sidebar. **Agents** opens the same simple chooser. Preferences apply on
+future console starts, including `ct-connect console PROFILE`.
+
+The first item in the agent pane opens **Settings**. The **Sync** tab's mode
 applies immediately and is saved as `agents.sync_mode` in the regular Codex
 Tools configuration:
 
@@ -176,8 +234,8 @@ machine's sessions and browse only cached remote agents.
 Viewer routes explicitly identify both presentation and source:
 `/v/local/SESSION` and `/t/local/SESSION` use local Codex JSONL data, while
 `/v/relay/HOST/AGENT` renders a synchronized remote conversation from the
-private relay cache. `/t/relay/HOST/AGENT` typesets the cached conversation
-locally. Attachments referenced by an assistant record are fetched from the
+private relay cache. `/t/relay/HOST/AGENT` can typeset locally or request PDFs
+from the authenticated relay peer. Attachments referenced by an assistant record are fetched from the
 authenticated peer only when opened, validated by record and link index, and
 kept in the private relay attachment cache for later offline viewing. Arbitrary
 remote paths are never accepted from the browser.
@@ -208,6 +266,133 @@ ct agents ui
 ```
 
 `ct relay pair` prompts for the remote machine's key without echoing it.
+
+For intermittent connections, keep the relay on localhost and connect through
+SSH. On the serving machine, leave this running in a terminal or your existing
+service supervisor:
+
+```bash
+scripts/relay-ssh-serve  # initializes an identity if needed; binds 127.0.0.1:8780
+# Equivalent after initialization: ct relay serve
+```
+
+Configure a normal SSH host alias such as `desktop` in `~/.ssh/config` (including
+any key or jump host). Connect once with `ssh desktop true` to verify its host
+key and authentication. On the client, pair once with the forwarded address:
+
+```bash
+ct relay init --name laptop                         # first installation only
+ct relay pair desktop http://127.0.0.1:18780          # enter the serving machine's relay key
+ct relay connect desktop                           # opens the Agent Console immediately
+```
+
+The equivalent checkout script is `scripts/relay-ssh-connect desktop`.
+Use `--ssh user@host` if the SSH destination differs from the peer name,
+`--remote-port PORT` if its relay uses another port, or `--ui viewer` to open
+the latest cached peer conversation in the local browser. `--ui none` maintains
+only the tunnel and queued-message delivery. Keep this command running;
+Ctrl-C stops its connection supervisor and SSH child. The serving relay is
+independent and continues running. No additional SSH packages are needed.
+
+On macOS, the checkout also includes `scripts/ct-connect-macos`, an on-demand
+per-user launchd controller. Run it with the checkout's virtualenv Python, or
+through a user-local `ct-connect` shim pointing to that interpreter and script:
+
+```bash
+ct-connect start desktop --ssh user@desktop  # configure once and start in the background
+ct-connect                         # subsequent starts
+ct-connect status                  # list all configured connections
+ct-connect console desktop         # ensure connected, then open the console
+ct-connect viewer desktop          # ensure connected, then open this peer's viewer
+ct-connect stop desktop
+```
+
+For a second server, pair a second peer using a different local forwarding
+port, then start its named connection. SSH login keys and jump-host routes
+remain in `~/.ssh/config`; relay pairing keys remain in `relay.json`.
+
+```bash
+ct relay pair workstation http://127.0.0.1:18781
+ct-connect start workstation --ssh your-workstation-ssh-alias
+ct-connect status workstation
+```
+
+Both services can run together. Stopping or reconfiguring one does not restart
+the other. The saved launcher configuration contains a `connections` table,
+with each entry storing its `ssh`, `peer`, and `remote_port`. It also records
+the default connection used when no name is supplied. Existing single-server
+settings migrate automatically on the next start, with a private backup in
+`ssh-launcher.v1.json`. Each named service has separate status/log files and
+a private definition under `~/.config/codex-tools/ssh-services/`.
+
+Closing the console or terminal does not stop this background service. It
+reconnects independently; launchd also restarts it if the helper crashes.
+The service definition is kept outside `~/Library/LaunchAgents`, so it does
+not start automatically at login. Run `ct-connect` again after logging in.
+Saved SSH destination/peer settings are in
+`~/.config/codex-tools/ssh-launcher.json`; changing them with `--ssh`, `--peer`,
+or `--remote-port` restarts only the selected service with the new settings. For travel, use
+an SSH alias reachable through your chosen VPN or jump host instead of a
+home-network-only IP address.
+
+### Start the remote relay automatically over SSH
+
+Remote auto-start is opt-in per connection. Save it on the Mac with:
+
+```bash
+ct-connect start desktop --auto-start --remote-bin /home/hruskam/.local/bin/ct
+ct-connect status desktop
+ct-connect start desktop --no-auto-start  # turn it off again
+```
+
+The launcher saves `auto_start` and `remote_bin` alongside the profile's SSH
+settings. Without the Mac launcher, the equivalent one-run command is:
+
+```bash
+ct relay connect desktop --ssh your-ssh-alias --auto-start --remote-bin /absolute/path/to/ct
+```
+
+Before each tunnel connection/reconnection, SSH invokes `ct relay ensure` on
+the serving machine. A healthy relay is reused. Only a refused localhost
+connection is treated as absent; occupied, unresponsive, or incompatible
+endpoints are reported and left untouched. Startup is locked per port, and
+a recorded live startup PID prevents duplicate launches during retries.
+
+New relays bind only to `127.0.0.1`, detach from SSH, and stay running after
+the client disconnects. No existing process is killed or restarted. This is
+on-demand startup, not an OS boot/login service; the next connect can start
+the relay again after a reboot or crash. Logs and startup metadata are private
+under `~/.local/state/codex-tools/relay-serve/PORT/` on the serving machine.
+
+The serving machine needs an updated codex-tools installation and an already
+initialized relay identity (`ct relay init`). Auto-start never generates or
+rotates pairing keys, installs software, or changes network/firewall settings.
+Prefer an absolute executable path because noninteractive SSH may have a
+different PATH. SSH aliases and `ProxyJump` continue to work normally. Cached
+viewing and the console remain usable while SSH or remote startup is unavailable.
+
+The tunnel binds only `127.0.0.1` on the client and forwards to `127.0.0.1` on
+the server; HTTP travels inside encrypted SSH. The connection supervisor:
+
+- detects broken SSH connections with keepalives and small relay health probes;
+- retries with jittered delays up to 30 seconds, including after sleep/wake;
+- synchronizes a snapshot after reconnection and retries persisted pending messages;
+- leaves cached viewing and the local composer usable while offline.
+
+Between reconnects it does not repeatedly fetch full snapshots. The Agent
+Console uses its configured incremental sync mode; the standalone viewer uses
+its existing refresh controls. If the first connection arrives after the
+console opened, newly cached agents appear automatically. Existing port
+conflicts are reported without taking over other tunnels. Per-connection
+status and private SSH logs live below `~/.local/state/codex-tools/relay-ssh/`.
+
+SSH is a reconnectable transport, not seamless roaming: requests in progress
+can time out on a poor connection. Completed downloads remain cached; an
+interrupted PDF download must be retried, rather than resumed byte by byte.
+If reconnecting fails, check the SSH log and confirm the remote relay is still
+running. For less conversation traffic, select the Agent Console's `economy`
+sync mode.
+
 `ct relay peers` lists configured connections without exposing their keys. Each
 sync refreshes the serving machine's currently loaded Codex sessions before it
 returns the snapshot, then stores the result in the client's private cache for
@@ -258,6 +443,13 @@ field, and preselects the newest conversation. Type to filter, use Up/Down to
 move, and press Enter to open the selected conversation in the same tab. Pass
 `--query TEXT` to start with a filter already applied.
 
+In either conversation view, **Shift-L** opens the chooser in a new tab;
+lowercase **L** still jumps to the latest response. The chooser includes local
+and cached relay conversations. From a relay conversation it initially shows
+that same peer, with **All sources** to broaden the selection. It preserves
+Markdown/typeset mode and reads the local cache without contacting the peer,
+so cached conversations remain selectable offline.
+
 The viewer resolves the desktop's default browser and asks known browsers to
 open a new window. It falls back to the desktop URL opener when the browser
 cannot be resolved. Diagnose startup, port, browser, and optional LaTeX support
@@ -276,12 +468,12 @@ under `~/.local/state/codex-tools/viewer/` instead of claiming startup
 succeeded.
 
 **Markdown is the portable default.** Press `T` inside a conversation to switch
-between Markdown and the LaTeX view. In the LaTeX view, local or synchronized
+between Markdown and the LaTeX view. In both views, local or synchronized
 remote attachments and external links from each assistant answer are collected
 in a footer below it.
 Relative Markdown attachment paths are resolved from the conversation's
 recorded working directory and use the same validated local opener.
-Hold `Shift` briefly to reveal `[1]`–`[9]` hints for footer links currently in
+Hold `Shift` briefly to reveal `1`–`9` keycap hints for footer links currently in
 the viewport, then press the corresponding digit while still holding `Shift`
 to open one in a new tab. The left and right arrows move toward the previous or
 next message boundary, but never farther than one viewport per press.
@@ -293,8 +485,30 @@ The screenshot above was generated by the real viewer from the included
 
 ### Optional LaTeX view
 
+For relay conversations, a thin client can use the serving machine's XeLaTeX
+installation. The default `auto` backend renders locally when `xelatex` is
+available, and otherwise requests rendered assistant answers from the peer.
+Local conversations always use the local renderer.
+
+```bash
+ct config set viewer.typeset_backend remote  # always render relay answers on the peer
+ct viewer restart
+```
+
+The other choices are `local` and `auto`. Use `ct viewer start
+--typeset-backend remote` for a command-specific override, or add
+`?backend=remote` to a typeset-view URL. Restart an already-running relay after
+upgrading it to enable the remote rendering endpoint.
+
+Only the referenced assistant answer and validated rendering options are used;
+the relay does not accept arbitrary Markdown, TeX, or filesystem paths for
+rendering. The server reuses its content-addressed PDFs, and the client downloads
+each requested answer once into a private PDF cache. Cached views work offline;
+uncached answers show a rendering/connection error with Markdown fallback.
+Attachments and external-link keyboard shortcuts remain available below the PDFs.
+
 For high-quality equations, tables, prose, and highlighted code, install the
-optional typesetting dependencies:
+optional typesetting dependencies on the rendering machine:
 
 ```bash
 sudo apt install texlive-xetex texlive-latex-extra fonts-texgyre fonts-paratype fonts-dejavu-core
