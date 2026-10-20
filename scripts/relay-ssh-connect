@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+project_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+python_bin="${CODEX_TOOLS_PYTHON:-${project_root}/.venv/bin/python}"
+if [[ ! -x "${python_bin}" ]]; then
+  python_bin=python3
+fi
+exec env "PYTHONPATH=${project_root}${PYTHONPATH:+:${PYTHONPATH}}" \
+  "${python_bin}" -m codex_tools.relay_ssh "$@"

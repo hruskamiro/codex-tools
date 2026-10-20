@@ -1,6 +1,9 @@
 include LICENSE
 include README.md
 include SECURITY.md
+include scripts/relay-ssh-connect
+include scripts/relay-ssh-serve
+include scripts/ct-connect-macos
 recursive-include codex_tools/templates *.md
 recursive-include codex_tools/vendor *
 recursive-exclude codex_tools/vendor __pycache__ *.py[cod]

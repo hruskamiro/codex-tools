@@ -69,6 +69,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=argparse.SUPPRESS,
     )
 
+    from codex_tools import relay_ssh
+    connect = commands.add_parser("connect", help="Keep an SSH relay tunnel alive and open the local UI.")
+    relay_ssh.add_arguments(connect)
+
     sync = commands.add_parser("sync", help="Pull a peer's current agent snapshot.")
     sync.add_argument("peer")
     sync.add_argument(
@@ -83,6 +87,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=relay_cache.DEFAULT_CACHE_PATH,
         help=argparse.SUPPRESS,
     )
+
+    from codex_tools import relay_service
+    ensure = commands.add_parser("ensure", help="Start a missing localhost relay; reuse a healthy one.")
+    relay_service.add_arguments(ensure)
 
     serve = commands.add_parser("serve", help="Serve this machine's relay snapshot.")
     serve.add_argument("--host", default="127.0.0.1")
@@ -401,8 +409,14 @@ def main(argv: list[str] | None = None) -> int:
             return command_peers(args)
         if args.relay_command == "sync":
             return command_sync(args)
+        if args.relay_command == "connect":
+            from codex_tools import relay_ssh
+            return relay_ssh.command_connect(args)
         if args.relay_command == "serve":
             return command_serve(args)
+        if args.relay_command == "ensure":
+            from codex_tools import relay_service
+            return relay_service.command(args)
         if args.relay_command == "outbox":
             return command_outbox(args)
         if args.relay_command == "cache" and args.cache_command == "refresh":

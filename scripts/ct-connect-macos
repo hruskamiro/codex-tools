@@ -1,0 +1,237 @@
+#!/usr/bin/env python3
+"""Manage named, on-demand codex-tools SSH connections using user launchd services."""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import hashlib
+import json
+import os
+import plistlib
+import re
+import subprocess
+import sys
+import time
+from urllib.parse import urlparse
+
+from codex_tools import paths, relay_cache, relay_ssh, relay_transport
+
+
+LABEL = "local.codex-tools.relay"
+
+
+def launchctl(*arguments: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["/bin/launchctl", *arguments], capture_output=True, text=True)
+
+
+def connection_name(value: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", value):
+        raise ValueError("connection names must use 1–64 letters, digits, hyphens or underscores")
+    return value
+
+
+def read_settings(preferences):
+    payload = json.loads(preferences.read_text()) if preferences.exists() else {}
+    if not isinstance(payload, dict):
+        raise ValueError(f"invalid launcher configuration: {preferences}")
+    if payload.get("version") == 2:
+        if not isinstance(payload.get("connections"), dict):
+            raise ValueError("launcher configuration must contain a connections table")
+        for name, settings in payload["connections"].items():
+            connection_name(name)
+            if not isinstance(settings, dict):
+                raise ValueError(f"invalid settings for connection: {name}")
+        return payload, False
+    if payload and ("connections" in payload or "version" in payload):
+        raise ValueError("unsupported launcher configuration version")
+    default = connection_name(str(payload.get("peer") or "desktop"))
+    return {"version": 2, "default": default, "connections": {default: payload} if payload else {}}, bool(payload)
+
+
+def service_state(domain, name, default):
+    service = f"{domain}/{LABEL}.{name}"
+    loaded = launchctl("print", service)
+    # Recognize the old single-connection service until its first migration.
+    if loaded.returncode and name == default:
+        legacy = launchctl("print", f"{domain}/{LABEL}")
+        if legacy.returncode == 0:
+            return f"{domain}/{LABEL}", legacy
+    return service, loaded
+
+
+def stop_service(service, loaded):
+    if loaded.returncode == 0:
+        result = launchctl("bootout", service)
+        if result.returncode:
+            raise RuntimeError(result.stderr.strip())
+
+
+def show_status(name, settings, loaded, peers):
+    if loaded.returncode:
+        print(f"{name}: stopped · ct-connect start {name}")
+        return False
+    pid = re.search(r"^\s*pid = (\d+)", loaded.stdout or "", re.MULTILINE)
+    print(f"{name}: {'running (PID ' + pid[1] + ')' if pid else 'loaded; waiting to restart'}")
+    peer_name = settings.get("peer", name)
+    port = urlparse(peers.get(peer_name, {}).get("url", "")).port or 80
+    print(f"  SSH: {settings.get('ssh', name)} → localhost:{port} · peer: {peer_name}")
+    print(f"  Remote auto-start: {'on' if settings.get('auto_start', False) else 'off'}")
+    identity = hashlib.sha256(f"{peer_name}:{port}".encode()).hexdigest()[:20]
+    status_file = paths.user_state_dir() / "relay-ssh" / identity / "status.json"
+    try:
+        state = json.loads(status_file.read_text())
+        if pid and state.get("pid") == int(pid[1]):
+            print(f"  {state.get('message', '')}")
+    except (OSError, ValueError):
+        pass
+    print(f"  Logs: {paths.user_state_dir() / 'relay-ssh-service' / name}")
+    return True
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("action", nargs="?", default="start",
+                        choices=("start", "stop", "status", "console", "viewer"))
+    parser.add_argument("connection", nargs="?", help="Connection name; status without a name lists all.")
+    parser.add_argument("--ssh", metavar="HOST", help="Save the SSH host/alias (default: connection name).")
+    parser.add_argument("--peer", help="Save the paired relay peer (default: connection name).")
+    parser.add_argument("--remote-port", type=int, help="Save the remote relay port (default: 8780).")
+    automatic = parser.add_mutually_exclusive_group()
+    automatic.add_argument("--auto-start", action="store_true", dest="auto_start", default=None,
+                           help="Save: start a missing remote relay automatically through SSH.")
+    automatic.add_argument("--no-auto-start", action="store_false", dest="auto_start",
+                           help="Save: require the remote relay to already be running.")
+    parser.add_argument("--remote-bin", metavar="PATH", help="Save the remote codex-tools executable (prefer an absolute path).")
+    args = parser.parse_args()
+    if sys.platform != "darwin":
+        parser.error("this launcher uses macOS launchd")
+    domain = f"gui/{os.getuid()}"
+    config_dir = paths.user_config_dir()
+    preferences = config_dir / "ssh-launcher.json"
+    try:
+        config, migrated = read_settings(preferences)
+    except (OSError, ValueError):
+        if args.action != "stop":
+            raise
+        config, migrated = {"default": "desktop", "connections": {}}, False
+    default = connection_name(str(config.get("default", "desktop")))
+    name = connection_name(args.connection or default)
+    if args.action == "stop":
+        service, loaded = service_state(domain, name, default)
+        stop_service(service, loaded)
+        print(f"{name}: connection stopped. Other connections and cached viewing remain available.")
+        return 0
+
+    peers = relay_transport.load_config()["peers"]
+    if args.action == "status":
+        names = [name] if args.connection else sorted(config["connections"])
+        if not names:
+            print("No connections configured. Use: ct-connect start NAME --ssh user@host")
+            return 1
+        running = False
+        for selected in names:
+            connection_name(selected)
+            if selected not in config["connections"]:
+                raise ValueError(f"unknown connection: {selected}")
+            _, loaded = service_state(domain, selected, default)
+            running |= show_status(selected, config["connections"][selected], loaded, peers)
+        return 0 if running else 1
+
+    settings = dict(config["connections"].get(name, {}))
+    settings.setdefault("peer", name)
+    settings.setdefault("ssh", name)
+    settings.setdefault("remote_port", 8780)
+    for key, value in (("ssh", args.ssh), ("peer", args.peer), ("remote_port", args.remote_port),
+                       ("auto_start", args.auto_start), ("remote_bin", args.remote_bin)):
+        if value is not None:
+            settings[key] = value
+    peer = peers.get(settings["peer"])
+    if not isinstance(peer, dict):
+        raise ValueError(f"pair the relay first: ct relay pair {settings['peer']} http://127.0.0.1:LOCAL_PORT")
+    parsed = urlparse(peer["url"])
+    if (parsed.scheme != "http" or parsed.hostname not in {"localhost", "127.0.0.1"}
+            or parsed.username is not None or parsed.password is not None
+            or parsed.path not in {"", "/"} or parsed.query or parsed.fragment):
+        raise ValueError("pair this peer with a localhost HTTP endpoint first")
+    port = parsed.port or 80
+    relay_ssh.ssh_command(settings["ssh"], port, settings["remote_port"])
+    if not isinstance(settings.get("auto_start", False), bool):
+        raise ValueError("auto_start must be true or false")
+    if settings.get("auto_start") or "remote_bin" in settings:
+        relay_ssh.bootstrap_command(settings["ssh"], settings["remote_port"], settings.get("remote_bin", "ct"))
+    for other, values in config["connections"].items():
+        other_url = urlparse(peers.get(values.get("peer", other), {}).get("url", ""))
+        if other != name and other_url.hostname in {"localhost", "127.0.0.1"} and (other_url.port or 80) == port:
+            raise ValueError(f"{other} already uses local port {port}; pair each server with a different local port")
+
+    service, loaded = service_state(domain, name, default)
+    changed = settings != config["connections"].get(name)
+    paths.ensure_private_dir(config_dir)
+    if migrated and not (config_dir / "ssh-launcher.v1.json").exists():
+        paths.write_private_text(config_dir / "ssh-launcher.v1.json", preferences.read_text())
+    config["connections"][name] = settings
+    paths.write_private_text(preferences, json.dumps(config, indent=2) + "\n")
+    named_service = f"{domain}/{LABEL}.{name}"
+    if loaded.returncode == 0 and (changed or service != named_service):
+        stop_service(service, loaded)
+        deadline = time.monotonic() + 10
+        while launchctl("print", service).returncode == 0:
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"{name} is still stopping; run ct-connect start {name} again shortly")
+            time.sleep(0.1)
+        loaded = launchctl("print", named_service)
+    if loaded.returncode:
+        directory = paths.user_state_dir() / "relay-ssh-service" / name
+        paths.ensure_private_dir(directory)
+        environment = {"LANG": "en_US.UTF-8", "PYTHONUTF8": "1"}
+        for variable in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"):
+            if variable in os.environ:
+                environment[variable] = os.environ[variable]
+        command = [
+            sys.executable, "-m", "codex_tools.cli", "relay", "connect", settings["peer"],
+            "--ssh", settings["ssh"], "--remote-port", str(settings["remote_port"]), "--ui", "none",
+            "--config-file", str(paths.RELAY_CONFIG_FILE), "--cache-file", str(relay_cache.DEFAULT_CACHE_PATH),
+        ]
+        if settings.get("auto_start", False):
+            command.extend(["--auto-start", "--remote-bin", settings.get("remote_bin", "ct")])
+        definition = {
+            "Label": f"{LABEL}.{name}",
+            "ProgramArguments": command,
+            "KeepAlive": True, "ThrottleInterval": 15, "Umask": 0o077,
+            "EnvironmentVariables": environment,
+            "StandardOutPath": str(directory / "service.log"),
+            "StandardErrorPath": str(directory / "service-error.log"),
+        }
+        # Outside ~/Library/LaunchAgents: no automatic login startup.
+        definition_dir = config_dir / "ssh-services"
+        paths.ensure_private_dir(definition_dir)
+        plist_path = definition_dir / f"{name}.plist"
+        paths.write_private_text(plist_path, plistlib.dumps(definition).decode("utf-8"))
+        result = launchctl("bootstrap", domain, str(plist_path))
+        if result.returncode:
+            raise RuntimeError(f"Cannot start {name}: {result.stderr.strip()}")
+        print(f"{name}: background connection started; it will reconnect automatically.")
+    else:
+        print(f"{name}: connection is already running.")
+
+    if args.action == "console":
+        os.execv(sys.executable, [sys.executable, "-m", "codex_tools.cli", "agents", "ui", "--no-local"])
+    if args.action == "viewer":
+        if not relay_ssh.open_cached_viewer(relay_cache.RelayCache(), peer):
+            print(f"Waiting for the first sync. Run ct-connect viewer {name} again when connected.")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        directory = paths.user_config_dir()
+        paths.ensure_private_dir(directory)
+        lock_path = directory / "ssh-launcher.lock"
+        with lock_path.open("a") as lock:
+            lock_path.chmod(0o600)
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            raise SystemExit(main())
+    except (OSError, ValueError, RuntimeError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        raise SystemExit(1)
