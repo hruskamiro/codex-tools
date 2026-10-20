@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 import json
+import shutil
+import subprocess
 import tempfile
 import unittest
 from io import StringIO
@@ -70,7 +72,7 @@ class ViewerCommandTests(unittest.TestCase):
         with patch.object(
             viewer.config,
             "resolve",
-            side_effect=lambda key: (
+            side_effect=lambda key, *_args: (
                 ("firefox --private-window", "user config")
                 if key == "viewer.browser"
                 else ("auto", "built-in")
@@ -99,18 +101,21 @@ class ViewerCommandTests(unittest.TestCase):
         with (
             patch.object(viewer, "viewer_startup_checks", return_value=startup),
             patch.object(viewer, "latex_requirement_checks", return_value=ready),
+            patch.object(viewer.config, "value", return_value="local"),
             patch.object(viewer, "read_default_view", return_value="markdown"),
         ):
             self.assertEqual(args.func(args), 0)
         with (
             patch.object(viewer, "viewer_startup_checks", return_value=startup),
             patch.object(viewer, "latex_requirement_checks", return_value=missing),
+            patch.object(viewer.config, "value", return_value="local"),
             patch.object(viewer, "read_default_view", return_value="markdown"),
         ):
             self.assertEqual(args.func(args), 0)
         with (
             patch.object(viewer, "viewer_startup_checks", return_value=startup),
             patch.object(viewer, "latex_requirement_checks", return_value=missing),
+            patch.object(viewer.config, "value", return_value="local"),
             patch.object(viewer, "read_default_view", return_value="latex"),
         ):
             self.assertEqual(args.func(args), 1)
@@ -390,6 +395,7 @@ class ViewerCommandTests(unittest.TestCase):
                 relay_cache_file=cache_path,
                 relay_config=root / "relay.json",
             )
+            state.typeset_backend = "local"
             rendered = SimpleNamespace(
                 ok=True,
                 key="remote-pdf",
@@ -750,6 +756,96 @@ class ViewerCommandTests(unittest.TestCase):
             viewer.TYPESET_JS,
         )
         self.assertIn(".typeset-attachments", viewer.APP_CSS)
+
+    def test_normal_view_includes_local_attachments_and_external_links(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "check.pdf").write_bytes(b"%PDF-1.4\n")
+            text = "[Test PDF](check.pdf) and [Reference](https://example.com/check)"
+            session = search.Session(path=root / "session.jsonl", cwd=str(root), records=[
+                search.TextRecord("", "assistant", text, 42, "message"),
+                search.TextRecord("", "user", text, 43, "message"),
+            ])
+            with (
+                patch.object(viewer, "resolve_session_path", return_value=session.path),
+                patch.object(viewer, "read_session", return_value=session),
+                patch.object(viewer, "session_summary", return_value={}),
+            ):
+                payload = viewer.handle_session(SimpleNamespace(titles={}, typeset_debug=False), {})
+            assistant, user = payload["records"]
+            self.assertEqual(assistant["attachments"][0]["label"], "Test PDF")
+            self.assertEqual(assistant["attachments"][0]["kind"], "PDF")
+            self.assertTrue(assistant["attachments"][0]["url"].startswith("/open?"))
+            self.assertEqual(assistant["externalLinks"][0]["url"], "https://example.com/check")
+            self.assertEqual(user["attachments"], [])
+            self.assertEqual(user["externalLinks"], [])
+
+    def test_normal_relay_view_discovers_attachments_without_local_file(self) -> None:
+        session = {"hostId": "host-1", "id": "agent-1", "cwd": "/remote/work"}
+        records = [{"role": "assistant", "timestamp": "", "text":
+                    "[Remote PDF](check.pdf) and https://example.com/check"}]
+        with patch.object(viewer, "relay_session_snapshot", return_value=(session, records, "")):
+            payload = viewer.handle_relay_session(SimpleNamespace(), {})
+        record = payload["records"][0]
+        self.assertEqual(record["attachments"][0]["label"], "Remote PDF")
+        self.assertIn("source=relay", record["attachments"][0]["url"])
+        self.assertEqual(record["externalLinks"][0]["url"], "https://example.com/check")
+
+    def test_normal_and_typeset_views_share_resource_footer_and_shortcuts(self) -> None:
+        for script in (viewer.VIEW_JS, viewer.TYPESET_JS):
+            self.assertIn(viewer._RESOURCE_LINKS_JS, script)
+            self.assertIn("resourceLinks(record)", script)
+            self.assertEqual(script.count("function resourceLinks(record)"), 1)
+            self.assertEqual(script.count('window.addEventListener("keydown", handleLinkHintKeyDown, true)'), 1)
+
+    @unittest.skipUnless(shutil.which("node"), "Node required for JavaScript behavior regression")
+    def test_normal_footer_renders_safe_links_and_hint_opens_visible_attachment(self) -> None:
+        render_record = viewer.VIEW_JS.split("function renderRecord(record) {", 1)[1]
+        render_record = "function renderRecord(record) {" + render_record.split("function setNavigationCurrent", 1)[0]
+        script = r"""
+const assert = require('node:assert/strict');
+const handlers = {};
+const links = Array.from({length: 12}, (_, i) => ({
+  dataset: {}, isConnected: true, clicked: false,
+  getBoundingClientRect: () => ({width: 20, height: 10, top: i ? 20 : -100,
+                                bottom: i ? 30 : -90, left: 20, right: 40}),
+  click() { this.clicked = true; },
+}));
+const window = {innerHeight: 100, innerWidth: 100,
+  addEventListener: (name, fn) => { (handlers[name] ??= []).push(fn); },
+  getComputedStyle: () => ({visibility:'visible', display:'block'}),
+  clearTimeout() {}, cancelAnimationFrame() {},
+};
+const document = {addEventListener() {}, querySelectorAll: () => links};
+function escapeHtml(s) { return String(s).replaceAll('&', '&amp;').replaceAll('<', '&lt;')
+                         .replaceAll('>', '&gt;').replaceAll('"', '&quot;'); }
+function recordClass(role) { return role; }
+function focusedTypesetUrl() { return '/t/local/test'; }
+function renderMarkdown(text) { return escapeHtml(text); }
+function compactText(text) { return text; }
+""" + viewer._RESOURCE_LINKS_JS + render_record + r"""
+const record = {role:'assistant', text:'PDF test', line_no:42, attachments:[
+  {label:'<PDF>', kind:'PDF', url:'/open?source=relay&link=0'}], externalLinks:[]};
+const html = renderRecord(record);
+assert.ok(html.includes('<footer class="typeset-attachments">'));
+assert.ok(html.includes('&lt;PDF&gt;'));
+assert.ok(html.includes('href="/open?source=relay&amp;link=0"'));
+assert.ok(html.includes('target="_blank"'));
+assert.ok(!renderRecord({...record, attachments:[]}).includes('<footer'));
+assert.ok(!renderRecord({...record, role:'user'}).includes('<footer'));
+assignVisibleLinkHints();
+assert.equal(links[0].dataset.linkHint, undefined);
+assert.equal(links[1].dataset.linkHint, '1');
+assert.equal(links[9].dataset.linkHint, '9');
+assert.equal(links[10].dataset.linkHint, undefined);
+let prevented = false;
+handleLinkHintKeyDown({code:'Digit1', key:'!', shiftKey:true, preventDefault(){prevented=true;}});
+assert.ok(prevented);
+assert.ok(links[1].clicked);
+assert.equal(links[1].dataset.linkHint, undefined);
+"""
+        result = subprocess.run([shutil.which("node"), "-e", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_external_links_are_collected_for_the_typeset_footer(self) -> None:
         markdown = """\

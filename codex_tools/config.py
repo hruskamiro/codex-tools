@@ -125,6 +125,13 @@ SETTINGS = {
             "Browser command; 'default' uses the desktop default browser.",
         ),
         Setting(
+            "viewer.typeset_backend",
+            "str",
+            "auto",
+            "Typesetting for relay conversations: local XeLaTeX, remote peer, or automatic selection.",
+            ("auto", "local", "remote"),
+        ),
+        Setting(
             "viewer.typeset_code_mode",
             "str",
             "auto",

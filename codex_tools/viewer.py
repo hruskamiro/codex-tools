@@ -204,6 +204,16 @@ def add_server_args(parser: argparse.ArgumentParser) -> None:
         help="Enable isolated, cache-bypassing typeset bubble previews.",
     )
     parser.add_argument(
+        "--typeset-backend",
+        choices=("auto", "local", "remote"),
+        default=config.value("viewer.typeset_backend"),
+        help=(
+            "Typeset relay conversations locally or on the peer; auto uses the peer "
+            "when local XeLaTeX is unavailable. Effective default: "
+            f"{config.default_help('viewer.typeset_backend')}."
+        ),
+    )
+    parser.add_argument(
         "--typeset-code-mode",
         choices=sorted(typeset.CODE_MODES),
         default=configured_code_mode,
@@ -473,12 +483,14 @@ class ViewerState:
         web_assets: str = "bundled",
         relay_cache_file: Path = relay_cache.DEFAULT_CACHE_PATH,
         relay_config: Path = paths.RELAY_CONFIG_FILE,
+        typeset_backend: str = "auto",
     ) -> None:
         self.sessions_root = sessions_root.expanduser().resolve()
         self.archive_root = archive_root.expanduser().resolve()
         self.include_archive = include_archive
         self.typeset_debug = typeset_debug
         self.typeset_code_mode = typeset_code_mode
+        self.typeset_backend = typeset_backend
         self.web_assets = web_assets
         self.session_index = session_index.expanduser().resolve()
         self.relay_cache = relay_cache.RelayCache(relay_cache_file)
@@ -631,8 +643,10 @@ def resolve_session_path(state: ViewerState, query: dict[str, list[str]]) -> Pat
 def handle_sessions(state: ViewerState, query: dict[str, list[str]]) -> dict[str, Any]:
     limit = safe_int(query.get("limit", [None])[0], 80, 1, 500)
     search = compact_space(query.get("q", [""])[0]).lower()
+    source = query.get("source", ["local"])[0]
+    host_filter = query.get("host", [""])[0]
     sessions = []
-    for path in state.session_paths():
+    for path in state.session_paths() if source != "relay" else []:
         try:
             item = session_summary(path, state.titles)
         except OSError:
@@ -645,6 +659,30 @@ def handle_sessions(state: ViewerState, query: dict[str, list[str]]) -> dict[str
             continue
         sessions.append(item)
     deduped = dedupe_session_summaries(sessions)
+    if source in {"all", "relay"}:
+        for host in state.relay_cache.hosts():
+            host_id = str(host["host_id"])
+            if host_id == "local" or (host_filter and host_id != host_filter):
+                continue
+            for agent in state.relay_cache.agents(host_id):
+                item = {
+                    "id": agent["agent_id"], "title": agent["title"],
+                    "cwd": agent["cwd"], "path": "", "source": "relay",
+                    "hostId": host_id, "hostName": host["name"], "cached": True,
+                    "lastAt": agent["updated_at"], "lastLabel": format_time(agent["updated_at"]),
+                    "sessionId": agent["session_id"], "threadId": agent["thread_id"],
+                }
+                haystack = " ".join(str(item.get(key) or "") for key in (
+                    "title", "cwd", "sessionId", "threadId", "hostName",
+                )).lower()
+                if not search or search in haystack:
+                    deduped.append(item)
+        def recency(item: dict[str, Any]) -> float:
+            try:
+                return datetime.fromisoformat(str(item.get("lastAt") or "").replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                return float(item.get("mtime") or 0)
+        deduped.sort(key=recency, reverse=True)
     return {"sessions": deduped[:limit], "total": len(deduped), "fileTotal": len(sessions)}
 
 
@@ -695,6 +733,12 @@ def handle_session(state: ViewerState, query: dict[str, list[str]]) -> dict[str,
             {
                 **asdict(record),
                 "timeLabel": format_time(record.timestamp),
+                "attachments": attachment_link_payload(
+                    path, record,
+                    base_directory=Path(session.cwd).expanduser() if session.cwd else None,
+                ) if record.role == "assistant" else [],
+                "externalLinks": external_link_payload(record.text)
+                if record.role == "assistant" else [],
             }
             for record in records
         ],
@@ -763,7 +807,8 @@ def relay_session_snapshot(
     )
     if host is None or agent is None:
         raise FileNotFoundError("cached relay conversation not found")
-    records = state.relay_cache.records(host_id, agent_id)
+    records = [record for record in state.relay_cache.records(host_id, agent_id)
+               if record.get("record_type") != "tool_activity"]
     session = {
         "id": agent_id,
         "title": agent["title"],
@@ -811,6 +856,8 @@ def handle_relay_session(
                 )
                 if record.get("role") == "assistant"
                 else [],
+                "externalLinks": external_link_payload(str(record.get("text") or ""))
+                if record.get("role") == "assistant" else [],
             }
             for record in shown
         ],
@@ -826,6 +873,14 @@ def handle_typeset(
     force: bool = False,
 ) -> dict[str, Any]:
     is_relay = query.get("source", [""])[0] == "relay"
+    if is_relay and force:
+        raise PermissionError("Fresh typeset debugging is available only for local conversations")
+    backend = query.get("backend", [getattr(state, "typeset_backend", "auto")])[0]
+    if backend not in {"auto", "local", "remote"}:
+        raise ValueError("unknown typeset backend")
+    remote = is_relay and (
+        backend == "remote" or (backend == "auto" and shutil.which("xelatex") is None)
+    )
     include_tools = query.get("tools", ["0"])[0] == "1"
     all_records = query.get("all", ["0"])[0] == "1"
     tail = safe_int(query.get("tail", [None])[0], 8, 1, 100)
@@ -929,6 +984,7 @@ def handle_typeset(
             "ok": result.ok,
             "key": result.key,
             "cached": result.cached,
+            "backend": "remote" if remote else "local",
             "pdfUrl": pdf_url,
             "codeBlocks": typeset.fenced_code_blocks(payload_records[index]["text"]),
             "error": result.error or "",
@@ -936,17 +992,19 @@ def handle_typeset(
 
     if assistant_jobs:
         with ThreadPoolExecutor(max_workers=min(workers, len(assistant_jobs))) as pool:
-            futures = {
-                pool.submit(
-                    typeset.render_pdf,
-                    text,
-                    title=title,
-                    force=force,
-                    header_mode=header_mode,
-                    code_mode=code_mode,
-                ): index
-                for index, text, title in assistant_jobs
-            }
+            futures = {}
+            for index, text, title in assistant_jobs:
+                if remote:
+                    future = pool.submit(
+                        render_relay_pdf, state, session_payload, payload_records[index],
+                        header_mode=header_mode, code_mode=code_mode,
+                    )
+                else:
+                    future = pool.submit(
+                        typeset.render_pdf, text, title=title, force=force,
+                        header_mode=header_mode, code_mode=code_mode,
+                    )
+                futures[future] = index
             for future in as_completed(futures):
                 attach_result(futures[future], future.result())
 
@@ -956,6 +1014,7 @@ def handle_typeset(
         "all": all_records,
         "includeTools": include_tools,
         "typesetWorkers": workers,
+        "typesetBackend": "remote" if remote else "local",
         "typesetDebug": state.typeset_debug and not is_relay,
         "typesetHeaderMode": header_mode,
         "typesetCodeMode": effective_code_mode,
@@ -967,6 +1026,59 @@ def handle_typeset(
         "records": payload_records,
         "refreshWarning": refresh_warning,
     }
+
+
+def render_relay_pdf(
+    state: ViewerState,
+    session: dict[str, Any],
+    record: dict[str, Any],
+    *,
+    header_mode: str,
+    code_mode: str,
+) -> typeset.TypesetResult:
+    """Keep remote PDFs in the normal local PDF cache, including offline reuse."""
+    record_key = attachments.attachment_record_key(record["text"])
+    identity = json.dumps(
+        [
+            "remote-typeset-v1", typeset.RENDERER_VERSION, session["hostId"],
+            session["id"], record_key, record.get("timestamp", ""), header_mode, code_mode,
+        ],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    key = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    cache_dir = typeset.typeset_cache_dir() / key[:2] / key
+    pdf_path = cache_dir / "bubble.pdf"
+    try:
+        if pdf_path.is_file():
+            with pdf_path.open("rb") as source:
+                if source.read(5) == b"%PDF-":
+                    return typeset.TypesetResult(True, key, pdf_path, cached=True)
+        _, peer = relay_peer_for_host(state, str(session["hostId"]))
+        body = relay_transport.fetch_typeset(
+            peer, str(session["id"]), record_key,
+            header_mode=header_mode, code_mode=code_mode,
+        )
+        paths.ensure_private_dir(cache_dir)
+        temporary = cache_dir / f".{threading.get_ident()}.{time.time_ns()}.part"
+        try:
+            with temporary.open("xb") as output:
+                temporary.chmod(0o600)
+                output.write(body)
+            os.replace(temporary, pdf_path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return typeset.TypesetResult(True, key, pdf_path)
+    except (OSError, RuntimeError, ValueError) as exc:
+        return typeset.TypesetResult(
+            False,
+            key,
+            None,
+            error=(
+                f"Remote typesetting unavailable: {exc}. "
+                "Reconnect to render this answer, or use Markdown."
+            ),
+        )
 
 
 def local_attachment_links(
@@ -1654,6 +1766,7 @@ def server_state_from_args(args: argparse.Namespace) -> ViewerState:
         args.web_assets,
         args.relay_cache_file,
         args.relay_config,
+        getattr(args, "typeset_backend", "auto"),
     )
 
 
@@ -1811,6 +1924,7 @@ def daemon_command(args: argparse.Namespace) -> list[str]:
     if args.typeset_debug:
         command.append("--typeset-debug")
     command.extend(["--typeset-code-mode", args.typeset_code_mode])
+    command.extend(["--typeset-backend", getattr(args, "typeset_backend", "auto")])
     command.extend(["--web-assets", args.web_assets])
     return command
 
@@ -2035,6 +2149,17 @@ def command_doctor(args: argparse.Namespace) -> int:
         print(f"  [{'ok' if ok else 'missing'}] {name}: {detail}")
     default_view = read_default_view()
     print(f"Default viewer mode: {default_view}")
+    backend = str(config.value("viewer.typeset_backend"))
+    print(f"Relay typesetting backend: {backend}")
+    remote_configured = False
+    if backend == "remote" or (backend == "auto" and shutil.which("xelatex") is None):
+        try:
+            remote_configured = bool(relay_transport.load_config(paths.RELAY_CONFIG_FILE)["peers"])
+        except (OSError, ValueError, KeyError):
+            pass
+        if remote_configured:
+            print("Relay conversations can render on the peer; no local TeX is required.")
+            print("The remote renderer is checked when an uncached answer is opened.")
     latex_ok = all(ok for _, ok, _ in latex_checks)
     if latex_ok:
         print("LaTeX viewer is ready.")
@@ -2048,7 +2173,7 @@ def command_doctor(args: argparse.Namespace) -> int:
                 "  sudo apt install texlive-xetex texlive-latex-extra "
                 "fonts-texgyre fonts-paratype fonts-dejavu-core"
             )
-    return 0 if startup_ok and (default_view != "latex" or latex_ok) else 1
+    return 0 if startup_ok and (default_view != "latex" or latex_ok or remote_configured) else 1
 
 
 def default_server_args() -> argparse.Namespace:
@@ -2068,6 +2193,7 @@ def default_server_args() -> argparse.Namespace:
         no_self_reload=True,
         typeset_debug=False,
         typeset_code_mode=code_mode,
+        typeset_backend=str(config.value("viewer.typeset_backend")),
         web_assets="bundled",
         relay_cache_file=relay_cache.DEFAULT_CACHE_PATH,
         relay_config=paths.RELAY_CONFIG_FILE,
@@ -2534,7 +2660,7 @@ INDEX_HTML = """<!doctype html>
     <section class="session-pane chooser-pane">
       <header class="brand">
         <div>
-          <p class="eyebrow">Local Codex</p>
+          <p id="chooserScope" class="eyebrow">Codex conversations</p>
           <h1>Choose Conversation</h1>
         </div>
         <button id="refreshSessions" class="icon-button" type="button" title="Refresh sessions" aria-label="Refresh sessions">↻</button>
@@ -2557,6 +2683,7 @@ INDEX_HTML = """<!doctype html>
           <span>Tools</span>
         </label>
         <a id="openLatest" class="primary-button open-latest disabled" href="#" aria-disabled="true">Open latest</a>
+        <a id="allSourcesLink" class="back-link" href="/launcher" style="display:none">All sources</a>
       </div>
       <label class="search">
         <span>Search</span>
@@ -2610,6 +2737,7 @@ VIEW_HTML = """<!doctype html>
         <button id="statusRefresh" class="status-button icon-status-button" type="button" title="Refresh conversation (R); refresh and jump to latest (Shift+R)" aria-label="Refresh conversation with R; refresh and jump to latest with Shift+R"><span class="refresh-icon" aria-hidden="true">↻</span><kbd>R</kbd></button>
         <a id="typesetViewLink" class="status-button" href="/t/local">LaTeX <kbd>T</kbd></a>
         <a class="status-button" href="/">Choose <kbd>C</kbd></a>
+        <a id="newChooserLink" class="status-button" href="/launcher" target="_blank" rel="noopener" title="Choose conversation in a new tab (Shift+L)">New chooser <kbd>⇧L</kbd></a>
       </div>
     </nav>
   </main>
@@ -2662,6 +2790,7 @@ TYPESET_HTML = """<!doctype html>
         <button id="statusRefresh" class="status-button icon-status-button" type="button" title="Refresh typeset view (R); refresh and jump to latest (Shift+R)" aria-label="Refresh typeset view with R; refresh and jump to latest with Shift+R"><span class="refresh-icon" aria-hidden="true">↻</span><kbd>R</kbd></button>
         <a id="normalViewLink" class="status-button" href="/v/local">Markdown <kbd>T</kbd></a>
         <a class="status-button" href="/">Choose <kbd>C</kbd></a>
+        <a id="newChooserLink" class="status-button" href="/launcher" target="_blank" rel="noopener" title="Choose conversation in a new tab (Shift+L)">New chooser <kbd>⇧L</kbd></a>
       </div>
     </nav>
   </main>
@@ -3396,6 +3525,15 @@ h2 {
   min-width: 0;
 }
 
+.view-conversation:not(.typeset-conversation) .typeset-attachments {
+  width: 100%;
+  margin: 0;
+  padding: 12px 22px;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
+}
+
 .typeset-resource-group strong {
   flex: 0 0 auto;
   min-width: 68px;
@@ -4108,7 +4246,9 @@ APP_JS = r"""
 const pageParams = new URLSearchParams(location.search);
 const state = {
   sessions: [],
-  defaultView: document.body.dataset.defaultView === "latex" ? "latex" : "markdown",
+  defaultView: ["latex", "markdown"].includes(pageParams.get("view"))
+    ? pageParams.get("view")
+    : document.body.dataset.defaultView === "latex" ? "latex" : "markdown",
   launcher: document.body.dataset.launcher === "true",
   selectedIndex: 0,
 };
@@ -4121,6 +4261,8 @@ const els = {
   openLatest: document.getElementById("openLatest"),
   tailCount: document.getElementById("tailCount"),
   includeTools: document.getElementById("includeTools"),
+  chooserScope: document.getElementById("chooserScope"),
+  allSourcesLink: document.getElementById("allSourcesLink"),
 };
 
 function escapeHtml(value) {
@@ -4134,6 +4276,7 @@ function escapeHtml(value) {
 
 function sessionMeta(item) {
   const bits = [];
+  if (item.hostName) bits.push(`${item.hostName} · cached`);
   if (item.lastLabel) bits.push(item.lastLabel);
   if (item.rolloutCount > 1) bits.push(`${item.rolloutCount} rollouts`);
   if (item.recordCount) bits.push(`${item.recordCount} messages`);
@@ -4150,6 +4293,10 @@ function viewHref(item) {
     tail: els.tailCount.value,
   });
   if (els.includeTools.checked) params.set("tools", "1");
+  if (item.hostId && id) {
+    const route = state.defaultView === "latex" ? "t" : "v";
+    return `/${route}/relay/${encodeURIComponent(item.hostId)}/${encodeURIComponent(id)}?${params}`;
+  }
   if (id) {
     const route = state.defaultView === "latex" ? "t" : "v";
     return `/${route}/local/${encodeURIComponent(id)}?${params}`;
@@ -4218,7 +4365,9 @@ async function loadSessions() {
   const params = new URLSearchParams({
     limit: "160",
     q: els.search.value.trim(),
+    source: pageParams.get("source") || "all",
   });
+  if (pageParams.get("host")) params.set("host", pageParams.get("host"));
   els.sessionCount.textContent = "Loading sessions...";
   const response = await fetch(`/api/sessions?${params}`);
   const data = await response.json();
@@ -4267,6 +4416,15 @@ window.addEventListener("keydown", (event) => {
 });
 
 if (pageParams.get("q")) els.search.value = pageParams.get("q");
+if (els.chooserScope) {
+  const source = pageParams.get("source") || "all";
+  els.chooserScope.textContent = source === "relay" ? "Cached relay conversations"
+    : source === "local" ? "Local conversations" : "Local & cached relay conversations";
+}
+if (els.allSourcesLink && pageParams.get("source") && pageParams.get("source") !== "all") {
+  els.allSourcesLink.href = `/launcher?${new URLSearchParams({view: state.defaultView})}`;
+  els.allSourcesLink.style.display = "";
+}
 if (state.launcher) requestAnimationFrame(() => els.search.focus());
 
 loadSessions().catch((error) => {
@@ -4275,7 +4433,147 @@ loadSessions().catch((error) => {
 """
 
 
-VIEW_JS = r"""
+_RESOURCE_LINKS_JS = r"""
+function conversationChooserHref() {
+  const identity = identityParams();
+  const choices = new URLSearchParams({
+    view: location.pathname.startsWith("/t/") ? "latex" : "markdown",
+  });
+  if (identity.get("source") === "relay") {
+    choices.set("source", "relay");
+    choices.set("host", identity.get("host"));
+  }
+  return `/launcher?${choices}`;
+}
+
+function openConversationChooser() {
+  window.open(conversationChooserHref(), "_blank", "noopener");
+}
+
+const LINK_HINT_DELAY_MS = 200;
+let linkHintTimer = null;
+let linkHintFrame = null;
+let linkHintsActive = false;
+let hintedResourceLinks = [];
+
+function resourceLinks(record) {
+  const attachments = Array.isArray(record.attachments) ? record.attachments : [];
+  const externalLinks = Array.isArray(record.externalLinks) ? record.externalLinks : [];
+  if (!attachments.length && !externalLinks.length) return "";
+  const attachmentHeading = attachments.length === 1 ? "Attachment" : "Attachments";
+  const linkHeading = externalLinks.length === 1 ? "Link" : "Links";
+  return `
+    <footer class="typeset-attachments">
+      ${attachments.length ? `
+        <div class="typeset-resource-group">
+          <strong>${attachmentHeading}</strong>
+          <span class="typeset-attachment-list">
+            ${attachments.map((link) => `
+              <a href="${escapeHtml(link.url)}" target="_blank" rel="noopener">${escapeHtml(link.label)}<span class="typeset-attachment-kind">${escapeHtml(link.kind)}</span> ↗</a>
+            `).join("")}
+          </span>
+        </div>
+      ` : ""}
+      ${externalLinks.length ? `
+        <div class="typeset-resource-group">
+          <strong>${linkHeading}</strong>
+          <span class="typeset-attachment-list">
+            ${externalLinks.map((link) => `
+              <a href="${escapeHtml(link.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(link.label)}${link.label !== link.url ? `<span class="typeset-attachment-kind">${escapeHtml(link.host)}</span>` : ""} ↗</a>
+            `).join("")}
+          </span>
+        </div>
+      ` : ""}
+    </footer>
+  `;
+}
+
+function resourceLinkIsVisible(link) {
+  const rect = link.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return false;
+  if (rect.bottom <= 0 || rect.top >= window.innerHeight) return false;
+  if (rect.right <= 0 || rect.left >= window.innerWidth) return false;
+  const style = window.getComputedStyle(link);
+  return style.visibility !== "hidden" && style.display !== "none";
+}
+
+function removeLinkHintLabels() {
+  for (const link of hintedResourceLinks) delete link.dataset.linkHint;
+  hintedResourceLinks = [];
+}
+
+function assignVisibleLinkHints() {
+  removeLinkHintLabels();
+  hintedResourceLinks = Array.from(
+    document.querySelectorAll(".typeset-attachments a[href]"),
+  ).filter(resourceLinkIsVisible).slice(0, 9);
+  hintedResourceLinks.forEach((link, index) => {
+    link.dataset.linkHint = String(index + 1);
+  });
+  linkHintsActive = true;
+}
+
+function clearLinkHints() {
+  if (linkHintTimer !== null) window.clearTimeout(linkHintTimer);
+  if (linkHintFrame !== null) window.cancelAnimationFrame(linkHintFrame);
+  linkHintTimer = null;
+  linkHintFrame = null;
+  linkHintsActive = false;
+  removeLinkHintLabels();
+}
+
+function scheduleLinkHints() {
+  if (linkHintsActive || linkHintTimer !== null) return;
+  linkHintTimer = window.setTimeout(() => {
+    linkHintTimer = null;
+    assignVisibleLinkHints();
+  }, LINK_HINT_DELAY_MS);
+}
+
+function refreshVisibleLinkHints() {
+  if (!linkHintsActive || linkHintFrame !== null) return;
+  linkHintFrame = window.requestAnimationFrame(() => {
+    linkHintFrame = null;
+    if (linkHintsActive) assignVisibleLinkHints();
+  });
+}
+
+function linkHintEditableTarget(target) {
+  return Boolean(target?.closest?.("input, textarea, select, [contenteditable='true']"));
+}
+
+function handleLinkHintKeyDown(event) {
+  if (event.key === "Shift") {
+    if (!event.repeat && !linkHintEditableTarget(event.target)) scheduleLinkHints();
+    return;
+  }
+
+  const digitMatch = event.code?.match(/^(?:Digit|Numpad)([1-9])$/);
+  if (linkHintsActive && event.shiftKey && digitMatch) {
+    const link = hintedResourceLinks[Number(digitMatch[1]) - 1];
+    event.preventDefault();
+    clearLinkHints();
+    if (link?.isConnected) link.click();
+    return;
+  }
+
+  if (linkHintsActive || linkHintTimer !== null) clearLinkHints();
+}
+
+window.addEventListener("keydown", handleLinkHintKeyDown, true);
+window.addEventListener("keyup", (event) => {
+  if (event.key === "Shift" && !event.getModifierState("Shift")) clearLinkHints();
+}, true);
+window.addEventListener("blur", clearLinkHints);
+window.addEventListener("resize", refreshVisibleLinkHints);
+window.addEventListener("scroll", refreshVisibleLinkHints, true);
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) clearLinkHints();
+});
+"""
+
+
+VIEW_JS = _RESOURCE_LINKS_JS + r"""
 const semanticHighlightConfig = {
   enabled: true,
   selectors: ".message-body, #sessionMeta",
@@ -4741,6 +5039,7 @@ function renderRecord(record) {
     <section class="message ${roleClass}" data-line-no="${escapeHtml(record.line_no)}">
       ${header}
       ${body}
+      ${roleClass === "assistant" ? resourceLinks(record) : ""}
     </section>
   `;
 }
@@ -4872,6 +5171,8 @@ function updateLoadButtons(data) {
 }
 
 function renderConversation(data, options = {}) {
+  const chooserLink = document.getElementById("newChooserLink");
+  if (chooserLink) chooserLink.href = conversationChooserHref();
   const previousData = lastConversationData;
   lastConversationData = data;
   messageNavigationIndex = -1;
@@ -5060,11 +5361,14 @@ window.addEventListener("keydown", (event) => {
   const isPreviousKey = event.code === "ArrowLeft";
   const isNextKey = event.code === "ArrowRight";
   const isStatusbarKey = event.key === "/";
+  const isChooserKey = event.shiftKey && !event.altKey && (event.code === "KeyL" || key === "l");
   const isActionKey = ["u", "l", "e", "a", "t", "c"].includes(key);
-  if ((!isRefreshKey && !isPreviousKey && !isNextKey && !isStatusbarKey && !isActionKey) || event.metaKey || event.ctrlKey) return;
+  if ((!isRefreshKey && !isPreviousKey && !isNextKey && !isStatusbarKey && !isActionKey && !isChooserKey) || event.metaKey || event.ctrlKey) return;
   if (isEditable && !event.altKey) return;
   event.preventDefault();
-  if (isStatusbarKey) {
+  if (isChooserKey) {
+    if (!event.repeat) openConversationChooser();
+  } else if (isStatusbarKey) {
     toggleStatusbar();
   } else if (isRefreshKey) {
     refreshConversation({ jumpToLatest: event.shiftKey }).catch((error) => {
@@ -5095,10 +5399,9 @@ loadConversation().catch((error) => {
 """
 
 
-TYPESET_JS = r"""
+TYPESET_JS = _RESOURCE_LINKS_JS + r"""
 const params = new URLSearchParams(location.search);
 const TYPESET_PDF_RENDER_SCALE = 1.6;
-const LINK_HINT_DELAY_MS = 200;
 const CODE_COPY_ORIGIN = "https://codex-tools.invalid";
 const WEB_ASSETS = document.body.dataset.webAssets || "bundled";
 const PDFJS_MODULE_URL = WEB_ASSETS === "cdn"
@@ -5114,10 +5417,6 @@ let lastConversationData = null;
 let typesetDebugEnabled = false;
 let typesetHeaderMode = "external";
 let messageNavigationIndex = -1;
-let linkHintTimer = null;
-let linkHintFrame = null;
-let linkHintsActive = false;
-let hintedResourceLinks = [];
 let refreshStatusTimer = 0;
 const els = {
   conversation: document.getElementById("conversation"),
@@ -5435,109 +5734,6 @@ function pdfPage(record) {
   `;
 }
 
-function resourceLinks(record) {
-  const attachments = Array.isArray(record.attachments) ? record.attachments : [];
-  const externalLinks = Array.isArray(record.externalLinks) ? record.externalLinks : [];
-  if (!attachments.length && !externalLinks.length) return "";
-  const attachmentHeading = attachments.length === 1 ? "Attachment" : "Attachments";
-  const linkHeading = externalLinks.length === 1 ? "Link" : "Links";
-  return `
-    <footer class="typeset-attachments">
-      ${attachments.length ? `
-        <div class="typeset-resource-group">
-          <strong>${attachmentHeading}</strong>
-          <span class="typeset-attachment-list">
-            ${attachments.map((link) => `
-              <a href="${escapeHtml(link.url)}" target="_blank" rel="noopener">${escapeHtml(link.label)}<span class="typeset-attachment-kind">${escapeHtml(link.kind)}</span> ↗</a>
-            `).join("")}
-          </span>
-        </div>
-      ` : ""}
-      ${externalLinks.length ? `
-        <div class="typeset-resource-group">
-          <strong>${linkHeading}</strong>
-          <span class="typeset-attachment-list">
-            ${externalLinks.map((link) => `
-              <a href="${escapeHtml(link.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(link.label)}${link.label !== link.url ? `<span class="typeset-attachment-kind">${escapeHtml(link.host)}</span>` : ""} ↗</a>
-            `).join("")}
-          </span>
-        </div>
-      ` : ""}
-    </footer>
-  `;
-}
-
-function resourceLinkIsVisible(link) {
-  const rect = link.getBoundingClientRect();
-  if (rect.width <= 0 || rect.height <= 0) return false;
-  if (rect.bottom <= 0 || rect.top >= window.innerHeight) return false;
-  if (rect.right <= 0 || rect.left >= window.innerWidth) return false;
-  const style = window.getComputedStyle(link);
-  return style.visibility !== "hidden" && style.display !== "none";
-}
-
-function removeLinkHintLabels() {
-  for (const link of hintedResourceLinks) delete link.dataset.linkHint;
-  hintedResourceLinks = [];
-}
-
-function assignVisibleLinkHints() {
-  removeLinkHintLabels();
-  hintedResourceLinks = Array.from(
-    document.querySelectorAll(".typeset-attachments a[href]"),
-  ).filter(resourceLinkIsVisible).slice(0, 9);
-  hintedResourceLinks.forEach((link, index) => {
-    link.dataset.linkHint = String(index + 1);
-  });
-  linkHintsActive = true;
-}
-
-function clearLinkHints() {
-  if (linkHintTimer !== null) window.clearTimeout(linkHintTimer);
-  if (linkHintFrame !== null) window.cancelAnimationFrame(linkHintFrame);
-  linkHintTimer = null;
-  linkHintFrame = null;
-  linkHintsActive = false;
-  removeLinkHintLabels();
-}
-
-function scheduleLinkHints() {
-  if (linkHintsActive || linkHintTimer !== null) return;
-  linkHintTimer = window.setTimeout(() => {
-    linkHintTimer = null;
-    assignVisibleLinkHints();
-  }, LINK_HINT_DELAY_MS);
-}
-
-function refreshVisibleLinkHints() {
-  if (!linkHintsActive || linkHintFrame !== null) return;
-  linkHintFrame = window.requestAnimationFrame(() => {
-    linkHintFrame = null;
-    if (linkHintsActive) assignVisibleLinkHints();
-  });
-}
-
-function linkHintEditableTarget(target) {
-  return Boolean(target?.closest?.("input, textarea, select, [contenteditable='true']"));
-}
-
-function handleLinkHintKeyDown(event) {
-  if (event.key === "Shift") {
-    if (!event.repeat && !linkHintEditableTarget(event.target)) scheduleLinkHints();
-    return;
-  }
-
-  const digitMatch = event.code?.match(/^(?:Digit|Numpad)([1-9])$/);
-  if (linkHintsActive && event.shiftKey && digitMatch) {
-    const link = hintedResourceLinks[Number(digitMatch[1]) - 1];
-    event.preventDefault();
-    clearLinkHints();
-    if (link?.isConnected) link.click();
-    return;
-  }
-
-  if (linkHintsActive || linkHintTimer !== null) clearLinkHints();
-}
 
 function copyMarkdownButton(record) {
   return `
@@ -5973,6 +6169,8 @@ async function copyRecordCode(button) {
 }
 
 async function renderConversation(data, options = {}) {
+  const chooserLink = document.getElementById("newChooserLink");
+  if (chooserLink) chooserLink.href = conversationChooserHref();
   const previousData = lastConversationData;
   lastConversationData = data;
   typesetDebugEnabled = Boolean(data.typesetDebug);
@@ -6020,6 +6218,7 @@ async function renderConversation(data, options = {}) {
         session.lastLabel ? `Last message ${session.lastLabel}` : "",
         `${data.shownCount || data.records.length} of ${data.totalCount || data.records.length} shown`,
         data.all ? "all records" : `typeset tail ${data.tail}`,
+        data.typesetBackend === "remote" ? "typeset on peer" : "",
         data.includeTools ? "tool records included" : "",
       ]
   ).filter(Boolean).join(" · ");
@@ -6086,6 +6285,13 @@ async function loadConversation(options = {}) {
   updateLoadButtons({ shownCount: 0, totalCount: 1, all: false });
   if (route.active && !lastConversationData) {
     showFocusedAnswerLoader(route.line, route.debug);
+  } else if (!lastConversationData) {
+    setStatus(
+      identity.get("source") === "relay"
+        ? "Preparing typeset view… using cached PDFs or rendering on the peer."
+        : "Preparing typeset view…",
+      "loading",
+    );
   }
   const apiParams = new URLSearchParams(identity);
   apiParams.set("tail", String(currentTail));
@@ -6102,6 +6308,7 @@ async function loadConversation(options = {}) {
     if (params.get("tools") === "1") apiParams.set("tools", "1");
     if (params.get("header")) apiParams.set("header", params.get("header"));
     if (params.get("code")) apiParams.set("code", params.get("code"));
+    if (params.get("backend")) apiParams.set("backend", params.get("backend"));
     if (options.refreshRemote && apiParams.get("source") === "relay") {
       apiParams.set("refresh", "1");
     }
@@ -6191,16 +6398,6 @@ els.loadAll?.addEventListener("click", () => {
   loadAllConversation().catch((error) => setStatus(error.message, "error"));
 });
 
-window.addEventListener("keydown", handleLinkHintKeyDown, true);
-window.addEventListener("keyup", (event) => {
-  if (event.key === "Shift" && !event.getModifierState("Shift")) clearLinkHints();
-}, true);
-window.addEventListener("blur", clearLinkHints);
-window.addEventListener("resize", refreshVisibleLinkHints);
-window.addEventListener("scroll", refreshVisibleLinkHints, true);
-document.addEventListener("visibilitychange", () => {
-  if (document.hidden) clearLinkHints();
-});
 
 window.addEventListener("keydown", (event) => {
   const target = event.target;
@@ -6210,11 +6407,14 @@ window.addEventListener("keydown", (event) => {
   const isPreviousKey = event.code === "ArrowLeft";
   const isNextKey = event.code === "ArrowRight";
   const isStatusbarKey = event.key === "/";
+  const isChooserKey = event.shiftKey && !event.altKey && (event.code === "KeyL" || key === "l");
   const isActionKey = ["u", "l", "e", "a", "t", "c"].includes(key);
-  if ((!isRefreshKey && !isPreviousKey && !isNextKey && !isStatusbarKey && !isActionKey) || event.metaKey || event.ctrlKey) return;
+  if ((!isRefreshKey && !isPreviousKey && !isNextKey && !isStatusbarKey && !isActionKey && !isChooserKey) || event.metaKey || event.ctrlKey) return;
   if (isEditable && !event.altKey) return;
   event.preventDefault();
-  if (isStatusbarKey) {
+  if (isChooserKey) {
+    if (!event.repeat) openConversationChooser();
+  } else if (isStatusbarKey) {
     toggleStatusbar();
   } else if (isRefreshKey) {
     refreshConversation({ jumpToLatest: event.shiftKey })

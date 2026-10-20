@@ -23,13 +23,16 @@ from urllib.error import HTTPError
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
-from codex_tools import attachments, paths, relay_cache, search
+from codex_tools import attachments, paths, relay_cache, search, typeset
 
 
 PROTOCOL_VERSION = 1
 MAX_SNAPSHOT_BYTES = 32 * 1024 * 1024
 MAX_MESSAGE_BYTES = 128 * 1024
 MAX_ATTACHMENT_BYTES = 128 * 1024 * 1024
+MAX_TYPESET_BYTES = 32 * 1024 * 1024
+TYPESET_SLOTS = threading.BoundedSemaphore(4)
+TYPESET_LOCKS = tuple(threading.Lock() for _ in range(32))
 MAX_EVENT_SCAN_BYTES = 4 * 1024 * 1024
 MAX_EVENT_BATCH = 500
 MAX_EVENT_WAIT_SECONDS = 20.0
@@ -694,6 +697,119 @@ def fetch_attachment(
     return body, content_type, suffix
 
 
+def fetch_typeset(
+    peer: dict[str, Any],
+    agent_id: str,
+    record_key: str,
+    *,
+    header_mode: str = typeset.DEFAULT_HEADER_MODE,
+    code_mode: str = typeset.DEFAULT_CODE_MODE,
+    timeout: float = 100.0,
+) -> bytes:
+    """Download a PDF for a server-selected assistant record, never arbitrary TeX."""
+    if not re.fullmatch(r"[a-f0-9]{64}", record_key):
+        raise ValueError("invalid typeset record reference")
+    validate_typeset_options(header_mode, code_mode)
+    url = (
+        str(peer["url"]).rstrip("/")
+        + f"/v1/agents/{quote(agent_id, safe='')}/typeset/{record_key}?"
+        + urlencode({"header": header_mode, "code": code_mode})
+    )
+    request = Request(
+        url,
+        headers={"Authorization": f"Bearer {peer['token']}", "Accept": "application/pdf"},
+    )
+    context = None
+    if str(peer["url"]).startswith("https://"):
+        context = ssl.create_default_context(cafile=peer.get("ca_file") or None)
+    try:
+        with urlopen(request, timeout=timeout, context=context) as response:
+            if response.headers.get_content_type() != "application/pdf":
+                raise ValueError("relay returned an invalid typeset content type")
+            if int(response.headers.get("Content-Length") or 0) > MAX_TYPESET_BYTES:
+                raise ValueError("relay typeset PDF exceeds the 32 MiB safety limit")
+            body = response.read(MAX_TYPESET_BYTES + 1)
+    except HTTPError as exc:
+        try:
+            detail = str(json.loads(exc.read(8192)).get("error") or exc.reason)
+        except (ValueError, AttributeError):
+            detail = str(exc.reason)
+        if exc.code == 404 and detail == "not found":
+            detail = "peer has no typesetting endpoint; upgrade and restart its relay"
+        raise RuntimeError(f"Remote typesetting failed (HTTP {exc.code}): {detail}") from exc
+    if len(body) > MAX_TYPESET_BYTES:
+        raise ValueError("relay typeset PDF exceeds the 32 MiB safety limit")
+    if not body.startswith(b"%PDF-"):
+        raise ValueError("relay returned an invalid typeset PDF")
+    return body
+
+
+def validate_typeset_options(header_mode: str, code_mode: str) -> None:
+    if header_mode not in {"embedded", "external"}:
+        raise ValueError("invalid typeset header mode")
+    if code_mode not in typeset.CODE_MODES:
+        raise ValueError("invalid typeset code mode")
+
+
+def render_agent_record(
+    cache: relay_cache.RelayCache,
+    agent_id: str,
+    record_key: str,
+    *,
+    header_mode: str,
+    code_mode: str,
+) -> typeset.TypesetResult:
+    validate_typeset_options(header_mode, code_mode)
+    if not re.fullmatch(r"[a-f0-9]{64}", record_key):
+        raise ValueError("invalid typeset record reference")
+    agent = next(
+        (item for item in cache.agents("local") if item["agent_id"] == agent_id),
+        None,
+    )
+    if agent is None or not Path(str(agent.get("origin_path") or "")).is_file():
+        raise FileNotFoundError("typeset conversation not found")
+    records = cache.records("local", agent_id)
+    record = next(
+        (
+            item for item in reversed(records)
+            if item["role"] == "assistant"
+            and attachments.attachment_record_key(item["text"]) == record_key
+        ),
+        None,
+    )
+    if record is None:
+        session = search.read_session(
+            Path(agent["origin_path"]), include_tools=False, include_system=False
+        )
+        match = next(
+            (
+                item for item in reversed(session.records)
+                if item.role == "assistant"
+                and attachments.attachment_record_key(item.text) == record_key
+            ),
+            None,
+        )
+        if match is None:
+            raise FileNotFoundError(
+                "typeset assistant record not found; synchronize the conversation again"
+            )
+        text, timestamp = match.text, match.timestamp
+    else:
+        text, timestamp = record["text"], record["timestamp"]
+    title = f"Assistant answer · {timestamp}" if timestamp else "Assistant answer"
+    # Bound compilation concurrency and serialize identical render requests.
+    lock = TYPESET_LOCKS[int(record_key[:8], 16) % len(TYPESET_LOCKS)]
+    with lock:
+        if not TYPESET_SLOTS.acquire(timeout=60):
+            raise RuntimeError("remote renderer is busy; try again shortly")
+        try:
+            return typeset.render_pdf(
+                text, title=title, header_mode=header_mode, code_mode=code_mode
+            )
+        finally:
+            TYPESET_SLOTS.release()
+
+
 def fetch_json(
     peer: dict[str, Any], url: str, timeout: float
 ) -> dict[str, Any]:
@@ -959,10 +1075,45 @@ def make_handler(
                 r"/v1/agents/([^/]+)/attachments/([a-f0-9]{64})/(0|[1-9][0-9]*)",
                 request_path,
             )
+            typeset_match = re.fullmatch(
+                r"/v1/agents/([^/]+)/typeset/([a-f0-9]{64})", request_path
+            )
             if request_path == "/v1/snapshot":
                 if refresh is not None:
                     refresh()
                 self._json(snapshot_payload(cache, config))
+            elif typeset_match is not None:
+                try:
+                    query = parse_qs(parsed.query, keep_blank_values=True)
+                    if set(query) - {"header", "code"} or any(
+                        len(values) != 1 for values in query.values()
+                    ):
+                        raise ValueError("invalid typeset options")
+                    result = render_agent_record(
+                        cache,
+                        unquote(typeset_match.group(1)),
+                        typeset_match.group(2),
+                        header_mode=query.get("header", [typeset.DEFAULT_HEADER_MODE])[0],
+                        code_mode=query.get("code", [typeset.DEFAULT_CODE_MODE])[0],
+                    )
+                    if not result.ok or result.pdf_path is None:
+                        self._json(
+                            {"error": result.error or "remote PDF rendering failed"},
+                            HTTPStatus.SERVICE_UNAVAILABLE,
+                        )
+                    elif result.pdf_path.stat().st_size > MAX_TYPESET_BYTES:
+                        self._json(
+                            {"error": "typeset PDF exceeds the 32 MiB safety limit"},
+                            HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                        )
+                    else:
+                        self._attachment(result.pdf_path, "application/pdf", "Codex answer.pdf")
+                except FileNotFoundError as exc:
+                    self._json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
+                except ValueError as exc:
+                    self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+                except (OSError, RuntimeError) as exc:
+                    self._json({"error": str(exc)}, HTTPStatus.SERVICE_UNAVAILABLE)
             elif attachment_match is not None:
                 agent_id = unquote(attachment_match.group(1))
                 try:
