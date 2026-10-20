@@ -226,8 +226,8 @@ class TypesetTests(unittest.TestCase):
 
         self.assertIn(r'\CodexString{"double"}', latex)
         self.assertIn(r"\CodexString{'single'}", latex)
-        self.assertIn(r"\CodexString{“curly double”}", latex)
-        self.assertIn(r"\CodexString{‘curly single’}", latex)
+        self.assertIn(r"\CodexString{\CodexTextUnicode{“}curly double\CodexTextUnicode{”}}", latex)
+        self.assertIn(r"\CodexString{\CodexTextUnicode{‘}curly single\CodexTextUnicode{’}}", latex)
         self.assertIn("Don't color", latex)
         self.assertIn(
             r'\CodexInlineCode{\CodexInlineCodeChunk{"quoted}'
@@ -300,13 +300,38 @@ class TypesetTests(unittest.TestCase):
             r"\CodexInlineCodeUnicode{ľ}}}",
         )
 
+    @unittest.skipUnless(
+        shutil.which("xelatex") and shutil.which("pdftotext"),
+        "XeLaTeX and pdftotext are required for the Unicode PDF regression test",
+    )
+    def test_prose_superscripts_preserve_glyphs_in_rendered_pdf(self) -> None:
+        threshold = "E ≤ 10⁻⁴; 10⁻⁵; 10⁻⁶; 10⁻⁷; ρ ≈ ∑ x → ∞"
+        markdown = (
+            f"Plain: {threshold}\n\nBold: **{threshold}**\n\n"
+            f"Italic: *{threshold}*\n\nQuoted: “{threshold}”\n\n"
+            f"| Threshold |\n|---|\n| {threshold} |"
+        )
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(
+            "os.environ", {"XDG_CACHE_HOME": temporary}
+        ):
+            result = typeset.render_pdf(markdown)
+            self.assertTrue(result.ok, result.error)
+            assert result.pdf_path is not None
+            log = result.pdf_path.with_suffix(".log").read_text()
+            self.assertNotIn("Missing character:", log)
+            extracted = subprocess.run(
+                ["pdftotext", "-layout", str(result.pdf_path), "-"],
+                check=True, capture_output=True, text=True,
+            ).stdout
+            self.assertEqual(extracted.count(threshold), 5)
+
     def test_inline_latex_math_is_preserved_outside_code(self) -> None:
         latex = typeset.markdown_to_latex(
             r"At \(d=0.95\), compare \(10^{-2}\)–\(10^{-1}\) with `\(literal\)`."
         )
 
         self.assertIn(r"\(d=0.95\)", latex)
-        self.assertIn(r"\(10^{-2}\)–\(10^{-1}\)", latex)
+        self.assertIn(r"\(10^{-2}\)\CodexTextUnicode{–}\(10^{-1}\)", latex)
         self.assertIn(
             r"\CodexInlineCode{\CodexInlineCodeChunk{\textbackslash{}}"
             r"\CodexInlineCodeBreak{}\CodexInlineCodeChunk{(literal\textbackslash{}}"

@@ -25,7 +25,7 @@ except ImportError:  # Pygments is optional when running directly from a checkou
     ClassNotFound = LookupError
 
 
-RENDERER_VERSION = "typeset-v47"
+RENDERER_VERSION = "typeset-v48"
 DEFAULT_PARAGRAPH_MODE = "spaced"
 DEFAULT_HEADER_MODE = "external"
 BODY_LINE_STRETCH = "1.08"
@@ -152,6 +152,14 @@ def latex_url_escape(value: str) -> str:
     return value.replace("\\", "/").replace("%", r"\%").replace("#", r"\#")
 
 
+def latex_text_escape(value: str) -> str:
+    """Keep Unicode prose glyphs when the primary text font lacks them."""
+    return "".join(
+        r"\CodexTextUnicode{" + char + "}" if ord(char) > 127 else latex_escape(char)
+        for char in value
+    )
+
+
 INLINE_CODE_BREAK_AFTER = frozenset("-/_.:\\")
 
 
@@ -238,7 +246,7 @@ def render_inline(text: str) -> str:
                 or following == "_"
             )
             if not touches_word:
-                rendered.append(r"\CodexString{" + latex_escape(token) + "}")
+                rendered.append(r"\CodexString{" + latex_text_escape(token) + "}")
                 cursor = string_match.end()
                 continue
         number_match = NUMBER_RE.match(text, cursor)
@@ -256,7 +264,7 @@ def render_inline(text: str) -> str:
                 )
                 cursor = end
                 continue
-        rendered.append(latex_escape(text[cursor]))
+        rendered.append(latex_text_escape(text[cursor]))
         cursor += 1
     return "".join(rendered)
 
@@ -770,6 +778,7 @@ def document_for(
 \setsansfont{{TeX Gyre Heros}}
 \setmonofont[Scale=MatchLowercase]{{PT Mono}}
 \newfontfamily\CodexFallbackMono[Scale=MatchLowercase]{{DejaVu Sans Mono}}
+\newfontfamily\CodexFallbackText[Scale=MatchLowercase]{{DejaVu Serif}}
 \linespread{{{BODY_LINE_STRETCH}}}
 \definecolor{{CodexInk}}{{HTML}}{{282B27}}
 \definecolor{{CodexAccent}}{{HTML}}{{5E673B}}
@@ -804,6 +813,9 @@ def document_for(
 \newcommand{{\CodexNumber}}[1]{{{{\color{{CodexNumberColor}}#1}}}}
 \newcommand{{\CodexString}}[1]{{{{\color{{CodexStringColor}}#1}}}}
 \newcommand{{\CodexInlineCodeBreak}}{{\allowbreak}}
+\newcommand{{\CodexTextUnicode}}[1]{{%
+  \iffontchar\font`#1#1\else{{\CodexFallbackText #1}}\fi%
+}}
 \newcommand{{\CodexInlineCodeUnicode}}[1]{{%
   \iffontchar\font`#1#1\else{{\CodexFallbackMono #1}}\fi%
 }}

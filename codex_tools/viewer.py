@@ -73,6 +73,7 @@ LATEX_FONTS = (
     "TeX Gyre Heros",
     "PT Mono",
     "DejaVu Sans Mono",
+    "DejaVu Serif",
 )
 VENDOR_DIR = Path(__file__).with_name("vendor")
 SUMMARY_HEAD_LINES = 80
