@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import urlencode
 
-from codex_tools import relay, relay_cache, relay_transport
+from codex_tools import agents_ui, codex_binary, relay, relay_cache, relay_transport
 
 
 def agent() -> relay_cache.CachedAgent:
@@ -410,6 +410,7 @@ class RelayTransportTests(unittest.TestCase):
                 patch.object(relay.relay_transport, "validate_server_transport"),
                 patch.object(relay.relay_cache, "refresh_local", return_value=1),
                 patch.object(relay.relay_cache, "refresh_local_agent") as refresh_agent,
+                patch.object(codex_binary, "resolve", return_value="/resolved/codex") as resolve,
                 patch.object(relay.agents_ui, "send_message") as send_message,
                 patch.object(relay.relay_transport, "serve") as serve,
                 redirect_stdout(io.StringIO()),
@@ -424,7 +425,8 @@ class RelayTransportTests(unittest.TestCase):
             send_message.call_args.args[1],
             {"host": "local", "agent": "agent-1", "message": "Continue", "start": True},
         )
-        self.assertEqual(send_message.call_args.args[2], "codex-test")
+        resolve.assert_called_once_with("codex-test")
+        self.assertEqual(send_message.call_args.args[2], "/resolved/codex")
         self.assertEqual(send_message.call_args.kwargs, {"control_socket": None})
 
     def test_initialize_creates_private_identity_and_refuses_overwrite(self) -> None:
@@ -869,6 +871,52 @@ class RelayTransportTests(unittest.TestCase):
             self.assertEqual(messages[first]["last_error"], "network unavailable")
             self.assertEqual(messages[second]["attempt_count"], 0)
             post.assert_called_once()
+
+    def test_missing_server_executable_returns_502_instead_of_410(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = relay_cache.RelayCache(Path(temporary) / "relay.sqlite3")
+            cache.replace_host_snapshot("local", "Local", [agent()])
+
+            def deliver(message_id, agent_id, payload):
+                return agents_ui.send_message(cache, {"host": "local", "agent": agent_id,
+                                                      "message": payload["text"]}, "codex")
+
+            handler = relay_transport.make_handler(
+                cache, {"identity": {"token": "secret"}}, deliver_message=deliver
+            )
+            body = json.dumps({"message_id": "one", "agent_id": "agent-1", "kind": "message",
+                               "payload": {"text": "Continue"}}).encode()
+            instance = handler.__new__(handler)
+            instance.path = "/v1/messages"
+            instance.headers = Message()
+            instance.headers["Authorization"] = "Bearer secret"
+            instance.headers["Content-Type"] = "application/json"
+            instance.headers["Content-Length"] = str(len(body))
+            instance.rfile = io.BytesIO(body)
+            replies = []
+            instance._json = lambda payload, status=200: replies.append((payload, status))
+            with patch.object(agents_ui.codex_binary, "resolve", return_value="/missing/codex"), \
+                 patch.object(agents_ui.subprocess, "run", side_effect=FileNotFoundError(2, "No such file", "/missing/codex")):
+                instance.do_POST()
+            self.assertEqual(replies[0][1], 502)
+            self.assertIn("Cannot start Codex executable", replies[0][0]["error"])
+
+    def test_server_error_detail_is_preserved_and_502_remains_retryable(self) -> None:
+        for response_body in (b'{"error":"Cannot start Codex executable: missing codex"}', b"not JSON"):
+            with self.subTest(body=response_body), tempfile.TemporaryDirectory() as temporary:
+                cache = relay_cache.RelayCache(Path(temporary) / "relay.sqlite3")
+                cache.replace_host_snapshot("home", "Home", [agent()])
+                cache.enqueue("home", "agent-1", {"text": "Continue"})
+                failure = relay_transport.HTTPError("http://peer", 502, "Bad Gateway", {}, io.BytesIO(response_body))
+                with patch.object(relay_transport, "post_message", side_effect=failure):
+                    relay_transport.deliver_pending(cache, {}, "home")
+                pending = cache.pending("home")
+                self.assertEqual(len(pending), 1)
+                self.assertIn("HTTP 502:", pending[0]["last_error"])
+                if response_body.startswith(b"{"):
+                    self.assertIn("Cannot start Codex executable", pending[0]["last_error"])
+                else:
+                    self.assertEqual(pending[0]["last_error"], "HTTP 502: Bad Gateway")
 
     def test_deliver_pending_marks_gone_agent_as_failed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

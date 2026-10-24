@@ -19,6 +19,27 @@ def cached_agent() -> relay_cache.CachedAgent:
 
 
 class AgentUiTests(unittest.TestCase):
+    def test_missing_executable_is_a_server_error_not_an_absent_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = relay_cache.RelayCache(Path(temporary) / "cache.sqlite3")
+            cache.replace_host_snapshot("local", "Local", [cached_agent()])
+            with patch.object(agents_ui.codex_binary, "resolve", return_value="/missing/codex"), \
+                 patch.object(agents_ui.subprocess, "run", side_effect=FileNotFoundError(2, "No such file", "/missing/codex")):
+                with self.assertRaisesRegex(RuntimeError, "Cannot start Codex executable.*SSH PATH"):
+                    agents_ui.send_message(cache, {"host": "local", "agent": "agent-1", "message": "Continue"}, "codex")
+            receipt = cache.reconcile_message_receipts("local", "agent-1", [])[0]
+            self.assertEqual(receipt["current_delivery"], "failed")
+
+    def test_queue_uses_resolved_absolute_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = relay_cache.RelayCache(Path(temporary) / "cache.sqlite3")
+            cache.replace_host_snapshot("local", "Local", [cached_agent()])
+            with patch.object(agents_ui.codex_binary, "resolve", return_value="/user/.volta/bin/codex"), \
+                 patch.object(agents_ui.subprocess, "run") as run:
+                run.return_value.returncode = 0
+                agents_ui.send_message(cache, {"host": "local", "agent": "agent-1", "message": "Continue"}, "codex")
+                self.assertEqual(run.call_args.args[0][0], "/user/.volta/bin/codex")
+
     def test_enter_preserves_start_intent_in_remote_outbox(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             cache = relay_cache.RelayCache(Path(temporary) / "cache.sqlite3")

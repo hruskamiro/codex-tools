@@ -315,6 +315,9 @@ def command_sync(args: argparse.Namespace) -> int:
 
 
 def command_serve(args: argparse.Namespace) -> int:
+    from codex_tools import codex_binary
+
+    args.codex_bin = codex_binary.resolve(args.codex_bin)
     config = relay_transport.load_config(args.config_file)
     cache = relay_cache.RelayCache(args.cache_file)
     relay_transport.validate_server_transport(

@@ -19,7 +19,7 @@ from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
 from urllib.request import urlopen
 
-from codex_tools import codex_daemon, paths, relay_cache
+from codex_tools import codex_binary, codex_daemon, paths, relay_cache
 from codex_tools.browser import open_browser
 
 
@@ -123,6 +123,7 @@ def send_message(cache: relay_cache.RelayCache, payload: dict[str, Any], codex_b
         message_id = cache.enqueue(host_id, agent_id, queued_payload, track=True)
         return {"delivery": "queued", "message_id": message_id}
     thread_id = str(agent.get("thread_id") or agent.get("session_id") or agent_id)
+    codex_bin = codex_binary.resolve(codex_bin)
     message_id = cache.record_message_receipt(host_id, agent_id, message)
     try:
         completed = subprocess.run(
@@ -131,6 +132,11 @@ def send_message(cache: relay_cache.RelayCache, payload: dict[str, Any], codex_b
         )
     except OSError as exc:
         cache.update_message_receipt(message_id, delivery="failed", error=str(exc))
+        if isinstance(exc, FileNotFoundError):
+            raise RuntimeError(
+                f"Cannot start Codex executable {codex_bin!r}: {exc}. "
+                "Check the server's SSH PATH or set relay serve --codex-bin to its absolute path."
+            ) from exc
         raise
     if completed.returncode:
         detail = completed.stderr.strip() or completed.stdout.strip() or f"exit status {completed.returncode}"

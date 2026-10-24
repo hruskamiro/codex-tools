@@ -929,7 +929,14 @@ def deliver_pending(
                 HTTPStatus.GONE,
             }
             state = "failed" if permanent else "pending"
-            error = f"HTTP {exc.code}: {exc.reason}"
+            detail = str(exc.reason)
+            try:
+                payload = json.loads(exc.read(8192))
+                if isinstance(payload, dict) and isinstance(payload.get("error"), str):
+                    detail = " ".join(payload["error"].split())[:1000] or detail
+            except (OSError, ValueError):
+                pass
+            error = f"HTTP {exc.code}: {detail}"
             cache.record_outbox_attempt(message_id, state=state, error=error)
             result[state] += 1
             result["errors"].append({"message_id": message_id, "error": error})

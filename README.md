@@ -371,6 +371,16 @@ Prefer an absolute executable path because noninteractive SSH may have a
 different PATH. SSH aliases and `ProxyJump` continue to work normally. Cached
 viewing and the console remain usable while SSH or remote startup is unavailable.
 
+For message delivery, the relay resolves `codex` to an absolute executable path.
+It checks PATH first, then common user install directories (`~/.local/bin`,
+`~/.volta/bin`, `~/bin`, `~/.cargo/bin`, and `~/.npm-global/bin`), then the managed
+native CLI at `$CODEX_HOME/packages/app-server-daemon/current/bin/codex`
+(`~/.codex` by default). The native fallback does not require NVM/Node on PATH. Unusual installs
+can use `ct relay serve --codex-bin /absolute/path/to/codex`. A missing executable
+is a retryable server error, not “410 Gone”; delivery errors include the server's
+explanation. Existing relays need restarting to load this change. Messages already
+marked failed by an older 410 response are not automatically resent.
+
 The tunnel binds only `127.0.0.1` on the client and forwards to `127.0.0.1` on
 the server; HTTP travels inside encrypted SSH. The connection supervisor:
 
