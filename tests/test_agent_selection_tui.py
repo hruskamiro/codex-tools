@@ -51,6 +51,22 @@ class AgentChooserTests(unittest.TestCase):
         _, state, _ = self.dialog([" ", "\x02"], state, fail=True)
         self.assertEqual(state, expected)
 
+    def test_repeated_escape_dismisses_chooser_without_saving(self):
+        action, _, save = self.dialog(["\x1b", "\x1b", agents_tui.curses.error()])
+        self.assertEqual(action, "close")
+        save.assert_not_called()
+
+    def test_incomplete_escape_sequence_dismisses_chooser_without_saving(self):
+        action, _, save = self.dialog(["\x1b", "[", agents_tui.curses.error()])
+        self.assertEqual(action, "close")
+        save.assert_not_called()
+
+    def test_mouse_click_and_unknown_alt_shortcut_do_not_dismiss_chooser(self):
+        for suffix in ("[<0;10;20M", "z"):
+            action, _, save = self.dialog(["\x1b", *suffix, "\x02"])
+            self.assertEqual(action, "close")
+            save.assert_not_called()
+
     def test_no_agents_or_nonexistent_saved_agents_do_not_create_placeholder_rows(self):
         state = {"version": 1, "hidden": [["gone", "one"]], "order": [["gone", "one"]]}
         action, state, _ = self.dialog(["\x04"], state, items=[])

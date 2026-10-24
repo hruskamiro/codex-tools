@@ -42,13 +42,41 @@ class MessageReceiptTests(unittest.TestCase):
         reopened = relay_cache.RelayCache(self.path)
         self.assertEqual(self.displayed(cache=reopened)[0]["_status"], "Waiting to sync")
         reopened.record_outbox_attempt(message_id, state="delivered")
-        self.assertEqual(self.displayed(cache=reopened)[0]["_status"], "Delivered to Codex")
+        self.assertEqual(self.displayed(cache=reopened)[0]["_status"], "Queued in Codex")
         reopened.replace_host_snapshot("home", "Home", [agent([record("Continue", "2026-10-19T20:00:00Z")])])
         displayed = self.displayed(cache=reopened)
         self.assertEqual(len(displayed), 1)
         self.assertEqual(displayed[0]["_status"], "Delivered · in conversation")
         self.assertEqual(displayed[0]["_message_id"], message_id)
         self.assertEqual(self.displayed(cache=relay_cache.RelayCache(self.path)), displayed)
+
+    def test_clear_failed_deliveries_preserves_other_states_scopes_and_history(self):
+        self.cache.replace_host_snapshot("other", "Other", [agent()])
+        ids = {}
+        for host, target, state in (("home", "one", "failed"), ("home", "two", "failed"),
+                                    ("other", "one", "failed"), ("home", "one", "pending"),
+                                    ("home", "one", "delivered")):
+            message_id = self.cache.enqueue(host, target, {"text": state}, track=True)
+            self.cache.record_outbox_attempt(message_id, state=state)
+            ids[host, target, state] = message_id
+        local_failure = self.cache.record_message_receipt("home", "one", "local failure")
+        self.cache.update_message_receipt(local_failure, delivery="failed")
+        self.cache.replace_host_snapshot("home", "Home", [agent([record("History", "old")])])
+        self.assertEqual(self.cache.clear_failed_deliveries("home", "one"), 2)
+        self.assertEqual({r["message_id"] for r in self.cache.outbox()},
+                         set(ids.values()) - {ids["home", "one", "failed"]})
+        self.assertEqual([r["text"] for r in self.displayed()], ["History", "pending", "delivered"])
+        self.assertEqual(self.cache.clear_failed_deliveries("home"), 1)
+        self.assertEqual(self.cache.clear_failed_deliveries(), 1)
+        self.assertEqual(self.cache.clear_failed_deliveries(), 0)
+        self.assertEqual(len(self.cache.pending()), 1)
+        self.assertEqual(len(self.cache.records("home", "one")), 1)
+
+    def test_clear_uses_outbox_state_over_stale_failed_receipt(self):
+        message_id = self.cache.enqueue("home", "one", {"text": "Retry"}, track=True)
+        self.cache.update_message_receipt(message_id, delivery="failed")
+        self.assertEqual(self.cache.clear_failed_deliveries(), 0)
+        self.assertEqual(len(self.cache.pending()), 1)
 
     def test_old_identical_question_is_not_mistaken_for_new_delivery(self):
         old = record("Again", "2026-10-19T19:00:00Z")
@@ -89,7 +117,7 @@ class MessageReceiptTests(unittest.TestCase):
         for state, error, expected in (
             ("pending", "timeout", "Not delivered · waiting to retry"),
             ("failed", "unavailable", "Delivery failed · unavailable"),
-            ("delivered", "cannot start", "Delivered · start request failed: cannot start"),
+            ("delivered", "cannot start", "Queued in Codex · start request failed: cannot start"),
         ):
             self.cache.record_outbox_attempt(message_id, state=state, error=error)
             self.assertEqual(self.displayed(cache=relay_cache.RelayCache(self.path))[0]["_status"], expected)
@@ -104,7 +132,7 @@ class MessageReceiptTests(unittest.TestCase):
         self.assertTrue(result["message_id"])
         self.assertEqual(self.cache.pending("local"), [])
         self.assertEqual(self.displayed("local", relay_cache.RelayCache(self.path))[0]["_status"],
-                         "Delivered to Codex")
+                         "Queued in Codex")
 
     def test_local_failure_is_preserved_and_not_associated_with_later_retry(self):
         self.cache.replace_host_snapshot("local", "Local", [agent()])

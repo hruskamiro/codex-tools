@@ -89,7 +89,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
   type immediately         edit the selected agent's draft
   Enter / Ctrl-J           send / insert a newline
   Tab                      switch between panes
-  Shift-Left / Right       select sidebar / enter selected item
+  Shift-Left / Shift-Right select sidebar / enter selected item
   Enter                    open or apply the selected sidebar item
   Ctrl-P / Ctrl-N          move up / down within the draft
   Ctrl-Left / Ctrl-Right   move by word
@@ -111,6 +111,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Show only synchronized agents from remote relay hosts.",
     )
+    ui.add_argument("--peer", help="Show and synchronize only this paired relay peer.")
     ui.add_argument(
         "--sync",
         choices=("manual", "economy", "adaptive", "live"),

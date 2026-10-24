@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import tempfile
 import threading
 import unittest
@@ -10,6 +11,28 @@ from codex_tools import agents_tui, viewer
 
 class AgentTuiTests(unittest.TestCase):
     DELIVERY = {"delivered": 0, "pending": 0, "failed": 0, "errors": []}
+
+    def test_only_latest_assistant_reply_gets_its_local_timestamp(self) -> None:
+        timestamp = "2026-10-21T11:22:33Z"
+        records = [
+            {"role": "assistant", "text": "Earlier", "timestamp": "2026-10-21T10:00:00Z"},
+            {"role": "assistant", "text": "Latest", "timestamp": timestamp},
+            {"role": "assistant", "text": "Running tools", "timestamp": "2026-10-21T12:00:00Z",
+             "record_type": "tool_activity"},
+        ]
+        lines = agents_tui.transcript_lines(records, 80)
+        expected = agents_tui.datetime.fromisoformat(timestamp.replace("Z", "+00:00")).astimezone().strftime("%H:%M:%S")
+        self.assertEqual([line for line, style in lines if style == "muted"
+                          and re.fullmatch(r"  \d{2}:\d{2}:\d{2}", line)],
+                         ["  " + expected])
+        index = lines.index(("  " + expected, "muted"))
+        self.assertEqual(lines[index - 1], ("", "assistant_gap"))
+
+    def test_invalid_assistant_timestamp_does_not_break_transcript(self) -> None:
+        lines = agents_tui.transcript_lines([
+            {"role": "assistant", "text": "Reply", "timestamp": "invalid"},
+        ], 80)
+        self.assertFalse(any(style == "muted" for _, style in lines))
 
     def test_macos_draws_text_without_inline_attributes(self) -> None:
         window = Mock()
@@ -260,7 +283,7 @@ class AgentTuiTests(unittest.TestCase):
                          "Waiting to sync")
         self.assertEqual(agents_tui.optimistic_message_status(
             message, {"message-id": {"state": "delivered"}}, agent_working=True),
-            "Delivered · queued for agent")
+            "Queued in Codex")
 
     def test_composer_has_background_padding_above_and_below(self) -> None:
         window = Mock()
@@ -321,7 +344,7 @@ class AgentTuiTests(unittest.TestCase):
         self.assertEqual(records[0]["role"], "user")
         self.assertEqual(records[0]["text"], "Continue please")
         self.assertIn(
-            ("  ◌ Delivered · queued for agent", "message_status"),
+            ("  ◌ Queued in Codex", "message_status"),
             lines,
         )
 
@@ -336,7 +359,7 @@ class AgentTuiTests(unittest.TestCase):
             agent_working=True,
         )
 
-        self.assertEqual(status, "Delivered · queued for agent")
+        self.assertEqual(status, "Queued in Codex")
 
     def test_enter_and_tab_have_consistent_queue_status_after_stop(self) -> None:
         for explicit_queue in (False, True):
@@ -348,7 +371,7 @@ class AgentTuiTests(unittest.TestCase):
                     remote = agents_tui.OptimisticMessage("Continue", 0, "queued", "id", queued=explicit_queue)
                     self.assertEqual(agents_tui.optimistic_message_status(
                         remote, {"id": {"state": "delivered"}}, agent_working=working),
-                        "Delivered · queued for agent")
+                        "Queued in Codex")
 
     def test_pending_messages_distinguish_waiting_from_delivery_errors(self) -> None:
         message = agents_tui.OptimisticMessage("Continue", 0, "queued", "id")
@@ -519,6 +542,7 @@ class AgentTuiTests(unittest.TestCase):
             "1;5D": "word_left",
             "5C": "word_right",
             "1;2D": "agents",
+            "1;2C": "conversation",
             "1;3A": "select_agent_up",
             "3B": "select_agent_down",
             "1;4A": "move_agent_up",
@@ -1035,6 +1059,72 @@ class AgentTuiTests(unittest.TestCase):
         self.assertIn(('"soft blue"', "string"), spans)
         self.assertIn(("true", "literal"), spans)
         self.assertIn(("1.5", "number"), spans)
+
+    def test_markdown_bold_hides_only_matched_markers_outside_code(self) -> None:
+        text = agents_tui.markdown_text("Plain **bold** and **two words**; `**literal**` / ``**also literal**``.")
+        self.assertEqual(text, "Plain bold and two words; `**literal**` / ``**also literal**``.")
+        self.assertEqual([text[left:right] for left, right in text.bold_ranges], ["bold", "two words"])
+        for literal in ("unmatched **bold", "** leading**", "**trailing **", "***triple***", r"\**escaped**"):
+            with self.subTest(literal=literal):
+                parsed = agents_tui.markdown_text(literal)
+                self.assertEqual(parsed, literal)
+                self.assertEqual(parsed.bold_ranges, ())
+
+    def test_bold_survives_wrapping_and_assistant_bullet_without_wrapping_markers(self) -> None:
+        lines = agents_tui.transcript_lines([
+            {"role": "assistant", "text": "**abcdefghijklmno** plain"},
+        ], 14)
+        rendered = [line for line, style in lines if style == "assistant"]
+        self.assertTrue(rendered[0].startswith("• "))
+        self.assertFalse(any("**" in line for line in rendered))
+        bold = "".join(line[left:right] for line in rendered for left, right in line.bold_ranges)
+        self.assertEqual(bold, "abcdefghijklmno")
+        self.assertTrue(all(len(line) <= 14 for line in rendered))
+
+    def test_bold_inside_inline_code_and_fences_remains_literal(self) -> None:
+        lines = agents_tui.transcript_lines([
+            {"role": "assistant", "text": "`**inline**`\n\n```bash\necho '**literal**'\n```"},
+        ], 80)
+        self.assertTrue(any("`**inline**`" in line for line, style in lines if style == "assistant"))
+        self.assertTrue(any("**literal**" in line for line, style in lines if style == "code:bash"))
+        self.assertFalse(any(getattr(line, "bold_ranges", ()) for line, _ in lines))
+
+    def test_bold_tables_keep_alignment_and_wrapped_emphasis(self) -> None:
+        table = agents_tui.format_terminal_table(["Name", "Value"], ["---", "---"],
+                                                [["**long bold cell**", "plain"]], 28)
+        rows = [line for line, style in table if style == "table_row"]
+        self.assertTrue(all("**" not in line for line in rows))
+        bold = "".join(line[left:right] for line in rows for left, right in line.bold_ranges)
+        self.assertEqual(bold.replace(" ", ""), "longboldcell")
+        self.assertEqual(len({len(line) for line, _ in table}), 1)
+
+    def test_bold_drawing_preserves_token_colors_and_plain_text(self) -> None:
+        with patch.object(agents_tui, "add_text") as draw:
+            agents_tui.add_semantic_text(Mock(), 2, 3, 'Plain **bold 42 "yes"** end', 80, 8,
+                                         {"syntax_number": 16, "syntax_string": 32})
+        calls = draw.call_args_list
+        self.assertEqual("".join(call.args[3] for call in calls), 'Plain bold 42 "yes" end')
+        self.assertTrue(any(call.args[3] == "bold " and call.args[5] == (8 | agents_tui.curses.A_BOLD)
+                            for call in calls))
+        self.assertTrue(any(call.args[3] == "42" and call.args[5] == (16 | agents_tui.curses.A_BOLD)
+                            for call in calls))
+        self.assertTrue(any(call.args[3] == '"yes"' and call.args[5] == (32 | agents_tui.curses.A_BOLD)
+                            for call in calls))
+        self.assertEqual(calls[-1].args[5], 8)
+
+    def test_bold_link_labels_preserve_emphasis_without_brackets(self) -> None:
+        with patch.object(agents_tui, "add_text") as draw:
+            agents_tui.add_semantic_text(Mock(), 0, 0, "See [**report**] now", 80, 0, {"syntax_link": 16})
+        self.assertEqual("".join(call.args[3] for call in draw.call_args_list), "See report now")
+        self.assertTrue(any(call.args[3] == "report" and call.args[5] == (16 | agents_tui.curses.A_BOLD)
+                            for call in draw.call_args_list))
+
+    def test_bold_drawing_on_mac_uses_safe_cell_attributes(self) -> None:
+        window = Mock()
+        with patch.object(agents_tui.sys, "platform", "darwin"):
+            agents_tui.add_semantic_text(window, 0, 0, "**bold**", 20, 0, {})
+        window.addnstr.assert_called_once_with(0, 0, b"bold", 4)
+        window.chgat.assert_called_once_with(0, 0, 4, agents_tui.curses.A_BOLD)
 
     def test_fenced_code_blocks_hide_fences_and_preserve_indentation(self) -> None:
         records = [

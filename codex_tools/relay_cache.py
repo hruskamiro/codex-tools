@@ -180,6 +180,11 @@ class RelayCache:
             CREATE INDEX IF NOT EXISTS relay_receipts_agent
                 ON relay_message_receipts(host_id, agent_id, record_key);
 
+            CREATE TABLE IF NOT EXISTS relay_peer_hosts (
+                base_url TEXT PRIMARY KEY,
+                host_id TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS relay_agents_updated
                 ON relay_agents(host_id, updated_at DESC);
             CREATE INDEX IF NOT EXISTS relay_outbox_state
@@ -249,6 +254,26 @@ class RelayCache:
             """,
             (host_id, name, base_url, utc_now()),
         )
+        if base_url:
+            connection.execute(
+                "INSERT INTO relay_peer_hosts(base_url, host_id) VALUES (?, ?) "
+                "ON CONFLICT(base_url) DO UPDATE SET host_id = excluded.host_id",
+                (base_url.rstrip("/"), host_id),
+            )
+
+    def peer_host_id(self, base_url: str) -> str | None:
+        """Remember both direct and jump routes to the same authenticated host."""
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT host_id FROM relay_peer_hosts WHERE base_url = ?",
+                (base_url.rstrip("/"),),
+            ).fetchone()
+            if row is None:
+                row = connection.execute(
+                    "SELECT host_id FROM relay_hosts WHERE rtrim(base_url, '/') = ?",
+                    (base_url.rstrip("/"),),
+                ).fetchone()
+        return str(row["host_id"]) if row else None
 
     def replace_host_snapshot(
         self,
@@ -627,6 +652,33 @@ class RelayCache:
 
     def pending(self, host_id: str | None = None) -> list[dict[str, Any]]:
         return self.outbox(host_id=host_id, states=("pending",))
+
+    def clear_failed_deliveries(
+        self, host_id: str | None = None, agent_id: str | None = None,
+    ) -> int:
+        """Remove failed local delivery overlays, preserving transcript records."""
+        if agent_id is not None and host_id is None:
+            raise ValueError("an agent scope requires a host")
+        clauses = ["state = 'failed'"]
+        values: list[Any] = []
+        for column, value in (("host_id", host_id), ("agent_id", agent_id)):
+            if value is not None:
+                clauses.append(f"{column} = ?")
+                values.append(value)
+        with self.connect() as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                "SELECT message_id FROM ("
+                "SELECT message_id, host_id, agent_id, state FROM relay_outbox "
+                "UNION ALL SELECT r.message_id, r.host_id, r.agent_id, r.delivery AS state "
+                "FROM relay_message_receipts r "
+                "WHERE NOT EXISTS (SELECT 1 FROM relay_outbox o WHERE o.message_id = r.message_id)"
+                ") WHERE " + " AND ".join(clauses), values,
+            ).fetchall()
+            ids = [(row["message_id"],) for row in rows]
+            connection.executemany("DELETE FROM relay_message_receipts WHERE message_id = ?", ids)
+            connection.executemany("DELETE FROM relay_outbox WHERE message_id = ?", ids)
+        return len(ids)
 
     def outbox(
         self,

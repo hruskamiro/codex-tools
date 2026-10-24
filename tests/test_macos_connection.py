@@ -29,9 +29,16 @@ class MacosConnectionTests(unittest.TestCase):
             definition = plistlib.loads((root / "config/ssh-services/desktop.plist").read_bytes())
             self.assertNotIn("--auto-start", definition["ProgramArguments"])
 
-    def run_controller(self, root, arguments, launch, *, workstation_port=18781):
+    def run_controller(self, root, arguments, launch, *, workstation_port=18781, console_hook=None):
         namespace = runpy.run_path(str(Path(__file__).resolve().parents[1] / "scripts" / "ct-connect-macos"))
         main = namespace["main"]
+        def child(command):
+            if console_hook:
+                console_hook(command)
+            process = Mock()
+            process.wait.return_value = 0
+            process.poll.return_value = 0
+            return process
         with (
             patch.dict(main.__globals__, {"launchctl": launch}),
             patch.object(sys, "platform", "darwin"),
@@ -45,8 +52,72 @@ class MacosConnectionTests(unittest.TestCase):
                 },
             }),
             patch("sys.stdout", new_callable=io.StringIO),
+            patch.object(subprocess, "Popen", side_effect=child),
         ):
             return main()
+
+    def connection_service(self):
+        state = {"loaded": False}
+        def launch(action, *args):
+            if action == "print":
+                return subprocess.CompletedProcess([], 0 if state["loaded"] else 1)
+            if action == "bootstrap":
+                state["loaded"] = True
+            if action == "bootout":
+                state["loaded"] = False
+            return subprocess.CompletedProcess([], 0)
+        return state, Mock(side_effect=launch)
+
+    def test_console_owns_connection_and_releases_configuration_lock(self):
+        import fcntl
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state, launch = self.connection_service()
+            commands = []
+            def console(command):
+                commands.append(command)
+                self.assertTrue(state["loaded"])
+                with (root / "config/ssh-launcher.lock").open("a") as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.assertEqual(self.run_controller(root, ["console"], launch, console_hook=console), 0)
+            self.assertFalse(state["loaded"])
+            self.assertEqual(commands[0][-2:], ["--peer", "desktop"])
+            saved = json.loads((root / "config/ssh-launcher.json").read_text())
+            self.assertFalse(saved["connections"]["desktop"]["persistent"])
+
+    def test_explicit_background_start_survives_console_exit_without_restarting(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state, launch = self.connection_service()
+            self.run_controller(root, ["start"], launch)
+            self.run_controller(root, ["console"], launch)
+            self.assertTrue(state["loaded"])
+            self.assertEqual(sum(call.args[0] == "bootstrap" for call in launch.call_args_list), 1)
+            self.assertFalse(any(call.args[0] == "bootout" for call in launch.call_args_list))
+
+    def test_multiple_console_leases_stop_only_after_last_client_and_ignore_stale_files(self):
+        namespace = runpy.run_path(str(Path(__file__).resolve().parents[1] / "scripts/ct-connect-macos"))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "config").mkdir()
+            (root / "config/ssh-launcher.json").write_text(json.dumps({
+                "version": 2, "default": "desktop", "connections": {"desktop": {"persistent": False}},
+            }))
+            with patch.object(paths, "user_config_dir", return_value=root / "config"), \
+                 patch.object(paths, "user_state_dir", return_value=root / "state"), \
+                 patch.dict(namespace["release_console"].__globals__, {
+                     "launchctl": Mock(return_value=subprocess.CompletedProcess([], 0)),
+                     "stop_service": Mock(),
+                 }):
+                first = namespace["console_lease"]("desktop")
+                second = namespace["console_lease"]("desktop")
+                (first[0].parent / "client-stale").touch()
+                stop = namespace["release_console"].__globals__["stop_service"]
+                namespace["release_console"]("desktop", first)
+                stop.assert_not_called()
+                namespace["release_console"]("desktop", second)
+                stop.assert_called_once()
+                self.assertFalse(list(first[0].parent.iterdir()))
 
     def test_background_service_is_private_and_does_not_enable_login_startup(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -131,7 +202,7 @@ class MacosConnectionTests(unittest.TestCase):
             self.assertEqual(self.run_controller(root, ["start", "desktop"], launch), 0)
             saved = json.loads(preferences.read_text())
             self.assertEqual(saved["version"], 2)
-            self.assertEqual(saved["connections"]["desktop"], old)
+            self.assertEqual(saved["connections"]["desktop"], {**old, "persistent": True})
             self.assertEqual(json.loads((root / "config" / "ssh-launcher.v1.json").read_text()), old)
             self.assertTrue(any(call.args[0] == "bootout" and call.args[1].endswith("/local.codex-tools.relay") for call in launch.call_args_list))
 

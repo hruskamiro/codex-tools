@@ -135,7 +135,7 @@ on a restrained terminal surface without showing the literal fences.
 Sent messages appear in the conversation immediately, including in manual
 sync mode. A muted line beneath the message reports whether the
 message is waiting to sync, awaiting a delivery retry, accepted into Codex's
-queue, or failed. Delivery does not mean the agent has started that message;
+queue ("Queued in Codex"), or failed. Queued does not mean the agent has started that message;
 the thread's separate working indicator is not attributed to a queued draft.
 Delivery receipts are stored in the private local relay cache, including for
 local sends, so statuses survive refreshes and console restarts. When sync
@@ -145,15 +145,30 @@ or creating a duplicate bubble. This is delivery/observation status, not a
 claim that the assistant's turn completed. Existing messages sent before
 receipt tracking was enabled are not retroactively assigned a status.
 
+Settings → Deliveries clears failed deliveries for the last selected conversation
+or for all conversations. In a `ct-connect console PROFILE` console, the latter
+action applies only to that server. Clearing removes failed local messages and
+their delivery receipts; pending deliveries and conversation history are retained.
+Use Left/Right to switch settings tabs, Up/Down to choose an action, and Enter to apply it.
+
 Beside the model and reasoning effort, separated by a vertical divider, the
 console shows the sync mode and a steady health dot: green for a recent
 successful sync, yellow for manual/cached, stale, or not-yet-checked state,
 and red after a failed sync until a newer success. Routine checks do not
 change the label or animate the dot. The last-success time is still stored
 locally, including successful incremental polls with no new messages.
+Manual refresh progress and its latest result appear directly below the sync
+metadata, with a local completion time. Failures use the sync error color.
+Conversation refresh results stay with that agent; refresh-all results apply
+to the console. Routine automatic polling does not replace this feedback.
 
 The conversation shows up to three muted tool-activity breadcrumbs, such as
 “Running a command” or “Editing files,” alongside the working indicator.
+Markdown `**bold**` is displayed with the terminal's bold attribute, without
+the asterisks, including across wrapped lines and table cells. Inline code and
+fenced code keep literal asterisks. No additional font installation is required.
+The latest assistant message has a muted, indented `HH:MM:SS` beneath it, without a bullet,
+separated by a blank line, using its recorded timestamp in the console machine's local timezone.
 These compact summaries sync through the relay; tool arguments and output
 are not included. In manual sync mode they update only when you refresh.
 The composer wraps at word boundaries (splitting only overlong words/URLs),
@@ -164,16 +179,26 @@ Press Tab with an empty draft to switch between the agent list and composer;
 Shift-Tab switches panes even with a draft. Alt-Up/Down selects the previous/next agent without
 reordering, wrapping from the first to the last and vice versa (also Command-Up/Down
 in macOS Terminal when Cmd/Option are swapped).
-Shift-Left selects the agent list from anywhere in a draft; use Up/Down and Right to enter
+Shift-Left selects the agent list from anywhere in a draft; use Up/Down and Right or Shift-Right to enter
 the selected agent's composer. Ctrl-P/Ctrl-N move between agents in the agent
 list, or between draft lines in the composer. Ctrl-Left/Ctrl-Right move by word. Page Up/Down or
 the mouse wheel scrolls the conversation. Ctrl-R refreshes the selected agent,
 Ctrl-S refreshes all local sessions and configured peers, Ctrl-V opens the
 browser viewer, Ctrl-T opens the typeset viewer, Ctrl-F searches, and Ctrl-X
 maximizes or restores the conversation; Alt-M does the same without consuming
-a typing key. Ctrl-C, Escape, or Ctrl-G stops the selected agent's active turn
-without discarding its queued prompts. Press Ctrl-D to quit the console (the
-background SSH connection and remote agents keep running). Agents keep a stable creation-time
+a typing key. Ctrl-C stops the selected agent's active turn without discarding
+its queued prompts; when the selected agent is idle and no messages are waiting,
+Ctrl-C quits like Ctrl-D. Escape and Ctrl-G remain stop-only shortcuts.
+Press Ctrl-D to quit the console regardless of agent activity.
+Remote submissions are saved locally and shown immediately; delivery runs in a
+background worker, even in manual sync mode. The message's receipt updates when
+the peer acknowledges it, without blocking typing or agent selection. If the
+connection fails, the durable message remains queued for the usual sync retries.
+When opened through `ct-connect console`, the selected server disconnects when
+its last console closes, unless explicitly kept running with `ct-connect start`.
+Pending deliveries require confirmation before disconnecting; cached conversations
+and queued messages remain saved for the next connection. Remote agents keep
+running independently. Agents keep a stable creation-time
 order instead of jumping after new
 activity; the first nine are numbered and Alt-1 through Alt-9 switches to them
 directly. Alt-Up and Alt-Down select the previous or next agent, while
@@ -201,10 +226,11 @@ setup, but discards group filters. The original `agent-groups.json` and
 `agent-order.json` files are left untouched as backups. Group commands and
 group-filter CLI flags were removed.
 
-**Settings** has separate **Sync** and **Agents** tabs. With the Settings pane
+**Settings** has separate **Sync**, **Agents**, and **Deliveries** tabs. With the Settings pane
 focused, use **Left/Right** to select a tab and **Up/Down** to choose an option;
 **Enter** applies it. **Tab** still switches panes, and **Shift-Left** selects
-the sidebar. **Agents** opens the same simple chooser. Preferences apply on
+the sidebar. **Left** from the first (**Sync**) tab also returns to the sidebar.
+**Agents** opens the same simple chooser. Preferences apply on
 future console starts, including `ct-connect console PROFILE`.
 
 The first item in the agent pane opens **Settings**. The **Sync** tab's mode
@@ -299,13 +325,24 @@ per-user launchd controller. Run it with the checkout's virtualenv Python, or
 through a user-local `ct-connect` shim pointing to that interpreter and script:
 
 ```bash
-ct-connect start desktop --ssh user@desktop  # configure once and start in the background
-ct-connect                         # subsequent starts
+ct-connect console desktop --ssh user@desktop --auto-start --remote-bin /home/user/.local/bin/ct
+ct-connect                         # open the default profile's scoped console
 ct-connect status                  # list all configured connections
-ct-connect console desktop         # ensure connected, then open the console
+ct-connect console desktop         # connect only to this server while the console is open
+ct-connect start desktop           # explicitly keep its connection in the background
 ct-connect viewer desktop          # ensure connected, then open this peer's viewer
 ct-connect stop desktop
 ```
+
+Console connections are scoped to the selected peer: the sidebar, agent chooser,
+automatic sync, and Ctrl-S refresh do not include other cached servers. The
+connection retries while the console is open and stops after the last console
+for that profile closes. Two consoles can share it without disconnecting each
+other. An explicit `start` opts that profile into background operation, including
+delivery retries after closing the console; `stop` disables that background
+choice. `viewer` also uses a background connection because browser-tab lifetime
+is independent of the CLI. Closing a console never stops the remote relay or agents.
+Standalone consoles can be restricted with `ct agents ui --peer NAME`.
 
 For a second server, pair a second peer using a different local forwarding
 port, then start its named connection. SSH login keys and jump-host routes

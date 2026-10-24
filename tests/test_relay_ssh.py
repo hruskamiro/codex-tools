@@ -199,6 +199,7 @@ class RelaySshTests(unittest.TestCase):
                 self.assertEqual(relay_ssh.command_connect(args), 0)
             command = ui.call_args.args[0]
             self.assertIn("--no-local", command)
+            self.assertEqual(command[command.index("--peer") + 1], "desktop")
             supervisor.return_value.thread.start.assert_called_once()
             supervisor.return_value.connected.wait.assert_not_called()
             supervisor.return_value.close.assert_called_once()

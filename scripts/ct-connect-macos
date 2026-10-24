@@ -4,14 +4,18 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import fcntl
 import hashlib
 import json
 import os
+from pathlib import Path
 import plistlib
 import re
+import signal
 import subprocess
 import sys
+import tempfile
 import time
 from urllib.parse import urlparse
 
@@ -77,6 +81,7 @@ def show_status(name, settings, loaded, peers):
     port = urlparse(peers.get(peer_name, {}).get("url", "")).port or 80
     print(f"  SSH: {settings.get('ssh', name)} → localhost:{port} · peer: {peer_name}")
     print(f"  Remote auto-start: {'on' if settings.get('auto_start', False) else 'off'}")
+    print(f"  Lifetime: {'background (explicit start)' if settings.get('persistent', False) else 'while consoles are open'}")
     identity = hashlib.sha256(f"{peer_name}:{port}".encode()).hexdigest()[:20]
     status_file = paths.user_state_dir() / "relay-ssh" / identity / "status.json"
     try:
@@ -89,9 +94,90 @@ def show_status(name, settings, loaded, peers):
     return True
 
 
-def main() -> int:
+@contextmanager
+def settings_lock():
+    directory = paths.user_config_dir()
+    paths.ensure_private_dir(directory)
+    lock_path = directory / "ssh-launcher.lock"
+    with lock_path.open("a") as lock:
+        lock_path.chmod(0o600)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def console_lease(name):
+    directory = paths.user_state_dir() / "relay-ssh-service" / name / "clients"
+    paths.ensure_private_dir(directory)
+    descriptor, filename = tempfile.mkstemp(prefix="client-", dir=directory)
+    lease = os.fdopen(descriptor, "w")
+    fcntl.flock(lease, fcntl.LOCK_EX)
+    return Path(filename), lease
+
+
+def has_console_clients(directory):
+    if not directory.exists():
+        return False
+    active = False
+    for path in directory.glob("client-*"):
+        try:
+            with path.open("r+") as lease:
+                try:
+                    fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    active = True
+                else:
+                    path.unlink()  # Abandoned by a crashed console.
+        except FileNotFoundError:
+            pass
+    return active
+
+
+def release_console(name, lease):
+    path, handle = lease
+    with settings_lock():
+        handle.close()
+        path.unlink(missing_ok=True)
+        config, _ = read_settings(paths.user_config_dir() / "ssh-launcher.json")
+        persistent = config.get("connections", {}).get(name, {}).get("persistent", False)
+        if not persistent and not has_console_clients(path.parent):
+            service, loaded = service_state(f"gui/{os.getuid()}", name, config.get("default", "desktop"))
+            stop_service(service, loaded)
+
+
+def scoped_console(name, peer, lease):
+    process = None
+    handlers = {}
+    def interrupted(signum, frame):
+        raise KeyboardInterrupt
+    try:
+        for signum in (signal.SIGTERM, signal.SIGHUP):
+            handlers[signum] = signal.signal(signum, interrupted)
+        process = subprocess.Popen([
+            sys.executable, "-m", "codex_tools.cli", "agents", "ui", "--no-local", "--peer", peer,
+        ])
+        return process.wait()
+    except KeyboardInterrupt:
+        return 130
+    finally:
+        try:
+            if process is not None and process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=2)
+        finally:
+            try:
+                release_console(name, lease)
+            finally:
+                for signum, previous in handlers.items():
+                    signal.signal(signum, previous)
+
+
+def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", nargs="?", default="start",
+    parser.add_argument("action", nargs="?", default="console",
                         choices=("start", "stop", "status", "console", "viewer"))
     parser.add_argument("connection", nargs="?", help="Connection name; status without a name lists all.")
     parser.add_argument("--ssh", metavar="HOST", help="Save the SSH host/alias (default: connection name).")
@@ -103,9 +189,12 @@ def main() -> int:
     automatic.add_argument("--no-auto-start", action="store_false", dest="auto_start",
                            help="Save: require the remote relay to already be running.")
     parser.add_argument("--remote-bin", metavar="PATH", help="Save the remote codex-tools executable (prefer an absolute path).")
-    args = parser.parse_args()
+    return parser.parse_args()
+
+
+def prepare(args):
     if sys.platform != "darwin":
-        parser.error("this launcher uses macOS launchd")
+        raise ValueError("this launcher uses macOS launchd")
     domain = f"gui/{os.getuid()}"
     config_dir = paths.user_config_dir()
     preferences = config_dir / "ssh-launcher.json"
@@ -120,6 +209,9 @@ def main() -> int:
     if args.action == "stop":
         service, loaded = service_state(domain, name, default)
         stop_service(service, loaded)
+        if name in config.get("connections", {}):
+            config["connections"][name]["persistent"] = False
+            paths.write_private_text(preferences, json.dumps(config, indent=2) + "\n")
         print(f"{name}: connection stopped. Other connections and cached viewing remain available.")
         return 0
 
@@ -142,6 +234,10 @@ def main() -> int:
     settings.setdefault("peer", name)
     settings.setdefault("ssh", name)
     settings.setdefault("remote_port", 8780)
+    if args.action in {"start", "viewer"}:
+        settings["persistent"] = True
+    else:
+        settings.setdefault("persistent", False)
     for key, value in (("ssh", args.ssh), ("peer", args.peer), ("remote_port", args.remote_port),
                        ("auto_start", args.auto_start), ("remote_bin", args.remote_bin)):
         if value is not None:
@@ -166,7 +262,10 @@ def main() -> int:
             raise ValueError(f"{other} already uses local port {port}; pair each server with a different local port")
 
     service, loaded = service_state(domain, name, default)
-    changed = settings != config["connections"].get(name)
+    # A background/start request changes ownership, not the SSH transport.
+    changed = {k: v for k, v in settings.items() if k != "persistent"} != {
+        k: v for k, v in config["connections"].get(name, {}).items() if k != "persistent"
+    }
     paths.ensure_private_dir(config_dir)
     if migrated and not (config_dir / "ssh-launcher.v1.json").exists():
         paths.write_private_text(config_dir / "ssh-launcher.v1.json", preferences.read_text())
@@ -216,22 +315,25 @@ def main() -> int:
         print(f"{name}: connection is already running.")
 
     if args.action == "console":
-        os.execv(sys.executable, [sys.executable, "-m", "codex_tools.cli", "agents", "ui", "--no-local"])
+        return name, settings["peer"], console_lease(name)
     if args.action == "viewer":
         if not relay_ssh.open_cached_viewer(relay_cache.RelayCache(), peer):
             print(f"Waiting for the first sync. Run ct-connect viewer {name} again when connected.")
     return 0
 
 
+def main() -> int:
+    args = parse_args()
+    with settings_lock():
+        result = prepare(args)
+    if isinstance(result, tuple):
+        return scoped_console(*result)
+    return result
+
+
 if __name__ == "__main__":
     try:
-        directory = paths.user_config_dir()
-        paths.ensure_private_dir(directory)
-        lock_path = directory / "ssh-launcher.lock"
-        with lock_path.open("a") as lock:
-            lock_path.chmod(0o600)
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            raise SystemExit(main())
+        raise SystemExit(main())
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         raise SystemExit(1)

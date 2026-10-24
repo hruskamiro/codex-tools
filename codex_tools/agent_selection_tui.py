@@ -51,7 +51,9 @@ def manage(window: Any, palette: dict[str, int], state: dict, items: list[Any], 
             return "close"
         direction = {"kUP3": -1, "kUP4": -1, "kDN3": 1, "kDN4": 1}.get(terminal_key_name(key), 0)
         if code == 27:
-            action, _ = escape_action(window)
+            action, _ = escape_action(window, modal=True)
+            # A repeated Escape (or a truncated sequence) still dismisses a
+            # modal; it must never fall through into the agent's stop command.
             if action == "stop":
                 return "close"
             direction = {"select_agent_up": -1, "move_agent_up": -1,

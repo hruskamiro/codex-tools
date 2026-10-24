@@ -309,6 +309,7 @@ def command_connect(args: argparse.Namespace) -> int:
             if args.ui == "console":
                 ui_process = subprocess.Popen([
                     sys.executable, "-m", "codex_tools.cli", "agents", "ui", "--no-local",
+                    "--peer", args.peer,
                     "--cache-file", str(args.cache_file), "--relay-config", str(args.config_file),
                 ])
                 return ui_process.wait()

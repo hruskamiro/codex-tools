@@ -162,7 +162,7 @@ def optimistic_message_status(
         if state == "delivered":
             if (item or {}).get("last_error"):
                 return f"Queued · could not start: {item['last_error']}"
-            return "Delivered · queued for agent"
+            return "Queued in Codex"
         if state == "failed":
             error = str((item or {}).get("last_error") or "delivery failed")
             return f"Delivery failed · {error}"
@@ -210,7 +210,7 @@ def receipt_status(receipt: dict[str, Any]) -> str:
     delivery = receipt["current_delivery"]
     error = str(receipt.get("current_error") or "")
     if delivery == "delivered":
-        return f"Delivered · start request failed: {error}" if error else "Delivered to Codex"
+        return f"Queued in Codex · start request failed: {error}" if error else "Queued in Codex"
     if delivery == "failed":
         return f"Delivery failed · {error or 'unknown error'}"
     if delivery == "sending":
@@ -618,6 +618,56 @@ def draw_info_spans(window: Any, y: int, x: int, spans: list[tuple[str, str]],
         width -= cells
 
 
+class DeliveryWorker:
+    """Attempt durable remote outbox deliveries without blocking a redraw.
+
+    Each submission wakes the worker even if a previous delivery is in flight;
+    otherwise a second message could be stranded in manual sync mode.
+    """
+
+    def __init__(self, cache: relay_cache.RelayCache, relay_config: Path) -> None:
+        self.cache = cache
+        self.relay_config = relay_config
+        self.updates: queue.SimpleQueue[AutoSyncUpdate] = queue.SimpleQueue()
+        self._jobs: queue.SimpleQueue[AgentItem | None] = queue.SimpleQueue()
+        self._stopped = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="agent-console-delivery", daemon=True)
+        self._thread.start()
+
+    def submit(self, item: AgentItem) -> None:
+        if not self._stopped.is_set():
+            self._jobs.put(item)
+
+    def close(self) -> None:
+        self._stopped.set()
+        self._jobs.put(None)
+        self._thread.join(timeout=0.25)
+
+    def _run(self) -> None:
+        while True:
+            item = self._jobs.get()
+            if item is None or self._stopped.is_set():
+                return
+            error = ""
+            try:
+                config = relay_transport.load_config(self.relay_config)
+                peer_name = peer_name_for_item(config, item)
+                if peer_name is None:
+                    raise ValueError(f"no configured peer matches {item.host_name}")
+                relay_transport.deliver_pending(self.cache, config["peers"][peer_name], item.host_id)
+            except (OSError, RuntimeError, ValueError) as exc:
+                error = str(exc)
+                # Preserve the message and make setup failures visible in its
+                # receipt, just like a failed network delivery attempt.
+                for pending in self.cache.pending(item.host_id):
+                    if str(pending["agent_id"]) == str(item.agent["agent_id"]):
+                        self.cache.record_outbox_attempt(str(pending["message_id"]),
+                                                        state="pending", error=error)
+            self.updates.put(AutoSyncUpdate(
+                (item.host_id, str(item.agent["agent_id"])), error, relay_cache.utc_now()
+            ))
+
+
 class AutoSyncWorker:
     """Synchronize only the selected agent without blocking terminal input."""
 
@@ -914,6 +964,98 @@ def restored_selection(items: list[AgentItem], previous: AgentItem | None) -> in
     return 0
 
 
+def peer_agent_items(cache: relay_cache.RelayCache, items: list[AgentItem], peer_url: str | None) -> list[AgentItem]:
+    if peer_url is None:
+        return items
+    host_id = cache.peer_host_id(peer_url)
+    return [AgentItem(item.host_id, item.host_name, item.agent, peer_url)
+            for item in items if item.host_id == host_id and item.host_id != "local"]
+
+
+def confirm_pending_disconnect(window: Any, count: int, palette: dict[str, int]) -> bool:
+    show_status(window, f"{count} message(s) waiting to sync. Ctrl-D again disconnects; any other key stays. Messages are saved for next time.", palette["status"])
+    try:
+        return window.get_wch() == "\x04"
+    except curses.error:
+        return False
+
+
+class EmphasizedText(str):
+    """Visible text with bold ranges that survive wrapping and table padding."""
+
+    def __new__(cls, text: str, bold_ranges: tuple[tuple[int, int], ...] = ()) -> EmphasizedText:
+        value = super().__new__(cls, text)
+        value.bold_ranges = bold_ranges
+        return value
+
+
+def markdown_text(text: str) -> EmphasizedText:
+    if isinstance(text, EmphasizedText):
+        return text
+    # Code spans and escaped characters are consumed before emphasis markers.
+    tokens = re.finditer(
+        r"(?P<code>(?P<ticks>`+)(?!`).*?(?<!`)(?P=ticks)(?!`))"
+        r"|(?P<escaped>\\.)|(?P<strong>(?<!\*)\*\*(?!\*))",
+        text,
+    )
+    opening = None
+    pairs = []
+    for token in tokens:
+        if token.lastgroup != "strong":
+            continue
+        can_close = token.start() > 0 and not text[token.start() - 1].isspace()
+        can_open = token.end() < len(text) and not text[token.end()].isspace()
+        if opening is not None and can_close:
+            pairs.append((opening, token))
+            opening = None
+        elif opening is None and can_open:
+            opening = token
+    pieces = []
+    ranges = []
+    cursor = size = 0
+    for opening, closing in pairs:
+        prefix = text[cursor:opening.start()]
+        content = text[opening.end():closing.start()]
+        pieces.extend((prefix, content))
+        size += len(prefix)
+        ranges.append((size, size + len(content)))
+        size += len(content)
+        cursor = closing.end()
+    pieces.append(text[cursor:])
+    return EmphasizedText("".join(pieces), tuple(ranges))
+
+
+def emphasized_slice(text: str, start: int, end: int) -> EmphasizedText:
+    ranges = tuple((max(left, start) - start, min(right, end) - start)
+                   for left, right in getattr(text, "bold_ranges", ())
+                   if left < end and right > start)
+    return EmphasizedText(text[start:end], ranges)
+
+
+def emphasized_join(parts: list[str]) -> EmphasizedText:
+    ranges = []
+    offset = 0
+    for part in parts:
+        ranges.extend((left + offset, right + offset)
+                      for left, right in getattr(part, "bold_ranges", ()))
+        offset += len(part)
+    return EmphasizedText("".join(parts), tuple(ranges))
+
+
+def wrap_markdown(text: str, width: int, *, drop_whitespace: bool = False) -> list[EmphasizedText]:
+    rich = markdown_text(text if isinstance(text, EmphasizedText) else text.expandtabs())
+    wrapped = textwrap.wrap(rich, width=width, expand_tabs=False, replace_whitespace=False,
+                            drop_whitespace=drop_whitespace, break_long_words=True,
+                            break_on_hyphens=True) or [""]
+    result = []
+    offset = 0
+    for line in wrapped:
+        start = rich.find(line, offset)
+        result.append(emphasized_slice(rich, start, start + len(line)))
+        offset = start + len(line)
+    return result
+
+
 def transcript_lines(
     records: list[dict[str, Any]], width: int
 ) -> list[tuple[str, str]]:
@@ -936,6 +1078,12 @@ def transcript_lines(
             and search.is_internal_prompt_text(str(record.get("text") or ""))
         )
     ]
+    latest_assistant = next(
+        (record for record in reversed(renderable)
+         if record.get("role") == "assistant"
+         and record.get("record_type") not in {"activity", "tool_activity"}),
+        None,
+    )
     previous_tool = False
     for record in renderable[-MAX_RECORDS:]:
         role = str(record["role"])
@@ -995,16 +1143,9 @@ def transcript_lines(
                     )
                 )
                 continue
-            wrapped = textwrap.wrap(
-                paragraph,
-                width=content_width,
-                replace_whitespace=False,
-                drop_whitespace=False,
-                break_long_words=True,
-                break_on_hyphens=True,
-            ) or [""]
+            wrapped = wrap_markdown(paragraph, content_width)
             style = "agent_activity" if activity else role
-            lines.extend(("  " + line, style) for line in wrapped)
+            lines.extend((emphasized_join(["  ", line]), style) for line in wrapped)
             index += 1
         message_status = str(record.get("_status") or "")
         if message_status:
@@ -1027,10 +1168,21 @@ def transcript_lines(
                 if not line.strip():
                     continue
                 lines[line_index] = (
-                    "• " + line[2:] if line.startswith("  ") else "• " + line,
+                    emphasized_join(["• ", emphasized_slice(line, 2, len(line))])
+                    if line.startswith("  ") else emphasized_join(["• ", line]),
                     style,
                 )
                 break
+        if record is latest_assistant:
+            timestamp = str(record.get("timestamp") or "")
+            if timestamp:
+                try:
+                    local_time = datetime.fromisoformat(timestamp.replace("Z", "+00:00")).astimezone()
+                except ValueError:
+                    pass
+                else:
+                    lines.append(("", "assistant_gap"))
+                    lines.append(("  " + local_time.strftime("%H:%M:%S"), "muted"))
         lines.append(("", f"{role}_gap"))
     return lines
 
@@ -1099,7 +1251,7 @@ def format_terminal_table(
 ) -> list[tuple[str, str]]:
     column_count = max(len(header), len(separator), *(len(row) for row in rows))
     normalized = [
-        (row + [""] * column_count)[:column_count]
+        [markdown_text(cell.expandtabs()) for cell in (row + [""] * column_count)[:column_count]]
         for row in [header, *rows]
     ]
     widths = terminal_table_widths(normalized, width)
@@ -1119,13 +1271,7 @@ def format_terminal_table(
 
     def rendered_row(cells: list[str], style: str) -> list[tuple[str, str]]:
         wrapped = [
-            textwrap.wrap(
-                cell,
-                width=max(1, column_width),
-                break_long_words=True,
-                break_on_hyphens=True,
-            )
-            or [""]
+            wrap_markdown(cell, max(1, column_width), drop_whitespace=True)
             for cell, column_width in zip(cells, widths)
         ]
         height = max(len(cell_lines) for cell_lines in wrapped)
@@ -1139,14 +1285,17 @@ def format_terminal_table(
                     else ""
                 )
                 alignment = alignments[column_index]
-                if alignment == "right":
-                    value = value.rjust(column_width)
-                elif alignment == "center":
-                    value = value.center(column_width)
-                else:
-                    value = value.ljust(column_width)
+                padding = max(0, column_width - len(value))
+                left = padding if alignment == "right" else padding // 2 if alignment == "center" else 0
+                value = emphasized_join([" " * left, value, " " * (padding - left)])
                 pieces.append(value)
-            result.append(("  │ " + " │ ".join(pieces) + " │", style))
+            parts = ["  │ "]
+            for index, piece in enumerate(pieces):
+                if index:
+                    parts.append(" │ ")
+                parts.append(piece)
+            parts.append(" │")
+            result.append((emphasized_join(parts), style))
         return result
 
     output = [(border("┌", "┬", "┐"), "table_separator")]
@@ -1188,20 +1337,34 @@ def add_text(window: Any, y: int, x: int, text: str, width: int, attr: int = 0) 
         pass
 
 
-def semantic_spans(text: str) -> list[tuple[str, str | None]]:
-    spans: list[tuple[str, str | None]] = []
+def indexed_semantic_spans(text: str, *, table: bool = False, offset: int = 0) -> list[tuple[str, str | None, int]]:
+    spans: list[tuple[str, str | None, int]] = []
+    if table:
+        position = 0
+        for border in re.finditer(r"[|│├┼┤┌┬┐└┴┘]", text):
+            spans.extend(indexed_semantic_spans(text[position:border.start()], offset=offset + position))
+            spans.append((border.group(), "table_border", offset + border.start()))
+            position = border.end()
+        spans.extend(indexed_semantic_spans(text[position:], offset=offset + position))
+        return spans
     position = 0
     for match in SEMANTIC_TOKEN_RE.finditer(text):
         if match.start() > position:
-            spans.append((text[position : match.start()], None))
+            spans.append((text[position : match.start()], None, offset + position))
         value = match.group(0)
+        start = offset + match.start()
         if match.lastgroup == "link" and value.startswith("["):
             value = value[1:-1]
-        spans.append((value, str(match.lastgroup)))
+            start += 1
+        spans.append((value, str(match.lastgroup), start))
         position = match.end()
     if position < len(text):
-        spans.append((text[position:], None))
-    return spans or [(text, None)]
+        spans.append((text[position:], None, offset + position))
+    return spans or [(text, None, offset)]
+
+
+def semantic_spans(text: str) -> list[tuple[str, str | None]]:
+    return [(value, token) for value, token, _ in indexed_semantic_spans(text)]
 
 
 def pygments_token_style(token: Any) -> str:
@@ -1247,13 +1410,7 @@ def display_markdown_links(text: str) -> str:
 
 
 def table_spans(text: str) -> list[tuple[str, str | None]]:
-    spans: list[tuple[str, str | None]] = []
-    for part in re.split(r"([|│├┼┤┌┬┐└┴┘])", text):
-        if part and part in "|│├┼┤┌┬┐└┴┘":
-            spans.append((part, "table_border"))
-        elif part:
-            spans.extend(semantic_spans(part))
-    return spans or [(text, None)]
+    return [(value, token) for value, token, _ in indexed_semantic_spans(text, table=True)]
 
 
 def add_semantic_text(
@@ -1270,28 +1427,30 @@ def add_semantic_text(
 ) -> None:
     remaining = width
     column = x
-    spans = table_spans(text) if table else semantic_spans(text)
-    for value, token in spans:
-        if remaining <= 0:
-            break
-        shown = value[:remaining]
-        add_text(
-            window,
-            y,
-            column,
-            shown,
-            remaining,
-            (
-                palette.get(
-                    token if token.startswith("table_") else f"{syntax_prefix}{token}",
-                    base_attr,
-                )
-                if token
-                else base_attr
-            ),
-        )
-        column += len(shown)
-        remaining -= len(shown)
+    rich = markdown_text(text)
+    for value, token, source_start in indexed_semantic_spans(rich, table=table):
+        attr = (palette.get(token if token.startswith("table_") else f"{syntax_prefix}{token}", base_attr)
+                if token else base_attr)
+        cuts = sorted({0, len(value), *(boundary - source_start
+                       for pair in rich.bold_ranges for boundary in pair
+                       if source_start < boundary < source_start + len(value))})
+        for left, right in zip(cuts, cuts[1:]):
+            if remaining <= 0:
+                return
+            bold = any(start <= source_start + left < end for start, end in rich.bold_ranges)
+            shown = []
+            cells = 0
+            for char in value[left:right]:
+                size = character_cell_width(char)
+                if cells + size > remaining:
+                    break
+                shown.append(char)
+                cells += size
+            add_text(window, y, column, "".join(shown), remaining, attr | (curses.A_BOLD if bold else 0))
+            column += cells
+            remaining -= cells
+            if len(shown) < right - left:
+                return
 
 
 def add_highlighted_code(
@@ -1720,7 +1879,7 @@ def read_bracketed_paste(stdscr: Any) -> str:
                 )
 
 
-def escape_action(stdscr: Any) -> tuple[str, str]:
+def escape_action(stdscr: Any, *, modal: bool = False) -> tuple[str, str]:
     """Distinguish Escape, Alt keys, modified arrows, and paste."""
     try:
         stdscr.timeout(40)
@@ -1737,7 +1896,7 @@ def escape_action(stdscr: Any) -> tuple[str, str]:
             stdscr.timeout(40)
             following = stdscr.get_wch()
         except curses.error:
-            return "cancel", ""
+            return ("stop" if modal else "cancel"), ""
         finally:
             stdscr.timeout(-1)
     # ncurses may already have decoded the arrow following the initial Meta
@@ -1765,7 +1924,7 @@ def escape_action(stdscr: Any) -> tuple[str, str]:
                 if part.isalpha() or part == "~":
                     break
         except curses.error:
-            return "cancel", ""
+            return ("stop" if modal and not suffix.startswith("<") else "cancel"), ""
         finally:
             stdscr.timeout(-1)
         if suffix == "200~":
@@ -1790,6 +1949,8 @@ def escape_action(stdscr: Any) -> tuple[str, str]:
             return "move_agent_down", ""
         if suffix == "1;2D":
             return "agents", ""
+        if suffix == "1;2C":
+            return "conversation", ""
     return "cancel", ""
 
 
@@ -1967,7 +2128,16 @@ def run_console(
     include_local: bool = True,
     relay_config: Path = paths.RELAY_CONFIG_FILE,
     sync_mode: str = "adaptive",
+    peer: str | None = None,
 ) -> int:
+    peer_url = None
+    if peer is not None:
+        selected_peer = relay_transport.load_config(relay_config)["peers"].get(peer)
+        if selected_peer is None:
+            raise ValueError(f"unknown relay peer: {peer}")
+        peer_url = str(selected_peer["url"])
+        include_local = False
+
     def run(stdscr: Any) -> int:
         active_sync_mode = sync_mode
         curses.curs_set(0)
@@ -1997,12 +2167,14 @@ def run_console(
         settings_selected = False
         settings_tab = "sync"
         settings_choice = SYNC_MODES.index(active_sync_mode)
-        settings_choices = {"sync": settings_choice, "agents": 0}
+        settings_tabs = ("sync", "agents", "deliveries")
+        settings_choices = {"sync": settings_choice, "agents": 0, "deliveries": 0}
         scroll = 0
         focus = "conversation"
         maximized = False
         status = ""
         sync_results: dict[tuple[str, str], AutoSyncUpdate] = {}
+        refresh_feedback: dict[tuple[str, str] | None, tuple[str, str]] = {}
         drafts: dict[tuple[str, str], ComposerBuffer] = {}
         outgoing, outbox_by_id = outbox_views(cache)
         auto_sync = AutoSyncWorker(
@@ -2012,10 +2184,35 @@ def run_console(
             control_socket,
             relay_config,
         )
+        delivery_worker = DeliveryWorker(cache, relay_config)
         last_agent: AgentItem | None = None
 
+        def scoped_items() -> list[AgentItem]:
+            return peer_agent_items(cache, items, peer_url)
+
         def visible_items() -> list[AgentItem]:
-            return [item for item in filtered_items(items, query) if agent_selection.visible(selection, item)]
+            return [item for item in filtered_items(scoped_items(), query) if agent_selection.visible(selection, item)]
+
+        def draw_refresh_feedback() -> None:
+            key = agent_item_key(current) if current is not None else None
+            feedback = refresh_feedback.get(key, refresh_feedback.get(None))
+            if feedback is None:
+                return
+            text, style = feedback
+            row = 4 if settings_selected else 3 if current is not None else 1
+            add_text(stdscr, row, main_x + 1, " " * (main_width - 2), main_width - 2, palette["normal"])
+            add_text(stdscr, row, main_x + 2, " ".join(text.split()), main_width - 4, palette[style])
+
+        def show_refresh_feedback(text: str, *, all_agents: bool = False,
+                                  failed: bool = False, completed: bool = False) -> None:
+            if all_agents:
+                refresh_feedback.clear()
+            key = None if all_agents or current is None else agent_item_key(current)
+            if completed:
+                text += " · " + datetime.now().astimezone().strftime("%H:%M:%S")
+            refresh_feedback[key] = (text, "info_sync_error" if failed else "muted")
+            draw_refresh_feedback()
+            stdscr.refresh()
 
         def remember_sync(item: AgentItem | None, error: str = "") -> None:
             key = AutoSyncWorker._item_key(item)
@@ -2031,13 +2228,22 @@ def run_console(
             if settings_tab == "sync":
                 return [("sync", mode, SYNC_MODE_DETAILS[mode], mode == active_sync_mode)
                         for mode in SYNC_MODES]
+            if settings_tab == "deliveries":
+                title = str(last_agent.agent.get("title") or "Untitled") if last_agent else "No conversation selected"
+                scope = "this server" if peer_url is not None else "all servers"
+                return [
+                    ("clear_selected", "Clear failed deliveries for selected conversation",
+                     title + " · Removes failed local messages and receipts.", False),
+                    ("clear_all", f"Clear failed deliveries for {scope}",
+                     "Removes failed local messages and receipts; keeps pending deliveries and conversation history.", False),
+                ]
             return [
                 ("manage", "Choose and order agents…", "Space shows/hides; Alt-Up/Down reorders. Also Ctrl-B.", False),
             ]
 
         def manage_agents(target: AgentItem | None) -> str:
             nonlocal selected, scroll, items, agent_order
-            action = agent_selection_tui.manage(stdscr, palette, selection, items, target)
+            action = agent_selection_tui.manage(stdscr, palette, selection, scoped_items(), target)
             agent_order = [tuple(value) for value in selection["order"]]
             items = agent_selection.ordered(selection, items)
             selected = restored_selection(visible_items(), target)
@@ -2055,7 +2261,30 @@ def run_console(
             except (OSError, RuntimeError, ValueError) as exc:
                 return f"Stop failed: {exc}"
 
+        def may_disconnect() -> bool:
+            if peer_url is None:
+                return True
+            host_id = cache.peer_host_id(peer_url)
+            pending = cache.pending(host_id) if host_id else []
+            return not pending or confirm_pending_disconnect(stdscr, len(pending), palette)
+
+        def idle_without_queued_messages(item: AgentItem | None) -> bool:
+            # Unknown/needs-you states must still take the explicit stop path.
+            if item is not None and item.agent.get("status") != "idle":
+                return False
+            host_id = cache.peer_host_id(peer_url) if peer_url is not None else None
+            if cache.pending(host_id):
+                return False
+            if item is not None:
+                key = (item.host_id, str(item.agent["agent_id"]))
+                receipts = cache.reconcile_message_receipts(*key, cache.records(*key)[-MAX_RECORDS:])
+                if any(not receipt.get("record_key")
+                       and receipt.get("current_delivery") != "failed" for receipt in receipts):
+                    return False
+            return True
+
         def finish() -> int:
+            delivery_worker.close()
             auto_sync.close()
             sys.stdout.write("\x1b[?2004l")
             sys.stdout.flush()
@@ -2089,9 +2318,14 @@ def run_console(
                     break
                 received_update = True
                 sync_results[update.target] = update
-                if update.error and refresh_target is not None and not settings_selected:
-                    if update.target == AutoSyncWorker._item_key(refresh_target):
-                        status = f"Automatic sync failed: {update.error}"
+            while True:
+                try:
+                    delivery_worker.updates.get_nowait()
+                except queue.Empty:
+                    break
+                # Re-read durable receipts even in manual mode. Delivery is
+                # independent of the selected agent and must not steal focus.
+                received_update = True
             if received_update:
                 items = all_agent_items(
                     cache,
@@ -2118,7 +2352,9 @@ def run_console(
                 add_text(stdscr, 1, 2, "Agent Console needs a terminal at least 60×10.", width - 4, palette["status"])
                 stdscr.refresh()
                 key = stdscr.getch()
-                if requests_console_exit(key):
+                if requests_console_exit(key) and may_disconnect():
+                    return finish()
+                if key == 3 and idle_without_queued_messages(current) and may_disconnect():
                     return finish()
                 if key in (3, 7):
                     status = request_stop(current)
@@ -2145,7 +2381,7 @@ def run_console(
                         0,
                         sidebar,
                         curses.ACS_VLINE,
-                        height - 1,
+                        height,
                         palette["divider"],
                     )
                 except curses.error:
@@ -2195,8 +2431,9 @@ def run_console(
                     palette["path"],
                 )
                 row += 1
-                chosen_count = sum(agent_selection.visible(selection, item) for item in items)
-                add_text(stdscr, row, 4, f"Agents: {chosen_count}/{len(items)}", sidebar - 5, palette["path"])
+                scoped = scoped_items()
+                chosen_count = sum(agent_selection.visible(selection, item) for item in scoped)
+                add_text(stdscr, row, 4, f"Agents: {chosen_count}/{len(scoped)}", sidebar - 5, palette["path"])
                 row += 2
                 visible_start = max(0, selected - max(0, (height - 10) // 3))
                 for index, item in enumerate(shown[visible_start:], visible_start):
@@ -2295,8 +2532,9 @@ def run_console(
                     main_width - 4,
                     heading,
                 )
-                detail = status or ("Synchronization preferences" if settings_tab == "sync"
-                                    else "Choose visible agents and their order")
+                detail = status or {"sync": "Synchronization preferences",
+                                    "agents": "Choose visible agents and their order",
+                                    "deliveries": "Clear permanently failed deliveries from the local cache"}[settings_tab]
                 add_text(
                     stdscr,
                     1,
@@ -2306,7 +2544,7 @@ def run_console(
                     palette["muted"],
                 )
                 tab_x = main_x + 2
-                for tab in ("sync", "agents"):
+                for tab in settings_tabs:
                     label = f" {tab.capitalize()} "
                     attr = ((palette["selected"] | curses.A_BOLD) if tab == settings_tab
                             else palette["muted"])
@@ -2432,13 +2670,13 @@ def run_console(
                 composer_width = max(1, main_width - 7)
                 composer_lines, _ = composer_layout(draft.text, composer_width)
                 composer_rows = composer_visible_rows(len(composer_lines), height) + 2
-                composer_top = max(3, height - composer_rows)
-                viewport = max(0, composer_top - 3)
+                composer_top = max(4, height - composer_rows)
+                viewport = max(0, composer_top - 4)
                 max_scroll = max(0, len(rendered) - viewport)
                 scroll = min(scroll, max_scroll)
                 start = max(0, len(rendered) - viewport - scroll)
                 for offset, (line, style) in enumerate(rendered[start : start + viewport]):
-                    y = 3 + offset
+                    y = 4 + offset
                     if style in {"user", "message_status"}:
                         add_text(
                             stdscr,
@@ -2493,7 +2731,7 @@ def run_console(
                             palette.get(style, 0),
                         )
                 if not rendered:
-                    add_text(stdscr, 3, main_x + 2, "No renderable messages.", main_width - 4, palette["muted"])
+                    add_text(stdscr, 4, main_x + 2, "No renderable messages.", main_width - 4, palette["muted"])
                 draw_composer(
                     stdscr,
                     palette,
@@ -2519,6 +2757,7 @@ def run_console(
                     palette["muted"],
                 )
 
+            draw_refresh_feedback()
             if not current and not settings_selected:
                 footer = status or "No agent selected · ^B choose agents · ^F find · ^S sync all · ^D quit"
                 add_text(stdscr, height - 1, 1, footer, width - 2, palette["status"])
@@ -2548,7 +2787,9 @@ def run_console(
                 stdscr.clearok(True)
                 continue
             if requests_console_exit(code if code is not None else -1):
-                return finish()
+                if may_disconnect():
+                    return finish()
+                continue
             extended_key = terminal_key_name(key)
             if code == 27 or extended_key in {"kUP3", "kDN3", "kUP9", "kDN9", "kUP4", "kDN4"}:
                 if code == 27:
@@ -2564,7 +2805,11 @@ def run_console(
                     }[extended_key]
                     pasted = ""
                 if action == "stop":
-                    status = request_stop(current)
+                    if settings_selected:
+                        settings_selected = False
+                        focus = "conversation"
+                    else:
+                        status = request_stop(current)
                 elif action in {"scroll_up", "scroll_down"}:
                     if current and not settings_selected:
                         focus = "conversation"
@@ -2600,6 +2845,8 @@ def run_console(
                         selected = restored_selection(
                             visible_items(), current
                         )
+                elif action == "conversation" and (current is not None or settings_selected):
+                    focus = "conversation"
                 elif current and focus == "conversation":
                     draft_key = (
                         current.host_id,
@@ -2626,7 +2873,7 @@ def run_console(
                         focus = "agents"
                 continue
             if code == 2:  # Ctrl-B: choose available agents and reorder them.
-                if manage_agents(current or last_agent) == "exit":
+                if manage_agents(current or last_agent) == "exit" and may_disconnect():
                     return finish()
             elif code == curses.KEY_BTAB or (
                 code == 9 and not (
@@ -2650,7 +2897,7 @@ def run_console(
                     focus = "conversation"
                     scroll = max(0, min(max_scroll, scroll + delta))
             elif (
-                code in (curses.KEY_RIGHT, 13, curses.KEY_ENTER)
+                code in (curses.KEY_RIGHT, curses.KEY_SRIGHT, 13, curses.KEY_ENTER)
                 and focus == "agents"
             ):
                 focus = "conversation"
@@ -2663,8 +2910,13 @@ def run_console(
             ):
                 if code in (curses.KEY_LEFT, curses.KEY_RIGHT):
                     settings_choices[settings_tab] = settings_choice
-                    settings_tab = "sync" if code == curses.KEY_LEFT else "agents"
-                    settings_choice = min(settings_choices[settings_tab], len(settings_options()) - 1)
+                    if code == curses.KEY_LEFT and settings_tab == "sync":
+                        focus = "agents"
+                    else:
+                        tab_index = settings_tabs.index(settings_tab)
+                        settings_tab = settings_tabs[min(len(settings_tabs) - 1,
+                                                        tab_index + (-1 if code == curses.KEY_LEFT else 1))]
+                        settings_choice = min(settings_choices[settings_tab], len(settings_options()) - 1)
                 elif code in (curses.KEY_UP, curses.KEY_DOWN):
                     settings_choice = max(
                         0,
@@ -2683,8 +2935,22 @@ def run_console(
                             auto_sync.select(None, active_sync_mode)
                             status = f"Automatic sync set to {name}."
                         elif kind == "manage":
-                            if manage_agents(last_agent) == "exit":
+                            if manage_agents(last_agent) == "exit" and may_disconnect():
                                 return finish()
+                        elif kind in {"clear_selected", "clear_all"}:
+                            if kind == "clear_selected" and last_agent is None:
+                                status = "No conversation selected."
+                            else:
+                                host_id = (last_agent.host_id if kind == "clear_selected"
+                                           else cache.peer_host_id(peer_url) if peer_url is not None else None)
+                                if peer_url is not None and host_id is None:
+                                    status = "No cached server; nothing to clear."
+                                else:
+                                    count = cache.clear_failed_deliveries(
+                                        host_id, str(last_agent.agent["agent_id"]) if kind == "clear_selected" else None,
+                                    )
+                                    outgoing, outbox_by_id = outbox_views(cache)
+                                    status = f"Cleared {count} failed delivery record(s)."
                     except (OSError, ValueError) as exc:
                         status = f"Could not save setting: {exc}"
             elif code == curses.KEY_LEFT and focus == "conversation" and current:
@@ -2726,6 +2992,8 @@ def run_console(
                 focus = "conversation"
                 scroll = max(0, scroll - max(1, height - 7))
             elif code in (3, 7):  # Ctrl-C / Ctrl-G
+                if code == 3 and idle_without_queued_messages(current) and may_disconnect():
+                    return finish()
                 status = request_stop(current)
             elif code == 6:  # Ctrl-F
                 entered = edit_line(stdscr, "Find: ", query)
@@ -2750,10 +3018,12 @@ def run_console(
             elif code == 24:  # Ctrl-X
                 focus, maximized = change_pane(focus, maximized, ord("m"))
             elif code == 18:  # Ctrl-R
-                show_status(stdscr, "Refreshing conversation…", palette["status"])
+                show_refresh_feedback("Refreshing conversation…")
+                refresh_failed = False
                 try:
                     if current is None:
                         status = "No conversation selected."
+                        refresh_failed = True
                     elif current.host_id == "local":
                         refreshed = relay_cache.refresh_local_agent(
                             cache,
@@ -2778,6 +3048,7 @@ def run_console(
                             str(current.agent["agent_id"]),
                         )
                         remember_sync(current, "" if host_name else "Remote session is no longer active")
+                        refresh_failed = not host_name
                         status = (
                             f"Refreshed conversation from {host_name}."
                             if host_name
@@ -2798,8 +3069,12 @@ def run_console(
                 except (OSError, RuntimeError, ValueError) as exc:
                     remember_sync(current, str(exc))
                     status = f"Refresh failed: {exc}"
+                    refresh_failed = True
+                show_refresh_feedback(status, failed=refresh_failed, completed=True)
+                status = ""
             elif code == 19:  # Ctrl-S
-                show_status(stdscr, "Refreshing everything…", palette["status"])
+                show_refresh_feedback("Refreshing everything…", all_agents=True)
+                refresh_failed = False
                 try:
                     failures = []
                     local_count = None
@@ -2817,7 +3092,7 @@ def run_console(
                             failures.append(f"local: {exc}")
                     if relay_config.expanduser().exists():
                         config = relay_transport.load_config(relay_config)
-                        peer_names = sorted(config["peers"])
+                        peer_names = [peer] if peer is not None else sorted(config["peers"])
                     else:
                         config = {"peers": {}}
                         peer_names = []
@@ -2866,6 +3141,7 @@ def run_console(
                         status += f" Messages: {delivery_text}."
                     if failures:
                         status += " Failed: " + "; ".join(failures)
+                        refresh_failed = True
                     items = all_agent_items(
                         cache,
                         include_local=include_local,
@@ -2878,6 +3154,9 @@ def run_console(
                 except (OSError, RuntimeError, ValueError) as exc:
                     remember_sync(current, str(exc))
                     status = f"Synchronization failed: {exc}"
+                    refresh_failed = True
+                show_refresh_feedback(status, all_agents=True, failed=refresh_failed, completed=True)
+                status = ""
             elif current and focus == "conversation":
                 draft_key = (current.host_id, str(current.agent["agent_id"]))
                 draft = drafts.setdefault(draft_key, ComposerBuffer())
@@ -2908,44 +3187,24 @@ def run_console(
                         if result.get("start_error"):
                             status = "Message queued, but could not start: " + result["start_error"]
                         if result["delivery"] == "queued":
-                            try:
-                                config = relay_transport.load_config(relay_config)
-                                peer_name = peer_name_for_item(config, current)
-                                if peer_name is not None:
-                                    peer = config["peers"][peer_name]
-                                    relay_transport.deliver_pending(
-                                        cache, peer, current.host_id
-                                    )
-                                queued = outbox_message(
-                                    cache, result["message_id"]
-                                )
-                                if queued and queued["state"] == "delivered":
-                                    status = "Message delivered to remote Codex queue."
-                                    if queued.get("last_error"):
-                                        status = "Message queued, but could not start: " + str(queued["last_error"])
-                                elif queued and queued["state"] == "failed":
-                                    status = (
-                                        "Remote delivery failed: "
-                                        + str(queued.get("last_error") or "unknown error")
-                                    )
-                                else:
-                                    status = (
-                                        "Message safely queued offline; "
-                                        "Ctrl-R or Ctrl-S will retry."
-                                    )
-                            except (OSError, RuntimeError, ValueError):
-                                status = (
-                                    "Message safely queued offline; "
-                                    "Ctrl-R or Ctrl-S will retry."
-                                )
+                            delivery_worker.submit(current)
                             outgoing, outbox_by_id = outbox_views(cache)
                     except (OSError, RuntimeError, ValueError) as exc:
                         status = f"Send failed: {exc}"
         return 0
 
+    previous_escape_delay = None
+    try:
+        original_escape_delay = curses.get_escdelay()
+        curses.set_escdelay(50)
+        previous_escape_delay = original_escape_delay
+    except (AttributeError, curses.error):
+        pass  # Older curses implementations may not expose this setting.
     try:
         return int(curses.wrapper(run))
     finally:
+        if previous_escape_delay is not None:
+            curses.set_escdelay(previous_escape_delay)
         # Restore the terminal even if the console raises unexpectedly.
         sequence = mouse_protocol_sequence(False)
         if sequence:
@@ -2955,7 +3214,7 @@ def run_console(
 
 def command_ui(args: argparse.Namespace) -> int:
     cache = relay_cache.RelayCache(args.cache_file)
-    no_local = getattr(args, "no_local", False)
+    no_local = getattr(args, "no_local", False) or bool(getattr(args, "peer", None))
     sync_mode = getattr(args, "sync", None) or str(
         user_config.value("agents.sync_mode")
     )
@@ -2982,6 +3241,7 @@ def command_ui(args: argparse.Namespace) -> int:
                 args, "relay_config", paths.RELAY_CONFIG_FILE
             ),
             sync_mode=sync_mode,
+            peer=getattr(args, "peer", None),
         )
     except curses.error as exc:
         print(f"error: could not start Agent Console: {exc}", file=sys.stderr)
