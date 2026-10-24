@@ -34,6 +34,7 @@ from codex_tools import (
     config as user_config,
     paths,
     relay_cache,
+    relay_traffic,
     relay_transport,
     search,
 )
@@ -2138,6 +2139,8 @@ def run_console(
         peer_url = str(selected_peer["url"])
         include_local = False
 
+    traffic = relay_traffic.SessionTraffic(relay_traffic.enable(cache.path), peer_url)
+
     def run(stdscr: Any) -> int:
         active_sync_mode = sync_mode
         curses.curs_set(0)
@@ -2544,17 +2547,21 @@ def run_console(
                     palette["muted"],
                 )
                 tab_x = main_x + 2
+                add_text(stdscr, 2, main_x + 2, traffic.summary(), main_width - 4,
+                         palette["muted"])
+                add_text(stdscr, 3, main_x + 2, traffic.details(), main_width - 4,
+                         palette["muted"])
                 for tab in settings_tabs:
                     label = f" {tab.capitalize()} "
                     attr = ((palette["selected"] | curses.A_BOLD) if tab == settings_tab
                             else palette["muted"])
-                    add_text(stdscr, 3, tab_x, label, min(len(label), width - tab_x - 1), attr)
+                    add_text(stdscr, 5, tab_x, label, min(len(label), width - tab_x - 1), attr)
                     tab_x += len(label) + 2
                 options = settings_options()
                 settings_choice = min(settings_choice, len(options) - 1)
-                visible_count = max(1, (height - 6) // 3)
+                visible_count = max(1, (height - 8) // 3)
                 first_option = max(0, settings_choice - visible_count + 1)
-                row = 5
+                row = 7
                 for index in range(first_option, min(len(options), first_option + visible_count)):
                     kind, name, description, chosen = options[index]
                     highlighted = (

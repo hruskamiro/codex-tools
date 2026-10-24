@@ -169,7 +169,28 @@ class ConsoleSelectionTests(unittest.TestCase):
                                         agent_status="idle")
         self.assertEqual(stop.call_count, 2)
 
+    def test_transfer_meter_is_scoped_and_only_drawn_in_settings(self):
+        with patch.object(agents_tui.relay_traffic, "enable", return_value=None), \
+             patch.object(agents_tui.relay_traffic, "SessionTraffic") as meter, \
+             patch.object(agents_tui, "add_text", wraps=agents_tui.add_text) as draw:
+            meter.return_value.summary.return_value = "Relay data: down 2 KiB / up 1 KiB"
+            meter.return_value.details.return_value = "Console/sync: 1 KiB | Viewer/files: 2 KiB"
+            self.run_console(["\t", agents_tui.curses.KEY_UP, "\x04"], peer="chosen")
+        meter.assert_called_once_with(None, "http://127.0.0.1:18781")
+        labels = [call.args[3] for call in draw.call_args_list]
+        self.assertEqual(labels.count("Relay data: down 2 KiB / up 1 KiB"), 1)
+        self.assertEqual(labels.count("Console/sync: 1 KiB | Viewer/files: 2 KiB"), 1)
 
+    def test_settings_leave_an_empty_line_above_tabs(self):
+        with patch.object(agents_tui, "add_text", wraps=agents_tui.add_text) as draw:
+            self.run_console(["\t", agents_tui.curses.KEY_UP, "\x04"])
+        tabs = [call for call in draw.call_args_list if call.args[3] == " Sync "]
+        self.assertEqual(len(tabs), 1)
+        self.assertEqual(tabs[0].args[1], 5)
+        settings_start = max(index for index, call in enumerate(draw.call_args_list)
+                             if call.args[3] == "Settings" and call.args[2] > 36)
+        self.assertFalse(any(call.args[1] == 4 and call.args[2] > 36
+                             for call in draw.call_args_list[settings_start:]))
 
     def test_conversation_leaves_an_empty_line_after_status_panel(self):
         with patch.object(agents_tui, "transcript_lines", return_value=[("Hello", "assistant")]), \

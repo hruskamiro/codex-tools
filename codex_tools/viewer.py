@@ -34,6 +34,7 @@ from codex_tools import (
     config,
     paths,
     relay_cache,
+    relay_traffic,
     relay_transport,
     typeset,
 )
@@ -770,7 +771,8 @@ def refresh_relay_agent(
 ) -> str | None:
     _, peer = relay_peer_for_host(state, host_id)
     try:
-        payload = relay_transport.fetch_agent(peer, agent_id)
+        with relay_traffic.category("viewer"):
+            payload = relay_transport.fetch_agent(peer, agent_id)
     except HTTPError as exc:
         if exc.code == HTTPStatus.NOT_FOUND:
             return "Remote session is no longer active; showing cached copy"
@@ -1772,6 +1774,7 @@ def server_state_from_args(args: argparse.Namespace) -> ViewerState:
 
 def run_server(args: argparse.Namespace) -> int:
     state = server_state_from_args(args)
+    relay_traffic.enable(state.relay_cache.path)
     server = ThreadingHTTPServer((args.host, args.port), make_handler(state))
     url = viewer_url(args.host, args.port)
     print(f"Codex conversation viewer: {url}")

@@ -233,6 +233,20 @@ the sidebar. **Left** from the first (**Sync**) tab also returns to the sidebar.
 **Agents** opens the same simple chooser. Preferences apply on
 future console starts, including `ct-connect console PROFILE`.
 
+Settings also shows approximate downloaded/uploaded relay payload bytes
+since opening this console, with separate **Console/sync** and **Viewer/files**
+totals and a combined total. Viewer traffic includes remote conversation refreshes,
+typeset PDFs, and attachments. Serving an already cached file locally does not
+count as another transfer. A profiled console counts only its selected route;
+an unscoped console counts all routes. Background SSH-supervisor sync and message
+delivery are included once that supervisor has been restarted with this version.
+Concurrent consoles using the same route share its traffic. This is not an SSH
+wire counter: HTTP/SSH headers, encryption, retransmissions, failed requests,
+and bootstrap traffic before the console opens are excluded. Locally generated
+PDFs and external websites/assets fetched directly by the browser are not counted.
+Restart the viewer and reopen the console after upgrading to enable both categories.
+Totals reset for each console launch; no message contents or credentials are logged.
+
 The first item in the agent pane opens **Settings**. The **Sync** tab's mode
 applies immediately and is saved as `agents.sync_mode` in the regular Codex
 Tools configuration:

@@ -23,7 +23,7 @@ from urllib.error import HTTPError
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
-from codex_tools import attachments, paths, relay_cache, search, typeset
+from codex_tools import attachments, paths, relay_cache, relay_traffic, search, typeset
 
 
 PROTOCOL_VERSION = 1
@@ -696,6 +696,7 @@ def fetch_attachment(
         body = response.read(MAX_ATTACHMENT_BYTES + 1)
         content_type = str(response.headers.get("Content-Type") or "")
         suffix = str(response.headers.get("X-Codex-Attachment-Suffix") or "").lower()
+    relay_traffic.record(str(peer["url"]), downloaded=len(body), category="viewer")
     if len(body) > MAX_ATTACHMENT_BYTES:
         raise ValueError("relay attachment exceeds the 128 MiB safety limit")
     expected = attachments.ATTACHMENT_TYPES.get(suffix)
@@ -736,6 +737,7 @@ def fetch_typeset(
             if int(response.headers.get("Content-Length") or 0) > MAX_TYPESET_BYTES:
                 raise ValueError("relay typeset PDF exceeds the 32 MiB safety limit")
             body = response.read(MAX_TYPESET_BYTES + 1)
+        relay_traffic.record(str(peer["url"]), downloaded=len(body), category="viewer")
     except HTTPError as exc:
         try:
             detail = str(json.loads(exc.read(8192)).get("error") or exc.reason)
@@ -832,6 +834,7 @@ def fetch_json(
         context = ssl.create_default_context(cafile=peer.get("ca_file") or None)
     with urlopen(request, timeout=timeout, context=context) as response:
         body = response.read(MAX_SNAPSHOT_BYTES + 1)
+    relay_traffic.record(str(peer["url"]), downloaded=len(body))
     if len(body) > MAX_SNAPSHOT_BYTES:
         raise ValueError("relay snapshot exceeds the 32 MiB safety limit")
     payload = json.loads(body)
@@ -861,6 +864,7 @@ def post_message(
         context = ssl.create_default_context(cafile=peer.get("ca_file") or None)
     with urlopen(request, timeout=timeout, context=context) as response:
         response_body = response.read(MAX_MESSAGE_BYTES + 1)
+    relay_traffic.record(str(peer["url"]), uploaded=len(body), downloaded=len(response_body))
     if len(response_body) > MAX_MESSAGE_BYTES:
         raise ValueError("relay response exceeds the 128 KiB safety limit")
     payload = json.loads(response_body)
@@ -889,6 +893,7 @@ def interrupt_agent(
         context = ssl.create_default_context(cafile=peer.get("ca_file") or None)
     with urlopen(request, timeout=timeout, context=context) as response:
         response_body = response.read(MAX_MESSAGE_BYTES + 1)
+    relay_traffic.record(str(peer["url"]), uploaded=2, downloaded=len(response_body))
     if len(response_body) > MAX_MESSAGE_BYTES:
         raise ValueError("relay response exceeds the 128 KiB safety limit")
     payload = json.loads(response_body)

@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
-from codex_tools import paths, relay_cache, relay_transport
+from codex_tools import paths, relay_cache, relay_traffic, relay_transport
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
@@ -92,6 +92,7 @@ class TunnelSupervisor:
         self.command = command
         self.peer = peer
         self.cache = cache
+        relay_traffic.enable(cache.path)
         self.directory = directory
         self.interval = interval
         self.announce = announce
