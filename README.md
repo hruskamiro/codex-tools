@@ -391,7 +391,7 @@ home-network-only IP address.
 Remote auto-start is opt-in per connection. Save it on the Mac with:
 
 ```bash
-ct-connect start desktop --auto-start --remote-bin /home/hruskam/.local/bin/ct
+ct-connect start desktop --auto-start --remote-bin /home/example/.local/bin/ct
 ct-connect status desktop
 ct-connect start desktop --no-auto-start  # turn it off again
 ```
@@ -688,6 +688,17 @@ codex-manager import work.codex-profile \
 Import uses the embedded profile name unless `--name` is supplied. Without
 `--isolated`, an auth-only import shares the destination machine's default
 conversations. A bundle that includes conversations restores them privately.
+To refresh a login when the destination profile already exists:
+
+```bash
+codex-tools manager import work.codex-profile --force
+```
+
+`--force` updates credentials and any bundled configuration, preserving the
+existing conversation store and sharing settings. If the bundle has no config,
+existing settings are retained with file-backed authentication enabled. To
+restore bundled conversations or change isolation, import under a new `--name`.
+
 Export currently supports file-backed `auth.json` credentials, not credentials
 stored only in an OS keyring.
 

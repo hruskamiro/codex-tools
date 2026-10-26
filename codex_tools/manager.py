@@ -607,6 +607,49 @@ def command_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def args_for_install(args: argparse.Namespace, name: str) -> argparse.Namespace:
+    return argparse.Namespace(
+        manager_root=args.manager_root,
+        default_home=args.default_home,
+        name=name,
+        bin_dir=args.bin_dir,
+        wrapper_name=args.wrapper_name,
+        codex_binary=args.codex_binary,
+        force=False,
+    )
+
+
+def update_profile_login(archive: zipfile.ZipFile, home: Path) -> None:
+    """Stage imported files and roll back configuration if login replacement fails."""
+    for name in ("auth.json", "config.toml"):
+        target = home / name
+        if target.is_symlink() or (target.exists() and not target.is_file()):
+            raise ValueError(f"refusing to replace non-regular profile file: {target}")
+    with tempfile.TemporaryDirectory(prefix=".profile-import-", dir=home) as temporary:
+        stage = Path(temporary)
+        write_zip_member(archive, "profile/auth.json", stage / "auth.json")
+        config = home / "config.toml"
+        had_config = config.exists()
+        backup = stage / "config.backup"
+        if had_config:
+            shutil.copyfile(config, backup)
+            backup.chmod(0o600)
+        if "profile/config.toml" in archive.namelist():
+            write_zip_member(archive, "profile/config.toml", stage / "config.toml")
+        elif had_config:
+            shutil.copyfile(config, stage / "config.toml")
+        force_file_auth_store(stage / "config.toml")
+        os.replace(stage / "config.toml", config)
+        try:
+            os.replace(stage / "auth.json", home / "auth.json")
+        except Exception:
+            if had_config:
+                os.replace(backup, config)
+            else:
+                config.unlink()
+            raise
+
+
 def command_import(args: argparse.Namespace) -> int:
     source = args.bundle.expanduser().resolve()
     if not source.is_file():
@@ -633,8 +676,12 @@ def command_import(args: argparse.Namespace) -> int:
                     "use --name to create a managed profile"
                 )
             target_profile = profile_dir(root, name)
-            if target_profile.exists():
-                raise FileExistsError(f"profile already exists: {name}")
+            existing = target_profile.exists()
+            if existing and not args.force:
+                raise ValueError(
+                    f"profile already exists: {name}; use --force to update its login "
+                    "and configuration, or --name to import a separate profile"
+                )
             if args.install:
                 wrapper_name = args.wrapper_name or default_wrapper_name(name)
                 wrapper = args.bin_dir.expanduser().resolve() / wrapper_name
@@ -643,6 +690,21 @@ def command_import(args: argparse.Namespace) -> int:
 
             includes = manifest["includes"]
             has_conversations = bool(includes.get("conversations"))
+            if existing:
+                if has_conversations or args.isolated:
+                    raise ValueError(
+                        "updating an existing profile preserves its conversation store; "
+                        "omit --isolated and use a bundle without conversations, "
+                        "or use --name to import a separate profile"
+                    )
+                profile = load_profile(root, name, default)
+                update_profile_login(archive, home_from_profile(profile))
+                print(f"Updated profile {name}")
+                print("Conversations: existing store preserved")
+                if args.install:
+                    return command_install(args_for_install(args, name))
+                return 0
+
             private_store = has_conversations or args.isolated
             store = store_dir(root, name) if private_store else default
             if private_store and store.exists():
@@ -694,16 +756,7 @@ def command_import(args: argparse.Namespace) -> int:
         print("Conversations: shared with default")
 
     if args.install:
-        install_args = argparse.Namespace(
-            manager_root=args.manager_root,
-            default_home=args.default_home,
-            name=name,
-            bin_dir=args.bin_dir,
-            wrapper_name=args.wrapper_name,
-            codex_binary=args.codex_binary,
-            force=False,
-        )
-        return command_install(install_args)
+        return command_install(args_for_install(args, name))
     return 0
 
 
@@ -1230,6 +1283,11 @@ def build_parser(prog: str = "codex-manager") -> argparse.ArgumentParser:
     import_cmd = sub.add_parser("import", help="Import an encrypted profile bundle.")
     import_cmd.add_argument("bundle", type=Path)
     import_cmd.add_argument(
+        "--force",
+        action="store_true",
+        help="Update an existing profile's login and bundled config; preserve conversations.",
+    )
+    import_cmd.add_argument(
         "--name", type=valid_name, help="Rename the imported profile."
     )
     import_cmd.add_argument(
@@ -1344,7 +1402,7 @@ def main(argv: list[str] | None = None, *, prog: str = "codex-manager") -> int:
     normalize_remainder(args)
     try:
         return int(args.func(args))
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, FileExistsError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except json.JSONDecodeError as exc:
