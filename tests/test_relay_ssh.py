@@ -12,10 +12,10 @@ from codex_tools import relay, relay_ssh
 
 class RelaySshTests(unittest.TestCase):
     def test_remote_bootstrap_quotes_executable_and_supports_ssh_aliases(self):
-        command = relay_ssh.bootstrap_command("ufront-through-a370", 8781, "/a path/ct;not-a-shell-command")
+        command = relay_ssh.bootstrap_command("destination-via-jump", 8781, "/a path/ct;not-a-shell-command")
         self.assertNotIn("-N", command)
         self.assertNotIn("-L", command)
-        self.assertEqual(command[-2], "ufront-through-a370")
+        self.assertEqual(command[-2], "destination-via-jump")
         self.assertEqual(shlex.split(command[-1]), ["/a path/ct;not-a-shell-command", "relay", "ensure", "--port", "8781", "--json"])
         for path in ("", "-options", "ct\nother", "ct\x00other"):
             with self.assertRaises(ValueError):
