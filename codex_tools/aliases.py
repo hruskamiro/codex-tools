@@ -20,7 +20,7 @@ _codex_tools_completion() {
   local cur prev words cword
   _init_completion -n : || return
 
-  local commands="activity agents search summary viewer manager relay voice alias structured config diagnose"
+  local commands="activity agents search summary viewer manager relay voice connect alias structured config diagnose"
   local agents_commands="list show send stop ui"
   local summary_commands="today yesterday day week model site clean"
   local viewer_commands="serve start restart stop status open pick doctor"
@@ -39,6 +39,9 @@ _codex_tools_completion() {
   fi
 
   case "${words[1]}" in
+    connect)
+      [[ ${cword} -eq 2 ]] && COMPREPLY=( $(compgen -W "pair-phone" -- "${cur}") )
+      ;;
     agents)
       [[ ${cword} -eq 2 ]] && COMPREPLY=( $(compgen -W "${agents_commands}" -- "${cur}") )
       ;;

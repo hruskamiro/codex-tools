@@ -84,7 +84,7 @@ class AliasTests(unittest.TestCase):
 
     def test_completion_covers_current_command_groups(self) -> None:
         expected = {
-            "activity agents search summary viewer manager relay voice alias structured config diagnose",
+            "activity agents search summary viewer manager relay voice connect alias structured config diagnose",
             "list show send stop ui",
             "today yesterday day week model site clean",
             "serve start restart stop status open pick doctor",
@@ -100,6 +100,7 @@ class AliasTests(unittest.TestCase):
 
         for commands in expected:
             self.assertIn(f'="{commands}"', aliases.COMPLETION_SCRIPT)
+        self.assertIn('compgen -W "pair-phone"', aliases.COMPLETION_SCRIPT)
         self.assertIn(
             "complete -F _codex_tools_completion ct codex-tools",
             aliases.COMPLETION_SCRIPT,

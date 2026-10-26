@@ -31,6 +31,7 @@ Commands:
   manager     Manage isolated Codex profiles.
   relay       Manage resilient agent synchronization and its local cache.
   voice       Configure optional Whisper transcription and durable voice jobs.
+  connect     Pair a phone and authorize its SSH key with one QR invitation.
   alias       Install or remove the short ct alias.
   structured  Run structured tasks and manage their connections.
   config      Inspect or change per-user defaults.
@@ -84,6 +85,10 @@ def main(argv: list[str] | None = None) -> int:
         return manager.main(rest, prog="codex-tools manager")
     if command == "relay":
         return relay.main(rest)
+    if command == "connect":
+        from codex_tools import phone_pairing
+
+        return phone_pairing.main(rest)
     if command == "voice":
         from codex_tools import voice
 
