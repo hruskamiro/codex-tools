@@ -577,7 +577,7 @@ class AgentTuiTests(unittest.TestCase):
         )
 
     def test_path_compaction_preserves_the_end(self) -> None:
-        path = "/home/hruskam/projects/codex-tools"
+        path = "/home/example/projects/codex-tools"
 
         compacted = agents_tui.compact_path_end(path, 22)
 
@@ -587,7 +587,7 @@ class AgentTuiTests(unittest.TestCase):
         self.assertEqual(agents_tui.compact_path_end("/work/app", 20), "/work/app")
 
     def test_path_compaction_never_shows_partial_directory_names(self) -> None:
-        path = "/home/hruskam/projects/codex-tools"
+        path = "/home/example/projects/codex-tools"
 
         self.assertEqual(
             agents_tui.compact_path_end(path, 18),
