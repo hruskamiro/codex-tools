@@ -488,6 +488,20 @@ def parser():
     commands = result.add_subparsers(dest='command', required=True)
     commands.add_parser('init', help='Create the independent voice identity and pairing key, once.')
     commands.add_parser('token', help='Print the voice pairing key for the mobile app.')
+    pairing = commands.add_parser('pair-phone', help='Pair a phone with this voice server through a separate QR invitation.')
+    pairing.add_argument('profile', nargs='?', default='voice', help='Saved ct-connect profile name, SSH alias, or local profile name.')
+    pairing.add_argument('--ssh', help='Override the SSH destination alias.')
+    pairing.add_argument('--remote-port', type=int, help='Voice job port on the SSH destination (default 8790).')
+    pairing.add_argument('--remote-bin', help='Remote ct executable.')
+    pairing.add_argument('--remote-state-dir', help='Absolute voice state directory on the SSH destination.')
+    pairing.add_argument('--local', action='store_true', help='Voice runs on this computer; no SSH to self is needed.')
+    pairing.add_argument('--ssh-port', type=int, default=22, help='This computer’s SSH port (with --local).')
+    pairing.add_argument('--state-dir', dest='pairing_state_dir', type=Path,
+                         help='Local voice state directory (with --local).')
+    pairing.add_argument('--address', required=True, help='This computer’s address reachable from the phone.')
+    pairing.add_argument('--bind', default='0.0.0.0', help='Temporary pairing listener.')
+    pairing.add_argument('--port', type=int, default=0, help='Temporary pairing port.')
+    pairing.add_argument('--output', type=Path, help='Save the invitation QR as SVG.')
     configure = commands.add_parser('configure', help='Locate whisper-server and save optional engine settings.')
     configure.add_argument('--interactive', action='store_true', help='Open the guided setup even when standard input is redirected.')
     mode = configure.add_mutually_exclusive_group()
@@ -533,7 +547,18 @@ def parser():
 
 
 def main(argv=None):
+    if argv is None:
+        argv = sys.argv[1:]
+    if argv and argv[0] == 'pair-phone':
+        from codex_tools import phone_pairing
+        return phone_pairing.main(argv, service='voice')
     args = parser().parse_args(argv)
+    if args.command == 'pair-phone':
+        from codex_tools import phone_pairing
+        forwarded = list(argv[argv.index('pair-phone'):])
+        if args.state_dir is not None and args.pairing_state_dir is None:
+            forwarded.extend(['--state-dir', str(args.state_dir)])
+        return phone_pairing.main(forwarded, service='voice')
     root = (args.state_dir or default_state_dir()).expanduser().absolute()
     try:
         if args.command == 'init':
