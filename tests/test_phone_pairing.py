@@ -145,12 +145,26 @@ class PairingTests(unittest.TestCase):
                 patch.object(p, 'ssh_route', return_value=route), patch.object(p, 'run', side_effect=[key, key, 'token']):
             bundle, token, exported_route = p.prepare('destination-via-jump')
         self.assertEqual(token, 'token')
+        self.assertFalse(bundle['profile']['autoStartRelay'])
         self.assertEqual(exported_route, route)
         self.assertEqual(bundle['profile']['sshHostId'], bundle['hosts'][1]['id'])
         self.assertEqual(bundle['profile']['jumpHostIds'], [bundle['hosts'][0]['id']])
         self.assertEqual(bundle['hosts'][1]['port'], 2222)
         self.assertNotIn('token', json.dumps(bundle))
         self.assertNotIn('privateKey', json.dumps(bundle))
+
+    def test_relay_pairing_preserves_only_explicit_client_startup_choice(self):
+        key, _ = phone(p.PairingState({}, ''))
+        route = [('destination', dict(hostname='192.0.2.2', user='remote', port='22'))]
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / 'ssh-launcher.json').write_text(json.dumps({'connections': {'example': {'auto_start': enabled}}}))
+                with (patch.object(p.paths, 'user_config_dir', return_value=root),
+                      patch.object(p, 'ssh_route', return_value=route),
+                      patch.object(p, 'run', side_effect=[key, 'relay-token'])):
+                    bundle, _, _ = p.prepare('example')
+                self.assertIs(bundle['profile']['autoStartRelay'], enabled)
 
     def test_voice_pairing_uses_independent_token_and_never_starts_relay(self):
         key, _ = phone(p.PairingState({}, ''))

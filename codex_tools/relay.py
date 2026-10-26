@@ -89,6 +89,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
 
     from codex_tools import relay_service
+    configure = commands.add_parser("configure", help="Allow or disable automatic relay startup on this destination.")
+    automatic = configure.add_mutually_exclusive_group()
+    automatic.add_argument("--allow-auto-start", action="store_true", dest="allow_auto_start", default=None)
+    automatic.add_argument("--no-auto-start", action="store_false", dest="allow_auto_start")
+    configure.add_argument("--json", action="store_true")
+    configure.add_argument("--config-file", type=Path, default=paths.RELAY_CONFIG_FILE, help=argparse.SUPPRESS)
     ensure = commands.add_parser("ensure", help="Start a missing localhost relay; reuse a healthy one.")
     relay_service.add_arguments(ensure)
 
@@ -421,9 +427,9 @@ def main(argv: list[str] | None = None) -> int:
             return relay_ssh.command_connect(args)
         if args.relay_command == "serve":
             return command_serve(args)
-        if args.relay_command == "ensure":
+        if args.relay_command in {"ensure", "configure"}:
             from codex_tools import relay_service
-            return relay_service.command(args)
+            return relay_service.configure(args) if args.relay_command == "configure" else relay_service.command(args)
         if args.relay_command == "outbox":
             return command_outbox(args)
         if args.relay_command == "cache" and args.cache_command == "refresh":

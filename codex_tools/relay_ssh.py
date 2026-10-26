@@ -161,6 +161,8 @@ class TunnelSupervisor:
             raise RuntimeError("remote relay check timed out; it will retry without replacing remote processes") from exc
         if self.stop.is_set():
             return
+        if process.returncode == 3:
+            raise RuntimeError('remote relay automatic startup is disabled; run ct relay configure --allow-auto-start on the destination, or start it manually')
         if process.returncode:
             detail = errors.decode("utf-8", errors="replace").strip()[-2000:]
             raise RuntimeError(f"remote relay startup check failed: {detail or process.returncode}")
