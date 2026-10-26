@@ -17,6 +17,23 @@ from urllib.request import ProxyHandler, build_opener
 from codex_tools import paths, relay_transport
 
 
+class AutoStartDisabled(PermissionError):
+    """The destination has not authorized unattended relay startup."""
+
+
+def configure(args: argparse.Namespace) -> int:
+    config = relay_transport.load_config(args.config_file)
+    if args.allow_auto_start is not None:
+        config['allow_auto_start'] = args.allow_auto_start
+        relay_transport.save_config(args.config_file, config)
+    allowed = config.get('allow_auto_start', False)
+    if args.json:
+        print(json.dumps({'allow_auto_start': allowed}))
+    else:
+        print(f"Relay automatic startup: {'allowed' if allowed else 'disabled'}")
+    return 0
+
+
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--port", type=int, default=8780)
     parser.add_argument("--json", action="store_true")
@@ -78,6 +95,14 @@ def ensure(port: int, config_file: Path, cache_file: Path, *, timeout: float = 2
         result = {"service": "codex-tools-relay", "url": f"http://127.0.0.1:{port}"}
         if healthy(port):
             return {**result, "status": "running"}
+        # Permission may have been revoked while waiting for the startup lock.
+        config = relay_transport.load_config(config_file)
+        if config.get('allow_auto_start', False) is not True:
+            raise AutoStartDisabled(
+                'Relay automatic startup is disabled on this destination. '
+                'Run ct relay configure --allow-auto-start there to allow it, '
+                'or start the relay manually with ct relay serve.'
+            )
         process_file = directory / "process.json"
         if process_file.exists():
             previous = json.loads(process_file.read_text())
@@ -116,7 +141,14 @@ def ensure(port: int, config_file: Path, cache_file: Path, *, timeout: float = 2
 
 
 def command(args: argparse.Namespace) -> int:
-    result = ensure(args.port, args.config_file, args.cache_file, control_socket=args.control_socket)
+    try:
+        result = ensure(args.port, args.config_file, args.cache_file, control_socket=args.control_socket)
+    except AutoStartDisabled as exc:
+        if args.json:
+            print(json.dumps({'service': 'codex-tools-relay', 'status': 'auto_start_disabled', 'error': str(exc)}))
+        else:
+            print(f'error: {exc}', file=sys.stderr)
+        return 3
     if args.json:
         print(json.dumps(result))
     else:

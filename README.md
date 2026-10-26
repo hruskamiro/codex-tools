@@ -35,6 +35,11 @@ Codex Tools is not yet published on PyPI. Install it directly from GitHub:
 pipx install git+https://github.com/hruskamiro/codex-tools.git
 ```
 
+For an existing GitHub installation, upgrade with `pipx upgrade codex-tools`
+after the changes are published to that repository. Restart an already running
+relay to load the updated code. Upgrading preserves user configuration and
+pairing keys; installation and upgrade do not start a relay.
+
 You now have `codex-tools`, `codex-viewer`, and `codex-manager`.
 
 On older macOS releases, use prebuilt wheels for native Python dependencies
@@ -388,13 +393,32 @@ home-network-only IP address.
 
 ### Start the remote relay automatically over SSH
 
-Remote auto-start is opt-in per connection. Save it on the Mac with:
+Automatic startup requires both destination permission and an opted-in client
+connection. QR pairing leaves it disabled unless the saved client profile
+already explicitly enables it.
+
+First allow automatic startup **on the destination computer**:
+
+```bash
+ct relay configure --allow-auto-start
+```
+
+New and existing relay configurations without this explicit permission default
+to disabled. `ct relay ensure` can reuse a running relay, but cannot start a
+missing one until this destination setting allows it. `ct relay serve` is an
+explicit manual start and remains available.
+
+Then enable it on the client:
 
 ```bash
 ct-connect start desktop --auto-start --remote-bin /home/example/.local/bin/ct
 ct-connect status desktop
 ct-connect start desktop --no-auto-start  # turn it off again
 ```
+
+To inspect or revoke destination permission later, use `ct relay configure`
+or `ct relay configure --no-auto-start`. Revocation prevents new automatic
+starts; a relay that was explicitly started can continue serving connections.
 
 The launcher saves `auto_start` and `remote_bin` alongside the profile's SSH
 settings. Without the Mac launcher, the equivalent one-run command is:

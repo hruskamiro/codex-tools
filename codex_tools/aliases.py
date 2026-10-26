@@ -25,7 +25,7 @@ _codex_tools_completion() {
   local summary_commands="today yesterday day week model site clean"
   local viewer_commands="serve start restart stop status open pick doctor"
   local manager_commands="new rename export import list run install uninstall remove rm delete path doctor repair"
-  local relay_commands="init token pair peers sync connect serve outbox cache"
+  local relay_commands="init token pair peers configure sync connect ensure serve outbox cache"
   local relay_cache_commands="refresh status"
   local voice_commands="init token configure install doctor models serve status benchmark"
   local alias_commands="install remove list"

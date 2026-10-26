@@ -27,6 +27,12 @@ In the native app, choose **Settings → Connections → Pair phone**, then:
    to authorize that key on every listed host.
 5. The phone saves the SSH hosts and relay profile. Tap **Connect** or **Done**.
 
+Pairing defaults relay auto-start to off, unless the saved client connection
+explicitly opted in. Start the destination relay manually with `ct relay serve`,
+or first run `ct relay configure --allow-auto-start` on that destination and
+enable **Start relay automatically** in the phone's connection settings. The
+phone's switch alone cannot authorize a missing relay to start.
+
 `--output phone.svg` also saves the QR as an SVG. It contains the temporary
 invitation secret, so keep it private. Invitations expire after five minutes;
 the endpoint closes once the phone acknowledges saving. No daemon stays running.

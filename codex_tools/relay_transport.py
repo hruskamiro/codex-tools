@@ -287,6 +287,8 @@ def load_config(path: Path = paths.RELAY_CONFIG_FILE) -> dict[str, Any]:
         for field in ("id", "name", "token")
     ):
         raise ValueError("relay configuration has an invalid identity")
+    if type(payload.get('allow_auto_start', False)) is not bool:
+        raise ValueError('allow_auto_start must be true or false')
     for name, peer in peers.items():
         if (
             not isinstance(name, str)
@@ -316,6 +318,7 @@ def initialize_config(path: Path, name: str, *, force: bool = False) -> dict[str
             "token": secrets.token_urlsafe(32),
         },
         "peers": {},
+        "allow_auto_start": False,
     }
     paths.ensure_private_dir(path.parent)
     paths.write_private_text(path, json.dumps(payload, indent=2) + "\n")

@@ -135,7 +135,7 @@ def prepare(name, *, ssh=None, remote_port=None, remote_bin=None, service='relay
         raise ValueError('SSH aliases resolve to duplicate hosts.')
     profile = dict(id='paired-' + secrets.token_hex(12), name=name, transport='ssh', service=service,
                    url=f'http://127.0.0.1:{port}', allowHttp=False, sshHostId=hosts[-1]['id'],
-                   jumpHostIds=[host['id'] for host in hosts[:-1]], autoStartRelay=settings.get('auto_start', True) if service == 'relay' else False, remoteBin=executable)
+                   jumpHostIds=[host['id'] for host in hosts[:-1]], autoStartRelay=settings.get('auto_start', False) if service == 'relay' else False, remoteBin=executable)
     # Obtain only the selected service's token; never enumerate credentials.
     prefix = 'PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; export PATH; exec '
     token_command = [executable, service]

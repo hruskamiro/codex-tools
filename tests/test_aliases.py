@@ -89,7 +89,7 @@ class AliasTests(unittest.TestCase):
             "today yesterday day week model site clean",
             "serve start restart stop status open pick doctor",
             "new rename export import list run install uninstall remove rm delete path doctor repair",
-            "init token pair peers sync connect serve outbox cache",
+            "init token pair peers configure sync connect ensure serve outbox cache",
             "refresh status",
             "init token configure install doctor models serve status benchmark",
             "login status usage list logout test",

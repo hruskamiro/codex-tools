@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import io
 import json
 import socket
 import subprocess
@@ -13,6 +14,72 @@ from codex_tools import relay, relay_service
 
 
 class RelayServiceTests(unittest.TestCase):
+    def test_missing_relay_requires_explicit_destination_permission(self):
+        for policy in ({}, {'allow_auto_start': False}, {'allow_auto_start': 'true'}):
+            with self.subTest(policy=policy), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                with (patch.object(relay_service.paths, 'user_state_dir', return_value=root),
+                      patch.object(relay_service.relay_transport, 'load_config', return_value=policy),
+                      patch.object(relay_service, 'healthy', return_value=False),
+                      patch.object(relay_service.subprocess, 'Popen') as spawn):
+                    with self.assertRaisesRegex(relay_service.AutoStartDisabled, 'configure --allow-auto-start'):
+                        self.ensure(root)
+                    spawn.assert_not_called()
+                self.assertFalse((root / 'relay-serve/8780/process.json').exists())
+
+    def test_manually_started_relay_can_be_reused_without_auto_start_permission(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with (patch.object(relay_service.paths, 'user_state_dir', return_value=root),
+                  patch.object(relay_service.relay_transport, 'load_config', return_value={}),
+                  patch.object(relay_service, 'healthy', return_value=True),
+                  patch.object(relay_service.subprocess, 'Popen') as spawn):
+                self.assertEqual(self.ensure(root)['status'], 'running')
+                spawn.assert_not_called()
+
+    def test_permission_revoked_before_startup_is_not_cached(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with (patch.object(relay_service.paths, 'user_state_dir', return_value=root),
+                  patch.object(relay_service.relay_transport, 'load_config',
+                               side_effect=[{'allow_auto_start': True}, {'allow_auto_start': False}]),
+                  patch.object(relay_service, 'healthy', return_value=False),
+                  patch.object(relay_service.subprocess, 'Popen') as spawn):
+                with self.assertRaises(relay_service.AutoStartDisabled):
+                    self.ensure(root)
+                spawn.assert_not_called()
+
+    def test_configuration_preserves_identity_and_peers_and_can_revoke_permission(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'relay.json'
+            original = relay_service.relay_transport.initialize_config(path, 'Example')
+            for flags, allowed in (([], False), (['--allow-auto-start'], True), (['--no-auto-start'], False)):
+                with patch('sys.stdout', new_callable=io.StringIO) as output:
+                    self.assertEqual(relay.main(['configure', '--config-file', str(path), '--json', *flags]), 0)
+                self.assertEqual(json.loads(output.getvalue()), {'allow_auto_start': allowed})
+                saved = relay_service.relay_transport.load_config(path)
+                self.assertEqual(saved, {**original, 'allow_auto_start': allowed})
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            with (patch.object(relay_service, 'healthy', return_value=False),
+                  patch.object(relay_service.paths, 'user_state_dir', return_value=Path(temporary)),
+                  patch('sys.stdout', new_callable=io.StringIO) as output,
+                  patch.object(relay_service.subprocess, 'Popen') as spawn):
+                self.assertEqual(relay.main(['ensure', '--config-file', str(path), '--json']), 3)
+            self.assertEqual(json.loads(output.getvalue())['status'], 'auto_start_disabled')
+            spawn.assert_not_called()
+
+    def test_legacy_configuration_is_disabled_and_invalid_policy_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'relay.json'
+            original = relay_service.relay_transport.initialize_config(path, 'Example')
+            original.pop('allow_auto_start')
+            relay_service.relay_transport.save_config(path, original)
+            self.assertIs(relay_service.relay_transport.load_config(path).get('allow_auto_start', False), False)
+            for value in ('true', 1, None, []):
+                relay_service.relay_transport.save_config(path, {**original, 'allow_auto_start': value})
+                with self.assertRaisesRegex(ValueError, 'allow_auto_start must be true or false'):
+                    relay_service.relay_transport.load_config(path)
+
     def ensure(self, root):
         return relay_service.ensure(8780, root / "relay.json", root / "cache.sqlite3", timeout=1)
 
@@ -20,7 +87,7 @@ class RelayServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             with (patch.object(relay_service.paths, "user_state_dir", return_value=root),
-                  patch.object(relay_service.relay_transport, "load_config"),
+                  patch.object(relay_service.relay_transport, "load_config", return_value={"allow_auto_start": True}),
                   patch.object(relay_service, "healthy", return_value=True),
                   patch.object(relay_service.subprocess, "Popen") as spawn):
                 self.assertEqual(self.ensure(root)["status"], "running")
@@ -33,7 +100,7 @@ class RelayServiceTests(unittest.TestCase):
             process = Mock(pid=321)
             process.poll.return_value = None
             with (patch.object(relay_service.paths, "user_state_dir", return_value=root),
-                  patch.object(relay_service.relay_transport, "load_config"),
+                  patch.object(relay_service.relay_transport, "load_config", return_value={"allow_auto_start": True}),
                   patch.object(relay_service, "healthy", side_effect=[False, True]),
                   patch.object(relay_service.subprocess, "Popen", return_value=process) as spawn):
                 result = self.ensure(root)
@@ -53,7 +120,7 @@ class RelayServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             with (patch.object(relay_service.paths, "user_state_dir", return_value=root),
-                  patch.object(relay_service.relay_transport, "load_config"),
+                  patch.object(relay_service.relay_transport, "load_config", return_value={"allow_auto_start": True}),
                   patch.object(relay_service, "healthy", side_effect=RuntimeError("occupied")),
                   patch.object(relay_service.subprocess, "Popen") as spawn):
                 with self.assertRaisesRegex(RuntimeError, "occupied"):
@@ -67,7 +134,7 @@ class RelayServiceTests(unittest.TestCase):
             directory.mkdir(parents=True)
             (directory / "process.json").write_text('{"pid": 321}')
             with (patch.object(relay_service.paths, "user_state_dir", return_value=root),
-                  patch.object(relay_service.relay_transport, "load_config"),
+                  patch.object(relay_service.relay_transport, "load_config", return_value={"allow_auto_start": True}),
                   patch.object(relay_service, "healthy", return_value=False),
                   patch.object(relay_service, "process_alive", return_value=True),
                   patch.object(relay_service.subprocess, "Popen") as spawn):
@@ -93,7 +160,7 @@ class RelayServiceTests(unittest.TestCase):
             process = Mock(pid=321, returncode=2)
             process.poll.return_value = 2
             with (patch.object(relay_service.paths, "user_state_dir", return_value=root),
-                  patch.object(relay_service.relay_transport, "load_config"),
+                  patch.object(relay_service.relay_transport, "load_config", return_value={"allow_auto_start": True}),
                   patch.object(relay_service, "healthy", return_value=False),
                   patch.object(relay_service.subprocess, "Popen", return_value=process)):
                 with self.assertRaisesRegex(RuntimeError, "startup exited.*serve.log"):
