@@ -1326,6 +1326,7 @@ def make_handler(
                     or not isinstance(payload.get("text"), str)
                     or not payload["text"].strip()
                     or not isinstance(payload.get("start", False), bool)
+                    or payload.get("mode", "start") not in {"start", "queue", "steer"}
                 ):
                     raise ValueError("invalid relay message")
                 reservation = cache.begin_incoming(

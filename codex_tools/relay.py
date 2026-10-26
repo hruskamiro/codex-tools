@@ -352,12 +352,14 @@ def command_serve(args: argparse.Namespace) -> int:
             )
         except ValueError as exc:
             raise FileNotFoundError(str(exc)) from exc
+        send_payload = {
+            "host": "local", "agent": agent_id, "message": payload.get("text"),
+            "start": payload.get("start", False),
+        }
+        if "mode" in payload:
+            send_payload["mode"] = payload["mode"]
         return agents_ui.send_message(
-            cache,
-            {"host": "local", "agent": agent_id, "message": payload.get("text"),
-             "start": payload.get("start", False)},
-            args.codex_bin,
-            control_socket=args.control_socket,
+            cache, send_payload, args.codex_bin, control_socket=args.control_socket,
         )
 
     def interrupt_agent(agent_id: str) -> dict[str, object]:

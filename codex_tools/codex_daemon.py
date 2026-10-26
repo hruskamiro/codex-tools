@@ -22,6 +22,10 @@ def default_control_socket() -> Path:
     return codex_home / "app-server-control" / "app-server-control.sock"
 
 
+class DaemonRequestError(RuntimeError):
+    """An explicit RPC rejection, rather than an unknown transport outcome."""
+
+
 class DaemonClient:
     def __init__(self, path: Path | None = None, timeout: float = 3.0) -> None:
         self.path = (path or default_control_socket()).expanduser()
@@ -164,7 +168,7 @@ class DaemonClient:
             if message.get("id") != request_id:
                 continue
             if message.get("error"):
-                raise RuntimeError(f"Codex daemon {method} failed: {message['error']}")
+                raise DaemonRequestError(f"Codex daemon {method} failed: {message['error']}")
             result = message.get("result")
             return result if isinstance(result, dict) else {}
 
@@ -225,6 +229,56 @@ def interrupt_thread(thread_id: str, path: Path | None = None) -> dict[str, str]
             "turn/interrupt", {"threadId": thread_id, "turnId": turn_id}
         )
         return {"status": "interrupt_requested", "turn_id": turn_id}
+
+
+def steer_thread(thread_id: str, message: str, path: Path | None = None) -> str:
+    """Send input to the current turn, guarded by its active turn ID."""
+    with DaemonClient(path) as client:
+        response = client.request(
+            "thread/read", {"threadId": thread_id, "includeTurns": True}
+        )
+        thread = response.get("thread")
+        if not isinstance(thread, dict):
+            raise RuntimeError("Codex daemon returned an invalid thread")
+        turns = thread.get("turns")
+        if not isinstance(turns, list):
+            turns = []
+        active = next(
+            (turn for turn in reversed(turns)
+             if isinstance(turn, dict) and turn.get("status") == "inProgress"
+             and isinstance(turn.get("id"), str)),
+            None,
+        )
+        if active is None:
+            return "idle"
+        try:
+            client.request("turn/steer", {
+                "threadId": thread_id,
+                "expectedTurnId": active["id"],
+                "input": [{"type": "text", "text": message}],
+            })
+        except DaemonRequestError:
+            # Only an explicit rejection proves the input was not accepted.
+            # If its target finished, let the caller queue it without steering
+            # a different turn. Transport failures must not trigger a replay.
+            latest = client.request(
+                "thread/read", {"threadId": thread_id, "includeTurns": True}
+            ).get("thread")
+            if isinstance(latest, dict):
+                status = latest.get("status")
+                status = status.get("type") if isinstance(status, dict) else None
+                turns = latest.get("turns")
+                active_ids = {
+                    turn["id"] for turn in turns
+                    if isinstance(turn, dict) and turn.get("status") == "inProgress"
+                    and isinstance(turn.get("id"), str)
+                } if isinstance(turns, list) else set()
+                if status == "idle" or (
+                    status == "active" and active_ids and active["id"] not in active_ids
+                ):
+                    return "idle"
+            raise
+        return "steered"
 
 
 def start_queued_thread_if_idle(thread_id: str, path: Path | None = None) -> str:

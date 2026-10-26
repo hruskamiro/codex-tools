@@ -3,7 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from codex_tools import agents_ui, relay_cache
 
@@ -19,6 +19,67 @@ def cached_agent() -> relay_cache.CachedAgent:
 
 
 class AgentUiTests(unittest.TestCase):
+    def test_send_now_queues_once_when_target_turn_finishes_during_steer(self) -> None:
+        for status, turns in (
+            ("idle", [{"id": "old-turn", "status": "completed"}]),
+            ("active", [{"id": "old-turn", "status": "completed"},
+                        {"id": "new-turn", "status": "inProgress"}]),
+        ):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as temporary:
+                cache = relay_cache.RelayCache(Path(temporary) / "cache.sqlite3")
+                cache.replace_host_snapshot("local", "Local", [cached_agent()])
+                client = Mock()
+                client.request.side_effect = [
+                    {"thread": {"turns": [{"id": "old-turn", "status": "inProgress"}]}},
+                    agents_ui.codex_daemon.DaemonRequestError("expected turn is no longer active"),
+                    {"thread": {"status": {"type": status}, "turns": turns}},
+                ]
+                with patch.object(agents_ui.codex_daemon, "DaemonClient") as context, \
+                     patch.object(agents_ui.codex_daemon, "start_queued_thread_if_idle") as wake, \
+                     patch.object(agents_ui.subprocess, "run") as queue:
+                    context.return_value.__enter__.return_value = client
+                    queue.return_value.returncode = 0
+                    result = agents_ui.send_message(cache, {
+                        "host": "local", "agent": "agent-1", "message": "Continue",
+                        "mode": "steer",
+                    }, "codex", control_socket=Path("/control"))
+                self.assertEqual(result["delivery"], "sent")
+                queue.assert_called_once()
+                self.assertEqual(queue.call_args.args[0][-1], "Continue")
+                wake.assert_called_once_with("thread-1", Path("/control"))
+                self.assertEqual(client.request.call_count, 3)
+                receipt = cache.reconcile_message_receipts("local", "agent-1", [])[0]
+                self.assertEqual(receipt["current_delivery"], "delivered")
+
+    def test_send_now_steers_active_turn_without_adding_to_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = relay_cache.RelayCache(Path(temporary) / "cache.sqlite3")
+            cache.replace_host_snapshot("local", "Local", [cached_agent()])
+            with patch.object(agents_ui.codex_daemon, "steer_thread", return_value="steered") as steer, \
+                 patch.object(agents_ui.subprocess, "run") as run:
+                result = agents_ui.send_message(cache, {
+                    "host": "local", "agent": "agent-1", "message": "Do this now",
+                    "mode": "steer",
+                }, "codex", control_socket=Path("/control"))
+            self.assertEqual(result["delivery"], "sent")
+            steer.assert_called_once_with("thread-1", "Do this now", Path("/control"))
+            run.assert_not_called()
+
+    def test_send_now_wakes_queue_if_turn_already_finished(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = relay_cache.RelayCache(Path(temporary) / "cache.sqlite3")
+            cache.replace_host_snapshot("local", "Local", [cached_agent()])
+            with patch.object(agents_ui.codex_daemon, "steer_thread", return_value="idle"), \
+                 patch.object(agents_ui.codex_daemon, "start_queued_thread_if_idle") as wake, \
+                 patch.object(agents_ui.subprocess, "run") as run:
+                run.return_value.returncode = 0
+                agents_ui.send_message(cache, {
+                    "host": "local", "agent": "agent-1", "message": "Do this now",
+                    "mode": "steer",
+                }, "codex")
+            run.assert_called_once()
+            wake.assert_called_once()
+
     def test_missing_executable_is_a_server_error_not_an_absent_agent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             cache = relay_cache.RelayCache(Path(temporary) / "cache.sqlite3")
