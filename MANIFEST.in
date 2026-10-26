@@ -11,3 +11,4 @@ recursive-include codex_tools/templates *.md
 recursive-include codex_tools/vendor *
 recursive-exclude codex_tools/vendor __pycache__ *.py[cod]
 include docs/phone-pairing.md
+include docs/mobile-pdf.md

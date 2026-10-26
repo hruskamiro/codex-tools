@@ -25,7 +25,7 @@ except ImportError:  # Pygments is optional when running directly from a checkou
     ClassNotFound = LookupError
 
 
-RENDERER_VERSION = "typeset-v48"
+RENDERER_VERSION = "typeset-v49"
 DEFAULT_PARAGRAPH_MODE = "spaced"
 DEFAULT_HEADER_MODE = "external"
 BODY_LINE_STRETCH = "1.08"
@@ -269,10 +269,22 @@ def render_inline(text: str) -> str:
     return "".join(rendered)
 
 
+def code_fence(line: str) -> tuple[str, str] | None:
+    match = re.match(r"^\s*(`{3,}|~{3,})([^\n]*)$", line)
+    if match is None:
+        return None
+    marker, info = match.groups()
+    return marker, info.strip().split(maxsplit=1)[0] if info.strip() else ""
+
+
+def closes_code_fence(line: str, marker: str) -> bool:
+    return bool(re.fullmatch(r"\s*" + re.escape(marker[0]) + "{" + str(len(marker)) + r",}\s*", line))
+
+
 def is_block_start(line: str) -> bool:
     stripped = line.strip()
     return bool(
-        stripped.startswith("```")
+        code_fence(line) is not None
         or stripped in {r"\[", r"\]", "$$"}
         or re.match(r"#{1,4}\s+", stripped)
         or re.match(r"[-*+]\s+", stripped)
@@ -346,12 +358,13 @@ def fenced_code_blocks(markdown: str) -> list[str]:
     blocks: list[str] = []
     index = 0
     while index < len(lines):
-        if not lines[index].strip().startswith("```"):
+        fence = code_fence(lines[index])
+        if fence is None:
             index += 1
             continue
         index += 1
         code_lines: list[str] = []
-        while index < len(lines) and not lines[index].strip().startswith("```"):
+        while index < len(lines) and not closes_code_fence(lines[index], fence[0]):
             code_lines.append(lines[index])
             index += 1
         blocks.append("\n".join(code_lines))
@@ -554,15 +567,15 @@ def table_alignments(line: str) -> list[str] | None:
 def render_table(header: list[str], rows: list[list[str]], alignments: list[str]) -> str:
     natural_types = {"left": "l", "center": "c", "right": "r"}
     wrapped_types = {
-        "left": r">{\raggedright\arraybackslash}X",
-        "center": r">{\centering\arraybackslash}X",
-        "right": r">{\raggedleft\arraybackslash}X",
+        "left": r">{\RaggedRight\arraybackslash}X",
+        "center": r">{\Centering\arraybackslash}X",
+        "right": r">{\RaggedLeft\arraybackslash}X",
     }
     natural_columns = " ".join(natural_types[alignment] for alignment in alignments)
     wrapped_columns = " ".join(wrapped_types[alignment] for alignment in alignments)
-    header_row = " & ".join(r"\textbf{" + render_inline(cell) + "}" for cell in header)
+    header_row = " & ".join(r"\hspace{0pt}\textbf{" + render_inline(cell) + "}" for cell in header)
     body_rows = "\n".join(
-        " & ".join(render_inline(cell) for cell in row) + r" \\ \hline"
+        " & ".join(r"\hspace{0pt}" + render_inline(cell) for cell in row) + r" \\ \hline"
         for row in rows
     )
     if body_rows:
@@ -636,11 +649,12 @@ def _markdown_to_latex_lines(
             index += 1
             continue
 
-        if stripped.startswith("```"):
-            language = stripped[3:].strip().split(maxsplit=1)[0] if stripped[3:].strip() else ""
+        fence = code_fence(line)
+        if fence is not None:
+            marker, language = fence
             index += 1
             code_lines: list[str] = []
-            while index < len(lines) and not lines[index].strip().startswith("```"):
+            while index < len(lines) and not closes_code_fence(lines[index], marker):
                 code_lines.append(lines[index])
                 index += 1
             if index < len(lines):
@@ -738,7 +752,11 @@ def document_for(
     paragraph_mode: str = DEFAULT_PARAGRAPH_MODE,
     header_mode: str = DEFAULT_HEADER_MODE,
     code_mode: str = DEFAULT_CODE_MODE,
+    layout_mode: str = "viewer",
 ) -> str:
+    if layout_mode not in {"viewer", "phone-portrait", "phone-wide"}:
+        raise ValueError("unknown typeset layout")
+    content_width = {"viewer": "150mm", "phone-portrait": "68mm", "phone-wide": "180mm"}[layout_mode]
     try:
         layout = PARAGRAPH_LAYOUTS[paragraph_mode]
     except KeyError as exc:
@@ -765,6 +783,9 @@ def document_for(
         if header_mode == "embedded"
         else "0.75cm 0.375cm 0.75cm 0.375cm"
     )
+    if layout_mode != "viewer":
+        document_border = "2mm"
+    table_spacing = r"\setlength{\tabcolsep}{3pt}" if layout_mode != "viewer" else ""
     return rf"""\documentclass[10pt,border={{{document_border}}}]{{standalone}}
 \usepackage{{fontspec}}
 \usepackage{{amsmath}}
@@ -773,6 +794,7 @@ def document_for(
 \usepackage{{fvextra}}
 \usepackage{{enumitem}}
 \usepackage{{tabularx}}
+\usepackage{{ragged2e}}
 \usepackage{{colortbl}}
 \setmainfont{{TeX Gyre Pagella}}
 \setsansfont{{TeX Gyre Heros}}
@@ -859,7 +881,8 @@ def document_for(
   formatcom=\color{{CodexInk}}
 }}
 \begin{{document}}
-\begin{{minipage}}{{150mm}}
+\begin{{minipage}}{{{content_width}}}
+{table_spacing}
 \color{{CodexInk}}
 {embedded_header}%
 \setlength{{\parindent}}{{{layout.indent}}}
@@ -877,7 +900,10 @@ def cache_key(
     paragraph_mode: str = DEFAULT_PARAGRAPH_MODE,
     header_mode: str = DEFAULT_HEADER_MODE,
     code_mode: str = DEFAULT_CODE_MODE,
+    layout_mode: str = "viewer",
 ) -> str:
+    if layout_mode not in {"viewer", "phone-portrait", "phone-wide"}:
+        raise ValueError("unknown typeset layout")
     effective_code_mode = resolved_code_mode(code_mode)
     digest = hashlib.sha256()
     digest.update(RENDERER_VERSION.encode("utf-8"))
@@ -891,6 +917,8 @@ def cache_key(
     digest.update(b"\0")
     digest.update(effective_code_mode.encode("utf-8"))
     digest.update(b"\0")
+    if layout_mode != "viewer":
+        digest.update(layout_mode.encode("ascii") + b"\0")
     digest.update(markdown.encode("utf-8", errors="replace"))
     return digest.hexdigest()
 
@@ -903,6 +931,7 @@ def render_pdf(
     paragraph_mode: str = DEFAULT_PARAGRAPH_MODE,
     header_mode: str = DEFAULT_HEADER_MODE,
     code_mode: str = DEFAULT_CODE_MODE,
+    layout_mode: str = "viewer",
 ) -> TypesetResult:
     key = cache_key(
         markdown,
@@ -910,6 +939,7 @@ def render_pdf(
         paragraph_mode=paragraph_mode,
         header_mode=header_mode,
         code_mode=code_mode,
+        layout_mode=layout_mode,
     )
     cache_dir = typeset_cache_dir() / key[:2] / key
     pdf_path = cache_dir / "bubble.pdf"
@@ -928,6 +958,7 @@ def render_pdf(
             paragraph_mode=paragraph_mode,
             header_mode=header_mode,
             code_mode=code_mode,
+            layout_mode=layout_mode,
         ),
         encoding="utf-8",
     )

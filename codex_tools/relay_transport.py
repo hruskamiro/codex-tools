@@ -760,15 +760,11 @@ def validate_typeset_options(header_mode: str, code_mode: str) -> None:
         raise ValueError("invalid typeset code mode")
 
 
-def render_agent_record(
+def agent_record_text(
     cache: relay_cache.RelayCache,
     agent_id: str,
     record_key: str,
-    *,
-    header_mode: str,
-    code_mode: str,
-) -> typeset.TypesetResult:
-    validate_typeset_options(header_mode, code_mode)
+) -> tuple[str, str]:
     if not re.fullmatch(r"[a-f0-9]{64}", record_key):
         raise ValueError("invalid typeset record reference")
     agent = next(
@@ -805,6 +801,46 @@ def render_agent_record(
         text, timestamp = match.text, match.timestamp
     else:
         text, timestamp = record["text"], record["timestamp"]
+    return text, timestamp
+
+
+def mobile_manifest(cache, agent_id, record_key):
+    from codex_tools import mobile_typeset
+    text, _ = agent_record_text(cache, agent_id, record_key)
+    return mobile_typeset.manifest(text, record_key, typeset.RENDERER_VERSION)
+
+
+def render_mobile_block(cache, agent_id, record_key, index, layout):
+    from codex_tools import mobile_typeset
+    if layout not in {"phone-portrait", "phone-wide"}:
+        raise ValueError("invalid mobile typeset layout")
+    text, _ = agent_record_text(cache, agent_id, record_key)
+    blocks = mobile_typeset.split_blocks(text)
+    if not 0 <= index < len(blocks):
+        raise ValueError("invalid mobile block index")
+    block = blocks[index]
+    if layout == "phone-wide" and block.kind not in {"table", "code"}:
+        raise ValueError("only tables and code can render wide")
+    lock = TYPESET_LOCKS[int(record_key[:8], 16) % len(TYPESET_LOCKS)]
+    with lock:
+        if not TYPESET_SLOTS.acquire(timeout=60):
+            raise RuntimeError("remote renderer is busy; try again shortly")
+        try:
+            return typeset.render_pdf(block.text, header_mode="external", layout_mode=layout)
+        finally:
+            TYPESET_SLOTS.release()
+
+
+def render_agent_record(
+    cache: relay_cache.RelayCache,
+    agent_id: str,
+    record_key: str,
+    *,
+    header_mode: str,
+    code_mode: str,
+) -> typeset.TypesetResult:
+    validate_typeset_options(header_mode, code_mode)
+    text, timestamp = agent_record_text(cache, agent_id, record_key)
     title = f"Assistant answer · {timestamp}" if timestamp else "Assistant answer"
     # Bound compilation concurrency and serialize identical render requests.
     lock = TYPESET_LOCKS[int(record_key[:8], 16) % len(TYPESET_LOCKS)]
@@ -1101,10 +1137,39 @@ def make_handler(
             typeset_match = re.fullmatch(
                 r"/v1/agents/([^/]+)/typeset/([a-f0-9]{64})", request_path
             )
+            mobile_match = re.fullmatch(
+                r"/v1/agents/([^/]+)/typeset/([a-f0-9]{64})/blocks(?:/(0|[1-9][0-9]{0,2}))?", request_path
+            )
             if request_path == "/v1/snapshot":
                 if refresh is not None:
                     refresh()
                 self._json(snapshot_payload(cache, config))
+            elif mobile_match is not None:
+                try:
+                    query = parse_qs(parsed.query, keep_blank_values=True)
+                    agent_id, record_key, index = mobile_match.groups()
+                    agent_id = unquote(agent_id)
+                    if index is None:
+                        if query:
+                            raise ValueError("manifest takes no options")
+                        self._json(mobile_manifest(cache, agent_id, record_key))
+                    else:
+                        if set(query) - {"layout"} or any(len(v) != 1 for v in query.values()):
+                            raise ValueError("invalid mobile typeset options")
+                        result = render_mobile_block(cache, agent_id, record_key, int(index),
+                            query.get("layout", ["phone-portrait"])[0])
+                        if not result.ok or result.pdf_path is None:
+                            self._json({"error": "mobile PDF rendering unavailable"}, HTTPStatus.SERVICE_UNAVAILABLE)
+                        elif result.pdf_path.stat().st_size > MAX_TYPESET_BYTES:
+                            self._json({"error": "PDF exceeds size limit"}, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+                        else:
+                            self._attachment(result.pdf_path, "application/pdf", "Codex answer.pdf")
+                except FileNotFoundError:
+                    self._json({"error": "assistant response no longer available"}, HTTPStatus.NOT_FOUND)
+                except ValueError:
+                    self._json({"error": "invalid mobile typeset request"}, HTTPStatus.BAD_REQUEST)
+                except (OSError, RuntimeError, ImportError):
+                    self._json({"error": "mobile PDF rendering unavailable"}, HTTPStatus.SERVICE_UNAVAILABLE)
             elif typeset_match is not None:
                 try:
                     query = parse_qs(parsed.query, keep_blank_values=True)
