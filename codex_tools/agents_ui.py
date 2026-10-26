@@ -109,6 +109,9 @@ def send_message(cache: relay_cache.RelayCache, payload: dict[str, Any], codex_b
     agent_id = str(payload.get("agent") or "")
     message = str(payload.get("message") or "").strip()
     start = payload.get("start", False)
+    mode = payload.get("mode", "start" if start else "queue")
+    if mode not in {"start", "queue", "steer"}:
+        raise ValueError("invalid message mode")
     if not isinstance(start, bool):
         raise ValueError("start must be a boolean")
     if not message:
@@ -118,13 +121,26 @@ def send_message(cache: relay_cache.RelayCache, payload: dict[str, Any], codex_b
         raise FileNotFoundError("cached agent not found")
     if host_id != "local":
         queued_payload = {"text": message}
+        if "mode" in payload:
+            queued_payload["mode"] = mode
         if start:
             queued_payload["start"] = True
         message_id = cache.enqueue(host_id, agent_id, queued_payload, track=True)
         return {"delivery": "queued", "message_id": message_id}
     thread_id = str(agent.get("thread_id") or agent.get("session_id") or agent_id)
-    codex_bin = codex_binary.resolve(codex_bin)
     message_id = cache.record_message_receipt(host_id, agent_id, message)
+    if mode == "steer":
+        try:
+            result = codex_daemon.steer_thread(thread_id, message, control_socket)
+            if result == "steered":
+                cache.update_message_receipt(message_id, delivery="delivered")
+                return {"delivery": "sent", "message_id": message_id}
+        except (OSError, RuntimeError, ValueError) as exc:
+            cache.update_message_receipt(message_id, delivery="failed", error=str(exc))
+            raise
+        # The turn finished before submission. Queue and wake it instead.
+        start = True
+    codex_bin = codex_binary.resolve(codex_bin)
     try:
         completed = subprocess.run(
             [codex_bin, "queue", "--thread", thread_id, "--message", message],
