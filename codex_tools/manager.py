@@ -71,7 +71,14 @@ def valid_command_name(value: str) -> str:
 
 
 def default_wrapper_name(profile_name: str) -> str:
-    return f"codex-{profile_name}"
+    return profile_name
+
+
+def validate_wrapper_target(command: str, codex_binary: str, target: Path) -> None:
+    if command == codex_binary or (
+        Path(codex_binary).is_absolute() and Path(codex_binary).resolve() == target.resolve()
+    ):
+        raise ValueError("wrapper would replace or call itself; choose --wrapper or an absolute --codex-binary")
 
 
 def ensure_private_dir(path: Path) -> None:
@@ -982,7 +989,7 @@ def discover_untracked_wrapper(
 ) -> dict[str, Any] | None:
     """Recognize an older manager wrapper that predates profile metadata."""
     content = wrapper_script(name, "codex", root, default)
-    for command in (default_wrapper_name(name), name):
+    for command in (default_wrapper_name(name), f"codex-{name}"):
         path = bin_dir / command
         if path.is_symlink() or not path.is_file():
             continue
@@ -1011,6 +1018,7 @@ def command_install(args: argparse.Namespace) -> int:
     bin_dir = args.bin_dir.expanduser().resolve()
     wrapper_name = args.wrapper_name or default_wrapper_name(args.name)
     target = bin_dir / wrapper_name
+    validate_wrapper_target(wrapper_name, args.codex_binary, target)
     if existing_wrapper:
         existing_path = Path(str(existing_wrapper.get("path", ""))).expanduser().resolve()
         if existing_path != target or not args.force:
@@ -1061,9 +1069,12 @@ def command_uninstall(args: argparse.Namespace) -> int:
     else:
         wrapper_name = args.wrapper_name or default_wrapper_name(args.name)
         target = args.bin_dir.expanduser().resolve() / wrapper_name
-        legacy_target = args.bin_dir.expanduser().resolve() / args.name
-        if args.wrapper_name is None and not target.exists() and legacy_target.exists():
-            target = legacy_target
+        if args.wrapper_name is None:
+            discovered = discover_untracked_wrapper(args.name, root, default, target.parent)
+            if discovered:
+                target = Path(discovered["path"])
+            elif target.exists() or target.is_symlink():
+                raise ValueError(f"refusing to remove an unrecognized wrapper: {target}")
 
     if not target.exists() and not target.is_symlink():
         print(f"Nothing to uninstall: {target}")
@@ -1135,6 +1146,7 @@ def command_rename(args: argparse.Namespace) -> int:
             )
             return 2
         codex_binary = str(wrapper.get("codex_binary") or "codex")
+        validate_wrapper_target(wrapper_name, codex_binary, new_wrapper_path)
         wrapper_content = wrapper_script(new_name, codex_binary, root, default)
 
     dependents = [
@@ -1305,7 +1317,7 @@ def build_parser(prog: str = "codex-manager") -> argparse.ArgumentParser:
         "--command-name",
         dest="wrapper_name",
         type=valid_command_name,
-        help="Wrapper name. Default: codex-PROFILE.",
+        help="Wrapper name. Default: PROFILE (no prefix).",
     )
     import_cmd.add_argument("--bin-dir", type=Path, default=Path("~/.local/bin"))
     import_cmd.add_argument("--codex-binary", default="codex")
@@ -1328,7 +1340,7 @@ def build_parser(prog: str = "codex-manager") -> argparse.ArgumentParser:
         "--command-name",
         dest="wrapper_name",
         type=valid_command_name,
-        help="Wrapper name. Default: codex-PROFILE.",
+        help="Wrapper name. Default: PROFILE (no prefix).",
     )
     install.add_argument("--codex-binary", default="codex")
     install.add_argument("--force", action="store_true")

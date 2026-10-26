@@ -12,6 +12,60 @@ from codex_tools import manager
 
 
 class ManagerCommandTests(unittest.TestCase):
+    def test_legacy_prefixed_wrapper_remains_manageable(self) -> None:
+        for action in ('rename', 'uninstall'):
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                default = root / 'default'
+                default.mkdir()
+                managed, bin_dir = root / 'manager', root / 'bin'
+                bin_dir.mkdir()
+                common = ['--manager-root', str(managed), '--default-home', str(default)]
+                with patch('sys.stdout', new_callable=StringIO):
+                    self.assertEqual(manager.main([*common, 'new', 'work']), 0)
+                    legacy = bin_dir / 'codex-work'
+                    legacy.write_text(manager.wrapper_script('work', 'codex', managed, default))
+                    legacy.chmod(0o755)
+                    arguments = ['rename', 'work', 'company'] if action == 'rename' else ['uninstall', 'work']
+                    self.assertEqual(manager.main([*common, *arguments, '--bin-dir', str(bin_dir)]), 0)
+                self.assertFalse(legacy.exists())
+                self.assertEqual((bin_dir / 'company').exists(), action == 'rename')
+                self.assertFalse((bin_dir / 'codex-company').exists())
+
+    def test_plain_wrapper_names_preserve_unrelated_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            default = root / 'default'
+            default.mkdir()
+            bin_dir = root / 'bin'
+            bin_dir.mkdir()
+            command = bin_dir / 'work'
+            command.write_text('unrelated command')
+            common = ['--manager-root', str(root / 'manager'), '--default-home', str(default)]
+            with patch('sys.stdout', new_callable=StringIO), patch('sys.stderr', new_callable=StringIO):
+                self.assertEqual(manager.main([*common, 'new', 'work']), 0)
+                for action in ('install', 'uninstall'):
+                    self.assertEqual(manager.main([*common, action, 'work', '--bin-dir', str(bin_dir)]), 2)
+                    self.assertEqual(command.read_text(), 'unrelated command')
+
+    def test_wrapper_cannot_shadow_its_codex_binary(self) -> None:
+        for action in ('install', 'rename'):
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                default = root / 'default'
+                default.mkdir()
+                managed, bin_dir = root / 'manager', root / 'bin'
+                name = 'codex' if action == 'install' else 'work'
+                common = ['--manager-root', str(managed), '--default-home', str(default)]
+                with patch('sys.stdout', new_callable=StringIO), patch('sys.stderr', new_callable=StringIO):
+                    self.assertEqual(manager.main([*common, 'new', name]), 0)
+                    if action == 'rename':
+                        self.assertEqual(manager.main([*common, 'install', name, '--bin-dir', str(bin_dir)]), 0)
+                    arguments = ['install', name] if action == 'install' else ['rename', name, 'codex']
+                    self.assertEqual(manager.main([*common, *arguments, '--bin-dir', str(bin_dir)]), 2)
+                self.assertFalse((bin_dir / 'codex').exists())
+                self.assertTrue((managed / 'profiles' / name).is_dir())
+
     def test_unified_manager_help_uses_the_unified_command_name(self) -> None:
         with patch("sys.stdout", new_callable=StringIO) as stdout:
             parser = manager.build_parser("codex-tools manager")
@@ -150,11 +204,11 @@ class ManagerCommandTests(unittest.TestCase):
                 (imported_home / "sessions").resolve(),
                 (target_default / "sessions").resolve(),
             )
-            self.assertTrue((bin_dir / "codex-laptop-work").is_file())
+            self.assertTrue((bin_dir / "laptop-work").is_file())
             metadata = json.loads(
                 (imported / "profile.json").read_text(encoding="utf-8")
             )
-            self.assertEqual(metadata["wrapper"]["command"], "codex-laptop-work")
+            self.assertEqual(metadata["wrapper"]["command"], "laptop-work")
 
     def test_rename_updates_default_wrapper_and_sharing_profiles(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -176,11 +230,11 @@ class ManagerCommandTests(unittest.TestCase):
                 0,
             )
 
-            old_wrapper = bin_dir / "codex-work"
+            old_wrapper = bin_dir / "work"
             self.assertTrue(old_wrapper.is_file())
             self.assertEqual(manager.main([*common, "rename", "work", "company"]), 0)
 
-            new_wrapper = bin_dir / "codex-company"
+            new_wrapper = bin_dir / "company"
             self.assertFalse(old_wrapper.exists())
             self.assertTrue(new_wrapper.is_file())
             self.assertIn("company", new_wrapper.read_text(encoding="utf-8"))
@@ -190,7 +244,7 @@ class ManagerCommandTests(unittest.TestCase):
                     encoding="utf-8"
                 )
             )
-            self.assertEqual(renamed["wrapper"]["command"], "codex-company")
+            self.assertEqual(renamed["wrapper"]["command"], "company")
             self.assertEqual(renamed["share"], "isolated")
             dependent = json.loads(
                 (manager_root / "profiles" / "client" / "profile.json").read_text(
@@ -292,14 +346,16 @@ class ManagerCommandTests(unittest.TestCase):
                 0,
             )
 
-            self.assertTrue(legacy_wrapper.is_file())
-            self.assertIn("mom", legacy_wrapper.read_text(encoding="utf-8"))
+            self.assertFalse(legacy_wrapper.exists())
+            renamed_wrapper = bin_dir / "mom"
+            self.assertTrue(renamed_wrapper.is_file())
+            self.assertIn("mom", renamed_wrapper.read_text(encoding="utf-8"))
             metadata = json.loads(
                 (manager_root / "profiles" / "mom" / "profile.json").read_text(
                     encoding="utf-8"
                 )
             )
-            self.assertEqual(metadata["wrapper"]["command"], "codex-mom")
+            self.assertEqual(metadata["wrapper"]["command"], "mom")
 
     def test_exported_conversations_restore_to_private_store(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -425,7 +481,7 @@ class ManagerCommandTests(unittest.TestCase):
                 if case == "wrapper-conflict":
                     bin_dir = root / "bin"
                     bin_dir.mkdir()
-                    (bin_dir / "codex-work").write_text("existing wrapper")
+                    (bin_dir / "work").write_text("existing wrapper")
                     args += ["--install", "--bin-dir", str(bin_dir)]
                 password = "wrong-password" if case == "wrong-password" else "test-password"
                 real_replace = os.replace

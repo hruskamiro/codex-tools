@@ -671,10 +671,10 @@ Install a convenient command for a profile:
 
 ```bash
 codex-manager install work
-codex-work
+work
 ```
 
-**The default wrapper is `codex-<profile>`.** Choose another name with:
+**The default wrapper is the profile name, with no added prefix.** Choose another name with:
 
 ```bash
 codex-manager install work --wrapper cw
@@ -688,8 +688,16 @@ codex-manager rename work company
 codex-manager uninstall company
 ```
 
-A default wrapper follows the renamed profile (`codex-work` becomes
-`codex-company`). A custom wrapper such as `cw` keeps its name.
+A default wrapper follows the renamed profile (`work` becomes
+`company`). A custom wrapper such as `cw` keeps its name.
+
+Existing registered wrappers are preserved when upgrading. To replace an old
+automatically prefixed command with the plain profile name:
+
+```bash
+codex-manager uninstall work
+codex-manager install work
+```
 
 ### Encrypted login transfer
 
