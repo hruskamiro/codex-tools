@@ -605,6 +605,19 @@ processing time; `ct voice benchmark recording.wav --model large --device both`
 compares CPU/GPU locally without changing setup. See [voice installation and recovery](docs/voice.md) for
 engine discovery, CPU/GPU settings, background service setup and migration.
 
+## Phone pairing
+
+Pair the mobile console with one temporary QR invitation, including the SSH
+hosts, ordered jump route and authorization of the phone's own public key:
+
+```bash
+ct connect pair-phone PROFILE --address COMPUTER_IP
+```
+
+The command requires the optional QR encoder (`pipx inject codex-tools qrcode`).
+See [phone pairing](docs/phone-pairing.md) for fingerprint confirmation,
+reachability, expiry and recovery.
+
 ## Profile manager
 
 Profiles give each account its own `CODEX_HOME`, login, and configuration.
