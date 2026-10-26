@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from io import StringIO
@@ -374,6 +375,91 @@ class ManagerCommandTests(unittest.TestCase):
                 '{"message":"portable"}\n',
             )
             self.assertFalse((store / "shell_snapshots" / "machine.sh").exists())
+
+    def test_import_existing_profile_requires_force_and_preserves_store(self) -> None:
+        cases = (
+            "without-force", "auth-only", "with-config", "private-store",
+            "wrong-password", "isolation-conflict", "conversation-conflict",
+            "wrapper-conflict", "write-failure",
+        )
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                source_root = root / "source"
+                target_root = root / "target"
+                default = root / "default"
+                default.mkdir()
+                common = ["--manager-root", str(target_root), "--default-home", str(default)]
+                source_args = ["--manager-root", str(source_root), "--default-home", str(default)]
+                with patch("sys.stdout", new_callable=StringIO):
+                    self.assertEqual(manager.main(source_args + ["new", "work"]), 0)
+                    isolation = ["--isolated"] if case == "private-store" else []
+                    self.assertEqual(manager.main(common + ["new", "work"] + isolation), 0)
+                source_home = source_root / "profiles/work/home"
+                (source_home / "auth.json").write_text('{"token":"new"}\n')
+                if case == "with-config":
+                    (source_home / "config.toml").write_text('model = "imported"\n')
+                else:
+                    (source_home / "config.toml").unlink(missing_ok=True)
+                plain = root / "plain.zip"
+                bundle = root / "work.codex-profile"
+                profile = manager.load_profile(source_root, "work", default)
+                manager.create_profile_archive(plain, profile, case == "conversation-conflict")
+                manager.profile_bundle.encrypt_file(plain, bundle, "test-password")
+
+                home = target_root / "profiles/work/home"
+                (home / "auth.json").write_text('{"token":"old"}\n')
+                (home / "config.toml").write_text('cli_auth_credentials_store = "keyring"\nmodel = "local"\n')
+                before_auth = (home / "auth.json").read_bytes()
+                before_config = (home / "config.toml").read_bytes()
+                metadata = target_root / "profiles/work/profile.json"
+                before_metadata = metadata.read_bytes()
+                sessions = (home / "sessions").resolve()
+                conversation = sessions / "keep.jsonl"
+                conversation.write_text("existing conversation\n")
+                args = common + ["import", str(bundle)]
+                if case != "without-force":
+                    args += ["--force"]
+                if case == "isolation-conflict":
+                    args += ["--isolated"]
+                if case == "wrapper-conflict":
+                    bin_dir = root / "bin"
+                    bin_dir.mkdir()
+                    (bin_dir / "codex-work").write_text("existing wrapper")
+                    args += ["--install", "--bin-dir", str(bin_dir)]
+                password = "wrong-password" if case == "wrong-password" else "test-password"
+                real_replace = os.replace
+
+                def replace(source, target):
+                    if case == "write-failure" and Path(source).name == "auth.json":
+                        raise FileExistsError("simulated credential replacement failure")
+                    return real_replace(source, target)
+
+                with patch("codex_tools.manager.prompt_import_passphrase", return_value=password), patch(
+                    "sys.stderr", new_callable=StringIO
+                ) as stderr, patch("sys.stdout", new_callable=StringIO), patch(
+                    "codex_tools.manager.os.replace", side_effect=replace
+                ):
+                    result = manager.main(args)
+                success = case in {"auth-only", "with-config", "private-store"}
+                self.assertEqual(result, 0 if success else 2)
+                self.assertEqual(metadata.read_bytes(), before_metadata)
+                self.assertEqual((home / "sessions").resolve(), sessions)
+                self.assertEqual(conversation.read_text(), "existing conversation\n")
+                if success:
+                    self.assertEqual((home / "auth.json").read_text(), '{"token":"new"}\n')
+                    model = "imported" if case == "with-config" else "local"
+                    self.assertIn(f'model = "{model}"', (home / "config.toml").read_text())
+                    self.assertIn('cli_auth_credentials_store = "file"', (home / "config.toml").read_text())
+                    for name in ("auth.json", "config.toml"):
+                        self.assertEqual((home / name).stat().st_mode & 0o777, 0o600)
+                else:
+                    self.assertEqual((home / "auth.json").read_bytes(), before_auth)
+                    self.assertEqual((home / "config.toml").read_bytes(), before_config)
+                    self.assertNotIn("Traceback", stderr.getvalue())
+                if case == "without-force":
+                    self.assertIn("--force", stderr.getvalue())
+                self.assertFalse(list(home.glob(".profile-import-*")))
 
     def test_wrong_import_passphrase_leaves_no_profile(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
