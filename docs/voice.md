@@ -1,5 +1,15 @@
 # Optional voice service
 
+Pair a native phone with an independent voice profile using
+`ct voice pair-phone --local --address COMPUTER_IP` on the voice computer, or
+`ct voice pair-phone PROFILE --address COMPUTER_IP` from a computer with an
+existing trusted SSH route to `PROFILE`. The command asks you to authorize the phone's Ed25519 key,
+and transfers the voice token only after approval over certificate-pinned
+temporary HTTPS. The voice service can stay bound to localhost; pairing does
+not start it. Use `--remote-port` or `--remote-state-dir` if the destination
+uses nondefault voice settings. In the app, scan at **Settings → Voice → Pair
+voice server**; this does not change the agent connection.
+
 Codex Tools can serve durable transcription jobs independently of its agent
 relay. Voice is opt-in: normal installation adds no Whisper/PyTorch/CTranslate2
 packages, downloads no models and starts no voice processes. The queue and CLI

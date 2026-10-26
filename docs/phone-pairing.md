@@ -8,7 +8,7 @@ On a computer with working SSH access to the destination and every jump host:
 
 ```sh
 pipx inject codex-tools qrcode  # optional QR encoder, once
-ct connect pair-phone ufront-through-a370 --address 192.168.1.10
+ct connect pair-phone destination-via-jump --address 192.0.2.10
 ```
 
 Use the computer's address reachable from the phone through Wi-Fi or a VPN.

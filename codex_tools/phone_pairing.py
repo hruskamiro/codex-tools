@@ -6,6 +6,7 @@ import base64
 from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
+import getpass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -105,7 +106,7 @@ def public_key(value):
     return f'ssh-ed25519 {fields[1]}', fingerprint, key
 
 
-def prepare(name, *, ssh=None, remote_port=None, remote_bin=None):
+def prepare(name, *, ssh=None, remote_port=None, remote_bin=None, service='relay', remote_state_dir=None):
     if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}', name):
         raise ValueError('Use a connection name of up to 64 letters, digits, hyphens or underscores.')
     launcher = paths.user_config_dir() / 'ssh-launcher.json'
@@ -114,9 +115,9 @@ def prepare(name, *, ssh=None, remote_port=None, remote_bin=None):
         saved = json.loads(launcher.read_text())
         settings = saved.get('connections', {}).get(name, {})
     target = safe_target(ssh or settings.get('ssh', name))
-    port = remote_port or settings.get('remote_port', 8780)
+    port = remote_port or (settings.get('remote_port', 8780) if service == 'relay' else 8790)
     if not isinstance(port, int) or not 1 <= port <= 65535:
-        raise ValueError('Invalid relay port.')
+        raise ValueError('Invalid service port.')
     executable = remote_bin or settings.get('remote_bin', 'ct')
     if not isinstance(executable, str) or not re.fullmatch(r'[A-Za-z0-9_./+-]{1,1024}', executable) or executable.startswith('-'):
         raise ValueError('Use a remote command name or executable path without shell commands.')
@@ -132,15 +133,41 @@ def prepare(name, *, ssh=None, remote_port=None, remote_bin=None):
                           port=int(host['port']), fingerprint=fingerprint))
     if len({host['id'] for host in hosts}) != len(hosts):
         raise ValueError('SSH aliases resolve to duplicate hosts.')
-    profile = dict(id='paired-' + secrets.token_hex(12), name=name, transport='ssh', service='relay',
+    profile = dict(id='paired-' + secrets.token_hex(12), name=name, transport='ssh', service=service,
                    url=f'http://127.0.0.1:{port}', allowHttp=False, sshHostId=hosts[-1]['id'],
-                   jumpHostIds=[host['id'] for host in hosts[:-1]], autoStartRelay=settings.get('auto_start', True), remoteBin=executable)
-    # Obtain only the selected relay's token; never enumerate credentials.
+                   jumpHostIds=[host['id'] for host in hosts[:-1]], autoStartRelay=settings.get('auto_start', True) if service == 'relay' else False, remoteBin=executable)
+    # Obtain only the selected service's token; never enumerate credentials.
     prefix = 'PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"; export PATH; exec '
-    token = run(ssh_command(route, len(route)-1, prefix + shlex.join([executable, 'relay', 'token'])))
+    token_command = [executable, service]
+    if remote_state_dir is not None:
+        if service != 'voice' or not Path(remote_state_dir).is_absolute():
+            raise ValueError('Voice state directory must be an absolute remote path.')
+        token_command += ['--state-dir', remote_state_dir]
+    token_command.append('token')
+    token = run(ssh_command(route, len(route)-1, prefix + shlex.join(token_command)))
     if not token or len(token) > 1024 or any(ord(c) < 33 or ord(c) == 127 for c in token):
-        raise ValueError('Remote relay returned an invalid token; initialize its relay identity first.')
+        raise ValueError(f'Remote {service} returned an invalid token; initialize its identity first.')
     return dict(version=1, profile=profile, hosts=hosts), token, route
+
+
+def prepare_local_voice(name, address, *, port=None, ssh_port=22, state_dir=None,
+                        host_key_path=Path('/etc/ssh/ssh_host_ed25519_key.pub')):
+    from codex_tools import voice
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}', name):
+        raise ValueError('Use a connection name of up to 64 letters, digits, hyphens or underscores.')
+    root = Path(state_dir).expanduser().absolute() if state_dir else voice.default_state_dir()
+    settings = voice.load_settings(root)
+    job_port = port or settings.get('port', 8790)
+    if not 1 <= job_port <= 65535 or not 1 <= ssh_port <= 65535:
+        raise ValueError('Invalid voice or SSH port.')
+    key = host_key_path.read_text()
+    _, fingerprint, _ = public_key(' '.join(key.split()[:2]))
+    host = dict(id='ssh-' + hashlib.sha256(f'{getpass.getuser()}@{address}:{ssh_port}'.encode()).hexdigest()[:20],
+                name=name, host=address, username=getpass.getuser(), port=ssh_port, fingerprint=fingerprint)
+    profile = dict(id='paired-' + secrets.token_hex(12), name=name, transport='ssh', service='voice',
+                   url=f'http://127.0.0.1:{job_port}', allowHttp=False, sshHostId=host['id'], jumpHostIds=[],
+                   autoStartRelay=False, remoteBin='ct')
+    return dict(version=1, profile=profile, hosts=[host]), voice.load_identity(root)['token']
 
 
 # The script receives the validated public key on stdin, never interpolates it
@@ -172,6 +199,11 @@ def install_key(route, index, key):
     normalized, _, _ = public_key(key)
     command = 'python3 -c ' + shlex.quote(INSTALL_SCRIPT)
     run(ssh_command(route, index, command), input=normalized + ' codex-tools-phone\n')
+
+
+def install_local_key(key):
+    normalized, _, _ = public_key(key)
+    run([sys.executable, '-c', INSTALL_SCRIPT], input=normalized + ' codex-tools-phone\n')
 
 
 class PairingState:
@@ -327,14 +359,21 @@ def invitation(url, fingerprint, state):
     return 'ct-pair:' + base64.urlsafe_b64encode(json.dumps(payload, separators=(',', ':')).encode()).decode().rstrip('=')
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(prog='ct connect', description=__doc__)
+def main(argv=None, *, service='relay'):
+    parser = argparse.ArgumentParser(prog='ct voice' if service == 'voice' else 'ct connect', description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
     pair = sub.add_parser('pair-phone', help='Create one QR invitation and authorize the phone on every SSH hop.')
-    pair.add_argument('profile', help='Saved ct-connect profile name, or an SSH alias.')
+    pair.add_argument('profile', nargs='?' if service == 'voice' else None,
+                      default='voice' if service == 'voice' else None,
+                      help='Saved ct-connect profile name, SSH alias, or local voice profile name.')
     pair.add_argument('--ssh', help='Override the destination SSH alias.')
     pair.add_argument('--remote-port', type=int)
     pair.add_argument('--remote-bin')
+    if service == 'voice':
+        pair.add_argument('--remote-state-dir', help='Absolute voice state directory on the SSH destination.')
+        pair.add_argument('--local', action='store_true', help='Voice runs on this computer; no SSH to self is needed.')
+        pair.add_argument('--ssh-port', type=int, default=22, help='This computer’s SSH port (with --local).')
+        pair.add_argument('--state-dir', type=Path, help='Local voice state directory (with --local).')
     pair.add_argument('--address', required=True, help='This computer’s IP or hostname reachable from the phone.')
     pair.add_argument('--bind', default='0.0.0.0', help='Temporary pairing listener (default: all IPv4 interfaces).')
     pair.add_argument('--port', type=int, default=0, help='Pairing port (default: a free port).')
@@ -345,7 +384,17 @@ def main(argv=None):
         import qrcode.image.svg
         if not 0 <= args.port <= 65535 or not re.fullmatch(r'[A-Za-z0-9_.:-]{1,253}', args.address):
             raise ValueError('Enter a valid reachable address and port.')
-        bundle, token, route = prepare(args.profile, ssh=args.ssh, remote_port=args.remote_port, remote_bin=args.remote_bin)
+        if service == 'voice' and args.local:
+            if args.ssh or args.remote_bin or args.remote_state_dir:
+                raise ValueError('--local cannot be combined with remote SSH options.')
+            bundle, token = prepare_local_voice(args.profile, args.address, port=args.remote_port,
+                                                ssh_port=args.ssh_port, state_dir=args.state_dir)
+            route = None
+        else:
+            if service == 'voice' and args.state_dir:
+                raise ValueError('--state-dir requires --local; use --remote-state-dir for an SSH destination.')
+            bundle, token, route = prepare(args.profile, ssh=args.ssh, remote_port=args.remote_port, remote_bin=args.remote_bin,
+                                           service=service, remote_state_dir=getattr(args, 'remote_state_dir', None))
         state = PairingState(bundle, token)
         with tempfile.TemporaryDirectory(prefix='ct-pair-') as directory:
             context, fingerprint = certificate(directory)
@@ -357,7 +406,8 @@ def main(argv=None):
                 qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M)
                 qr.add_data(code)
                 qr.make(fit=True)  # Never truncate an oversized payload.
-                print(f'Pair {args.profile}: scan in Agent Console → Settings → Connections → Pair phone.')
+                location = 'Voice → Pair voice server' if service == 'voice' else 'Connections → Pair phone'
+                print(f'Pair {args.profile}: scan in Agent Console → Settings → {location}.')
                 print(f'Temporary HTTPS endpoint: https://{address}:{server.server_port} (bind: {args.bind})')
                 print('Invitation expires in five minutes. Keep this QR private.')
                 qr.print_ascii(invert=True)
@@ -387,7 +437,10 @@ def main(argv=None):
                     for index, host in enumerate(bundle['hosts']):
                         if time.monotonic() >= state.deadline:
                             raise ValueError('Invitation expired during authorization.')
-                        install_key(route, index, state.key)
+                        if route is None:
+                            install_local_key(state.key)
+                        else:
+                            install_key(route, index, state.key)
                         with state.lock:
                             state.installed.append(host['name'])
                         print('Authorized: ' + host['name'], flush=True)

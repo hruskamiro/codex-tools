@@ -119,17 +119,17 @@ class PairingTests(unittest.TestCase):
 
     def test_route_resolution_order_ports_cycles_and_unsupported_proxy(self):
         settings = {
-            'ufront': dict(hostname='158.194.103.155', user='remote', port='22', proxyjump='jump'),
+            'destination': dict(hostname='192.0.2.2', user='remote', port='22', proxyjump='jump'),
             'jump': dict(hostname='192.0.2.1', user='local', port='22'),
         }
         with patch.object(p, 'ssh_options', side_effect=lambda name: settings[name]):
-            route = p.ssh_route('ufront')
-            self.assertEqual([h[0] for h in route], ['jump', 'ufront'])
+            route = p.ssh_route('destination')
+            self.assertEqual([h[0] for h in route], ['jump', 'destination'])
             command = p.ssh_command(route, 1, 'true')
             self.assertIn('StrictHostKeyChecking=yes', command)
-            self.assertEqual(command[-4:], ['-J', 'jump', 'ufront', 'true'])
-            settings['jump']['proxyjump'] = 'ufront'
-            with self.assertRaises(ValueError): p.ssh_route('ufront')
+            self.assertEqual(command[-4:], ['-J', 'jump', 'destination', 'true'])
+            settings['jump']['proxyjump'] = 'destination'
+            with self.assertRaises(ValueError): p.ssh_route('destination')
             settings['jump'] = {'proxycommand': 'arbitrary command'}
             with self.assertRaises(ValueError): p.ssh_route('jump')
         self.assertEqual(p.target_arguments('user@jump:2222'), ['-p', '2222', 'user@jump'])
@@ -139,11 +139,11 @@ class PairingTests(unittest.TestCase):
 
     def test_prepare_exports_complete_route_without_private_keys(self):
         key, _ = phone(p.PairingState({}, ''))
-        route = [('a370', dict(hostname='192.0.2.1', user='one', port='22')),
-                 ('ufront', dict(hostname='192.0.2.2', user='two', port='2222'))]
+        route = [('jump', dict(hostname='192.0.2.1', user='one', port='22')),
+                 ('destination', dict(hostname='192.0.2.2', user='two', port='2222'))]
         with tempfile.TemporaryDirectory() as directory, patch.object(p.paths, 'user_config_dir', return_value=Path(directory)), \
                 patch.object(p, 'ssh_route', return_value=route), patch.object(p, 'run', side_effect=[key, key, 'token']):
-            bundle, token, exported_route = p.prepare('ufront-through-a370')
+            bundle, token, exported_route = p.prepare('destination-via-jump')
         self.assertEqual(token, 'token')
         self.assertEqual(exported_route, route)
         self.assertEqual(bundle['profile']['sshHostId'], bundle['hosts'][1]['id'])
@@ -151,6 +151,37 @@ class PairingTests(unittest.TestCase):
         self.assertEqual(bundle['hosts'][1]['port'], 2222)
         self.assertNotIn('token', json.dumps(bundle))
         self.assertNotIn('privateKey', json.dumps(bundle))
+
+    def test_voice_pairing_uses_independent_token_and_never_starts_relay(self):
+        key, _ = phone(p.PairingState({}, ''))
+        route = [('voice-box', dict(hostname='192.0.2.3', user='voice', port='22'))]
+        with tempfile.TemporaryDirectory() as directory, patch.object(p.paths, 'user_config_dir', return_value=Path(directory)), \
+                patch.object(p, 'ssh_route', return_value=route), patch.object(p, 'run', side_effect=[key, 'voice-token']) as run:
+            bundle, token, _ = p.prepare('voice-box', service='voice', remote_state_dir='/srv/voice-data')
+        profile = bundle['profile']
+        self.assertEqual(token, 'voice-token')
+        self.assertEqual(profile['service'], 'voice')
+        self.assertEqual(profile['url'], 'http://127.0.0.1:8790')
+        self.assertFalse(profile['autoStartRelay'])
+        self.assertEqual(run.call_args_list[-1].args[0][-1].split('exec ', 1)[-1],
+                         'ct voice --state-dir /srv/voice-data token')
+        self.assertNotIn('voice-token', json.dumps(bundle))
+
+    def test_local_voice_pairing_uses_voice_identity_and_local_ssh_host_key(self):
+        key, _ = phone(p.PairingState({}, ''))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'identity.json').write_text(json.dumps({'id': 'voice-id', 'token': 'voice-token'}))
+            (root / 'config.json').write_text(json.dumps({'port': 8792}))
+            host_key = root / 'host.pub'
+            host_key.write_text(key)
+            bundle, token = p.prepare_local_voice('local-voice', '192.0.2.4', state_dir=root,
+                                                   host_key_path=host_key)
+        self.assertEqual(token, 'voice-token')
+        self.assertEqual(bundle['profile']['url'], 'http://127.0.0.1:8792')
+        self.assertEqual(bundle['hosts'][0]['host'], '192.0.2.4')
+        self.assertEqual(bundle['hosts'][0]['username'], p.getpass.getuser())
+        self.assertEqual(bundle['profile']['service'], 'voice')
 
     @unittest.skipUnless(HAS_QR, 'optional pairing QR encoder is not installed')
     def test_invitation_fits_medium_qr_and_hides_config_and_relay_token(self):
@@ -168,7 +199,7 @@ class PairingTests(unittest.TestCase):
 
     @unittest.skipUnless(HAS_QR, 'optional pairing QR encoder is not installed')
     def test_cli_single_invitation_confirms_every_host_and_closes_on_phone_save(self):
-        bundle = {'version': 1, 'profile': {'name': 'example'}, 'hosts': [{'name': 'a370'}, {'name': 'ufront'}]}
+        bundle = {'version': 1, 'profile': {'name': 'example'}, 'hosts': [{'name': 'jump'}, {'name': 'destination'}]}
         states, installs, threads = [], [], []
         original = p.invitation
 
@@ -197,12 +228,12 @@ class PairingTests(unittest.TestCase):
             self.assertEqual(p.main(['pair-phone', 'example', '--address', '127.0.0.1', '--bind', '127.0.0.1']), 0)
         for thread in threads: thread.join()
         self.assertEqual(installs, [0, 1])
-        self.assertEqual(states[0].installed, ['a370', 'ufront'])
+        self.assertEqual(states[0].installed, ['jump', 'destination'])
         self.assertTrue(states[0].acknowledged.is_set())
 
     @unittest.skipUnless(HAS_QR, 'optional pairing QR encoder is not installed')
     def test_cli_refusal_never_installs_key(self):
-        state = p.PairingState({'version': 1, 'hosts': [{'name': 'ufront'}]}, 'token')
+        state = p.PairingState({'version': 1, 'hosts': [{'name': 'destination'}]}, 'token')
         key, proof = phone(state)
         state.submit(key, proof)
         # Skip grace wait in this rejection-only fixture.
