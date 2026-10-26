@@ -618,6 +618,13 @@ The command requires the optional QR encoder (`pipx inject codex-tools qrcode`).
 See [phone pairing](docs/phone-pairing.md) for fingerprint confirmation,
 reachability, expiry and recovery.
 
+## Mobile PDF reading
+
+The mobile console can request phone-portrait PDF blocks through the relay,
+with independent wide tables/code and offline caching. The server needs its
+normal LaTeX/fonts; the phone includes its PDF reader. See
+[mobile PDF reading](docs/mobile-pdf.md).
+
 ## Profile manager
 
 Profiles give each account its own `CODEX_HOME`, login, and configuration.
