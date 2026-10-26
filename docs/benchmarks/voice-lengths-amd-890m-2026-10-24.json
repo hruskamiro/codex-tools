@@ -1,0 +1,648 @@
+{
+  "date": "2026-10-24",
+  "sample": {
+    "source": "LibriSpeech test-clean, Panayotov et al., OpenSLR SLR12",
+    "source_page": "https://www.openslr.org/12/",
+    "source_archive": "https://www.openslr.org/resources/12/test-clean.tar.gz",
+    "license": "CC BY 4.0",
+    "preparation": "Distinct sequential utterances concatenated in archive order, decoded to mono 16 kHz 16-bit PCM, then truncated to exact durations. No repeated audio or added silence.",
+    "clips": [
+      {
+        "archive_member": "LibriSpeech/test-clean/6930/75918/6930-75918-0000.flac",
+        "source_sha256": "9ce35224156f071ab58eb7feb8a5ceae600f6f9f353da2a6cbf797b6b1ac8a23",
+        "seconds": 3.505
+      },
+      {
+        "archive_member": "LibriSpeech/test-clean/6930/75918/6930-75918-0007.flac",
+        "source_sha256": "059969de8f6b780e1a4982805e977c3e73e40d3759c8fa8cb0cb8fabd9eb5b27",
+        "seconds": 3.315
+      },
+      {
+        "archive_member": "LibriSpeech/test-clean/6930/75918/6930-75918-0006.flac",
+        "source_sha256": "4bed112ebfdba58ec061abd3fe013f89946863e9c51e8a83b50a5eb7afb9ce65",
+        "seconds": 5.85
+      },
+      {
+        "archive_member": "LibriSpeech/test-clean/6930/75918/6930-75918-0005.flac",
+        "source_sha256": "ccc0da025ef4f4596a4e70fbde291527d140364166d19d9bb516a48407b3491e",
+        "seconds": 13.16
+      },
+      {
+        "archive_member": "LibriSpeech/test-clean/6930/75918/6930-75918-0004.flac",
+        "source_sha256": "e1c4755c2febfc6b77fde418821c57e2e980d84d4c79a73ff60c6e6dfc794eac",
+        "seconds": 11.065
+      },
+      {
+        "archive_member": "LibriSpeech/test-clean/6930/75918/6930-75918-0002.flac",
+        "source_sha256": "74ecfd628f49dca71995972c075fcc9904df804d49a4eb5b11fb712b3584f789",
+        "seconds": 5.025
+      },
+      {
+        "archive_member": "LibriSpeech/test-clean/6930/75918/6930-75918-0011.flac",
+        "source_sha256": "20e49ab7c5b418f379e775f2966616d1bd60fa6ef5d1ffc6d99de5b075e75284",
+        "seconds": 3.195
+      },
+      {
+        "archive_member": "LibriSpeech/test-clean/6930/75918/6930-75918-0015.flac",
+        "source_sha256": "93618408931cd8bcc83f064b61bf2413a0fbbed356f006ccfe80131d9966cf6d",
+        "seconds": 6.38
+      },
+      {
+        "archive_member": "LibriSpeech/test-clean/6930/75918/6930-75918-0003.flac",
+        "source_sha256": "0ec415739efc00adcbe70838f6c207ee4ae8b31639bad534138c3d26d890f58b",
+        "seconds": 23.315
+      },
+      {
+        "archive_member": "LibriSpeech/test-clean/6930/75918/6930-75918-0010.flac",
+        "source_sha256": "fa67866b5efc5df7fe35e2f27ad8f9d1f344f7848ce30d8b131f77a372f96add",
+        "seconds": 3.035
+      },
+      {
+        "archive_member": "LibriSpeech/test-clean/6930/75918/6930-75918-0001.flac",
+        "source_sha256": "3dfad7eb0793eddd5040d04f1f2f3046ceeee39e0ec461794856a350e1bd728e",
+        "seconds": 14.225
+      },
+      {
+        "archive_member": "LibriSpeech/test-clean/6930/75918/6930-75918-0018.flac",
+        "source_sha256": "3f06a2712cadb8d5bca9618a1560112d7e1e0c229e0dd7f0c4f736f4bcb661b3",
+        "seconds": 10.81
+      },
+      {
+        "archive_member": "LibriSpeech/test-clean/6930/75918/6930-75918-0008.flac",
+        "source_sha256": "ac916dcbcbb3240dcdbf3523b300345e33cdc3ebdfdd3538be49f208c134c4dd",
+        "seconds": 4.785
+      },
+      {
+        "archive_member": "LibriSpeech/test-clean/6930/75918/6930-75918-0017.flac",
+        "source_sha256": "1564e19057a9a89225cac9423544baa6f3fc71dd9dc8ba11f8ee86d5464bb1a4",
+        "seconds": 6.16
+      },
+      {
+        "archive_member": "LibriSpeech/test-clean/6930/75918/6930-75918-0016.flac",
+        "source_sha256": "1309ce10b1ea54782b53f116697ec58eaf84525b396db3daca3e9e2f47c4edf8",
+        "seconds": 10.015
+      },
+      {
+        "archive_member": "LibriSpeech/test-clean/6930/75918/6930-75918-0013.flac",
+        "source_sha256": "83f99c357f446d1fddffc61c09f59eb8a41c82c5e4261db42c71396c537c409e",
+        "seconds": 2.94
+      },
+      {
+        "archive_member": "LibriSpeech/test-clean/6930/75918/6930-75918-0019.flac",
+        "source_sha256": "aaae97a4b13b4ccc8a59dcf5402bd5d63370116e21183c5b84fb4024eea7d755",
+        "seconds": 11.6450625
+      },
+      {
+        "archive_member": "LibriSpeech/test-clean/6930/75918/6930-75918-0014.flac",
+        "source_sha256": "a0c581aa99f18fb4f427d40c9096f750ce6d6ef5d4721347d2bf5a36d2b5302d",
+        "seconds": 16.84
+      },
+      {
+        "archive_member": "LibriSpeech/test-clean/6930/75918/6930-75918-0009.flac",
+        "source_sha256": "def314bf5fa2c02ce5101bda550ee003760e4f4c3aa6f96699c3110c66be2048",
+        "seconds": 7.28
+      },
+      {
+        "archive_member": "LibriSpeech/test-clean/6930/75918/6930-75918-0020.flac",
+        "source_sha256": "30c19b924b666897aca99c621b821b82c69084a04140776770e86109129869ac",
+        "seconds": 14.4
+      },
+      {
+        "archive_member": "LibriSpeech/test-clean/6930/75918/6930-75918-0012.flac",
+        "source_sha256": "c158fe562a03db715f581485e9d372003163a272113f38fe45336415997d0b5f",
+        "seconds": 1.94
+      },
+      {
+        "archive_member": "LibriSpeech/test-clean/6930/76324/6930-76324-0006.flac",
+        "source_sha256": "4873994e64812d4ea670632dcdc4d462244e97d92224b033381269ee3c630fd1",
+        "seconds": 4.455
+      }
+    ],
+    "samples": [
+      {
+        "seconds": 15,
+        "sha256": "a4a4baacc089d9e3535b32e102381b0e6882711386aab3e1a8ccd4018226dcbe",
+        "bytes": 480044
+      },
+      {
+        "seconds": 30,
+        "sha256": "8a0dfac8bd6cf37bc7d5e3c6c8fce5dadf0bb5948f8eb4a1c005a2727e62b2fa",
+        "bytes": 960044
+      },
+      {
+        "seconds": 60,
+        "sha256": "966db3e7d440c082468052bec66cf9b94502b6d68105a96a11ce7f25aee9c3cc",
+        "bytes": 1920044
+      },
+      {
+        "seconds": 120,
+        "sha256": "aa0375607c23f3c0553ca57b425c66da1fd3ee15e6ec62c83e71bf75e0c57f72",
+        "bytes": 3840044
+      },
+      {
+        "seconds": 180,
+        "sha256": "9c846b834401c5ab60bba9ac42a85af80645c90ce3c3b590f4836dbf175734da",
+        "bytes": 5760044
+      }
+    ]
+  },
+  "hardware": {
+    "cpu": "AMD Ryzen AI 9 HX 370",
+    "gpu": "AMD Radeon 890M Graphics (RADV GFX1150)",
+    "platform": "Linux-7.0.0-31-generic-x86_64-with-glibc2.39",
+    "threads": 4
+  },
+  "method": "Sequential runs, one persistent localhost whisper-server per model/device; one request at each new duration followed by three measured requests. Mono 16 kHz WAV; explicit English. HTTP inference time includes local upload, decoding and recognition; excludes model startup, mobile network, durable queue wait and draft insertion. CPU runs at 30/60s; GPU runs at 15/30/60/120/180s. Model startup and first request at each length retained separately. No concurrent benchmark inference.",
+  "results": [
+    {
+      "model": "small.en",
+      "device": "AMD Radeon 890M Graphics (RADV GFX1150) (radv)",
+      "backend": "Vulkan0",
+      "verified": true,
+      "audio_seconds": 15,
+      "model_bytes": 487614201,
+      "startup_seconds": 0.2069956138730049,
+      "first_request_at_length_seconds": 0.566369900945574,
+      "processing_seconds": [
+        0.6132401302456856,
+        0.5984642002731562,
+        0.5736163258552551
+      ],
+      "mean_seconds": 0.5951068854580323,
+      "min_seconds": 0.5736163258552551,
+      "max_seconds": 0.6132401302456856,
+      "realtime_factor": 0.039673792363868816,
+      "speed_vs_realtime": 25.205556121998224,
+      "transcript_word_count": 40,
+      "transcript_sha256": "81cd583e71c20adc4456a8208880f1004ac47ffb7cfdc81abaf88452da39ff1a",
+      "requested_device": "gpu"
+    },
+    {
+      "model": "small.en",
+      "device": "AMD Radeon 890M Graphics (RADV GFX1150) (radv)",
+      "backend": "Vulkan0",
+      "verified": true,
+      "audio_seconds": 30,
+      "model_bytes": 487614201,
+      "startup_seconds": 0.2069956138730049,
+      "first_request_at_length_seconds": 1.0984687898308039,
+      "processing_seconds": [
+        1.0928964358754456,
+        1.1165486969985068,
+        1.0954172951169312
+      ],
+      "mean_seconds": 1.1016208093302946,
+      "min_seconds": 1.0928964358754456,
+      "max_seconds": 1.1165486969985068,
+      "realtime_factor": 0.036720693644343154,
+      "speed_vs_realtime": 27.2326010419482,
+      "transcript_word_count": 82,
+      "transcript_sha256": "71dfd7e2bdd546276ca216065b6d20f09c899f62cb8f5cb63eeb63e8d4e7141f",
+      "requested_device": "gpu"
+    },
+    {
+      "model": "small.en",
+      "device": "AMD Radeon 890M Graphics (RADV GFX1150) (radv)",
+      "backend": "Vulkan0",
+      "verified": true,
+      "audio_seconds": 60,
+      "model_bytes": 487614201,
+      "startup_seconds": 0.2069956138730049,
+      "first_request_at_length_seconds": 2.0923530887812376,
+      "processing_seconds": [
+        2.1086922520771623,
+        2.0727371107786894,
+        2.0538469129242003
+      ],
+      "mean_seconds": 2.078425425260017,
+      "min_seconds": 2.0538469129242003,
+      "max_seconds": 2.1086922520771623,
+      "realtime_factor": 0.03464042375433362,
+      "speed_vs_realtime": 28.86800713212687,
+      "transcript_word_count": 162,
+      "transcript_sha256": "c0acfdad796a48599048077c3d2c2adb4c8819ce42845564a281fd1bf8fca5b3",
+      "requested_device": "gpu"
+    },
+    {
+      "model": "small.en",
+      "device": "AMD Radeon 890M Graphics (RADV GFX1150) (radv)",
+      "backend": "Vulkan0",
+      "verified": true,
+      "audio_seconds": 120,
+      "model_bytes": 487614201,
+      "startup_seconds": 0.2069956138730049,
+      "first_request_at_length_seconds": 3.983487954828888,
+      "processing_seconds": [
+        4.065253579057753,
+        4.029327010735869,
+        4.0558956558816135
+      ],
+      "mean_seconds": 4.050158748558412,
+      "min_seconds": 4.029327010735869,
+      "max_seconds": 4.065253579057753,
+      "realtime_factor": 0.033751322904653436,
+      "speed_vs_realtime": 29.62846827737605,
+      "transcript_word_count": 317,
+      "transcript_sha256": "4d01b30bc4aee34c76123f75e115b1d6e8e14250f1233be8760be651e1d6849e",
+      "requested_device": "gpu"
+    },
+    {
+      "model": "small.en",
+      "device": "AMD Radeon 890M Graphics (RADV GFX1150) (radv)",
+      "backend": "Vulkan0",
+      "verified": true,
+      "audio_seconds": 180,
+      "model_bytes": 487614201,
+      "startup_seconds": 0.2069956138730049,
+      "first_request_at_length_seconds": 6.242864536121488,
+      "processing_seconds": [
+        6.2014709478244185,
+        6.68388772662729,
+        6.406037645880133
+      ],
+      "mean_seconds": 6.430465440110614,
+      "min_seconds": 6.2014709478244185,
+      "max_seconds": 6.68388772662729,
+      "realtime_factor": 0.03572480800061452,
+      "speed_vs_realtime": 27.99175295729507,
+      "transcript_word_count": 484,
+      "transcript_sha256": "8f038e2bc0d3e1bf708f0b21613254af5cfa4c08b7028cc0bf04f8724a1bfa91",
+      "requested_device": "gpu"
+    },
+    {
+      "model": "medium.en",
+      "device": "AMD Radeon 890M Graphics (RADV GFX1150) (radv)",
+      "backend": "Vulkan0",
+      "verified": true,
+      "audio_seconds": 15,
+      "model_bytes": 1533774781,
+      "startup_seconds": 0.4416082832030952,
+      "first_request_at_length_seconds": 1.6034191967919469,
+      "processing_seconds": [
+        1.5740116513334215,
+        1.5924200769513845,
+        1.5755589688196778
+      ],
+      "mean_seconds": 1.5806635657014947,
+      "min_seconds": 1.5740116513334215,
+      "max_seconds": 1.5924200769513845,
+      "realtime_factor": 0.10537757104676632,
+      "speed_vs_realtime": 9.489685424199068,
+      "transcript_word_count": 43,
+      "transcript_sha256": "b2ced9d12d24b7434d6edcf9acf40f4cfb36b349bb7ccab8a4be7bfcda4bd106",
+      "requested_device": "gpu"
+    },
+    {
+      "model": "medium.en",
+      "device": "AMD Radeon 890M Graphics (RADV GFX1150) (radv)",
+      "backend": "Vulkan0",
+      "verified": true,
+      "audio_seconds": 30,
+      "model_bytes": 1533774781,
+      "startup_seconds": 0.4416082832030952,
+      "first_request_at_length_seconds": 3.5841994220390916,
+      "processing_seconds": [
+        3.64129925891757,
+        3.1913811429403722,
+        3.046656963881105
+      ],
+      "mean_seconds": 3.2931124552463493,
+      "min_seconds": 3.046656963881105,
+      "max_seconds": 3.64129925891757,
+      "realtime_factor": 0.10977041517487832,
+      "speed_vs_realtime": 9.109922727420427,
+      "transcript_word_count": 84,
+      "transcript_sha256": "9f26d9a7d63c8a7a3c535acf13a1b1dee3d5f806f7967d94095ade8ae359407c",
+      "requested_device": "gpu"
+    },
+    {
+      "model": "medium.en",
+      "device": "AMD Radeon 890M Graphics (RADV GFX1150) (radv)",
+      "backend": "Vulkan0",
+      "verified": true,
+      "audio_seconds": 60,
+      "model_bytes": 1533774781,
+      "startup_seconds": 0.4416082832030952,
+      "first_request_at_length_seconds": 5.74577903887257,
+      "processing_seconds": [
+        5.7849825620651245,
+        5.621277033817023,
+        5.568058305885643
+      ],
+      "mean_seconds": 5.65810596725593,
+      "min_seconds": 5.568058305885643,
+      "max_seconds": 5.7849825620651245,
+      "realtime_factor": 0.09430176612093218,
+      "speed_vs_realtime": 10.60425526620153,
+      "transcript_word_count": 161,
+      "transcript_sha256": "fba91515a48ad8b378dce616cef116eb1553e1ac047cc797ad900ac0f899d060",
+      "requested_device": "gpu"
+    },
+    {
+      "model": "medium.en",
+      "device": "AMD Radeon 890M Graphics (RADV GFX1150) (radv)",
+      "backend": "Vulkan0",
+      "verified": true,
+      "audio_seconds": 120,
+      "model_bytes": 1533774781,
+      "startup_seconds": 0.4416082832030952,
+      "first_request_at_length_seconds": 10.583761462941766,
+      "processing_seconds": [
+        10.449301993008703,
+        10.524151736870408,
+        10.422507341951132
+      ],
+      "mean_seconds": 10.465320357276747,
+      "min_seconds": 10.422507341951132,
+      "max_seconds": 10.524151736870408,
+      "realtime_factor": 0.08721100297730623,
+      "speed_vs_realtime": 11.46644306177991,
+      "transcript_word_count": 317,
+      "transcript_sha256": "a519f63deedad3e2574d849b66a2098f0e3226bdfcbbc86e429f0123d296c9d8",
+      "requested_device": "gpu"
+    },
+    {
+      "model": "medium.en",
+      "device": "AMD Radeon 890M Graphics (RADV GFX1150) (radv)",
+      "backend": "Vulkan0",
+      "verified": true,
+      "audio_seconds": 180,
+      "model_bytes": 1533774781,
+      "startup_seconds": 0.4416082832030952,
+      "first_request_at_length_seconds": 15.87831358704716,
+      "processing_seconds": [
+        15.849534361157566,
+        15.924742483068258,
+        15.822330342140049
+      ],
+      "mean_seconds": 15.865535728788624,
+      "min_seconds": 15.822330342140049,
+      "max_seconds": 15.924742483068258,
+      "realtime_factor": 0.0881418651599368,
+      "speed_vs_realtime": 11.34534648416461,
+      "transcript_word_count": 488,
+      "transcript_sha256": "af80cba92a538ba9208e22fc726a23a8709133d2ff169cba0b42310b4b0d8832",
+      "requested_device": "gpu"
+    },
+    {
+      "model": "large-v3",
+      "device": "AMD Radeon 890M Graphics (RADV GFX1150) (radv)",
+      "backend": "Vulkan0",
+      "verified": true,
+      "audio_seconds": 15,
+      "model_bytes": 3095033483,
+      "startup_seconds": 0.8706622151657939,
+      "first_request_at_length_seconds": 2.8505115141160786,
+      "processing_seconds": [
+        2.899124895222485,
+        2.926447431091219,
+        2.867214434314519
+      ],
+      "mean_seconds": 2.8975955868760743,
+      "min_seconds": 2.867214434314519,
+      "max_seconds": 2.926447431091219,
+      "realtime_factor": 0.1931730391250716,
+      "speed_vs_realtime": 5.176705841194231,
+      "transcript_word_count": 40,
+      "transcript_sha256": "0f8b00447cb99428585889a9e3e033ec2b5f02cfb7f4d734720d03b0d54050a9",
+      "requested_device": "gpu"
+    },
+    {
+      "model": "large-v3",
+      "device": "AMD Radeon 890M Graphics (RADV GFX1150) (radv)",
+      "backend": "Vulkan0",
+      "verified": true,
+      "audio_seconds": 30,
+      "model_bytes": 3095033483,
+      "startup_seconds": 0.8706622151657939,
+      "first_request_at_length_seconds": 4.248774298001081,
+      "processing_seconds": [
+        4.262267822865397,
+        4.277891234960407,
+        4.268542814068496
+      ],
+      "mean_seconds": 4.269567290631433,
+      "min_seconds": 4.262267822865397,
+      "max_seconds": 4.277891234960407,
+      "realtime_factor": 0.14231890968771443,
+      "speed_vs_realtime": 7.026473166455998,
+      "transcript_word_count": 78,
+      "transcript_sha256": "c25fb36a1fe727da6ed27d7c4ea0c918bb1355bfd3ed6dbd0a777316acd398d4",
+      "requested_device": "gpu"
+    },
+    {
+      "model": "large-v3",
+      "device": "AMD Radeon 890M Graphics (RADV GFX1150) (radv)",
+      "backend": "Vulkan0",
+      "verified": true,
+      "audio_seconds": 60,
+      "model_bytes": 3095033483,
+      "startup_seconds": 0.8706622151657939,
+      "first_request_at_length_seconds": 19.601188281085342,
+      "processing_seconds": [
+        19.49988771509379,
+        19.557867894880474,
+        19.546866198070347
+      ],
+      "mean_seconds": 19.534873936014872,
+      "min_seconds": 19.49988771509379,
+      "max_seconds": 19.557867894880474,
+      "realtime_factor": 0.32558123226691454,
+      "speed_vs_realtime": 3.071430109890949,
+      "transcript_word_count": 161,
+      "transcript_sha256": "848dbdaf43cd6d8a89e9d08c0720f46b81025fc7ec7112dcab0e102d15638004",
+      "requested_device": "gpu"
+    },
+    {
+      "model": "large-v3",
+      "device": "AMD Radeon 890M Graphics (RADV GFX1150) (radv)",
+      "backend": "Vulkan0",
+      "verified": true,
+      "audio_seconds": 120,
+      "model_bytes": 3095033483,
+      "startup_seconds": 0.8706622151657939,
+      "first_request_at_length_seconds": 23.012403463944793,
+      "processing_seconds": [
+        27.059162110090256,
+        27.27087820507586,
+        27.184272594749928
+      ],
+      "mean_seconds": 27.171437636638682,
+      "min_seconds": 27.059162110090256,
+      "max_seconds": 27.27087820507586,
+      "realtime_factor": 0.22642864697198903,
+      "speed_vs_realtime": 4.4164023120436156,
+      "transcript_word_count": 319,
+      "transcript_sha256": "5da00910412229e2adfc9db91cbe71f3a2b976b361b9536f4373a35c5897f220",
+      "requested_device": "gpu"
+    },
+    {
+      "model": "large-v3",
+      "device": "AMD Radeon 890M Graphics (RADV GFX1150) (radv)",
+      "backend": "Vulkan0",
+      "verified": true,
+      "audio_seconds": 180,
+      "model_bytes": 3095033483,
+      "startup_seconds": 0.8706622151657939,
+      "first_request_at_length_seconds": 40.60322454292327,
+      "processing_seconds": [
+        40.50064159883186,
+        40.43545729294419,
+        36.29506718181074
+      ],
+      "mean_seconds": 39.077055357862264,
+      "min_seconds": 36.29506718181074,
+      "max_seconds": 40.50064159883186,
+      "realtime_factor": 0.2170947519881237,
+      "speed_vs_realtime": 4.606283619673614,
+      "transcript_word_count": 487,
+      "transcript_sha256": "261f9abb8577283145fea8a71974cac39e67a16a4ade67a1d3818b1f31eff658",
+      "requested_device": "gpu"
+    },
+    {
+      "model": "small.en",
+      "device": "CPU",
+      "backend": "CPU",
+      "verified": true,
+      "audio_seconds": 30,
+      "model_bytes": 487614201,
+      "startup_seconds": 0.2674434627406299,
+      "first_request_at_length_seconds": 5.642054473981261,
+      "processing_seconds": [
+        5.403928737156093,
+        5.418912077788264,
+        5.331690103746951
+      ],
+      "mean_seconds": 5.384843639563769,
+      "min_seconds": 5.331690103746951,
+      "max_seconds": 5.418912077788264,
+      "realtime_factor": 0.17949478798545898,
+      "speed_vs_realtime": 5.571192407441997,
+      "transcript_word_count": 82,
+      "transcript_sha256": "71dfd7e2bdd546276ca216065b6d20f09c899f62cb8f5cb63eeb63e8d4e7141f",
+      "requested_device": "cpu"
+    },
+    {
+      "model": "small.en",
+      "device": "CPU",
+      "backend": "CPU",
+      "verified": true,
+      "audio_seconds": 60,
+      "model_bytes": 487614201,
+      "startup_seconds": 0.2674434627406299,
+      "first_request_at_length_seconds": 8.825889841653407,
+      "processing_seconds": [
+        8.814002481289208,
+        8.761380919720978,
+        8.905061739962548
+      ],
+      "mean_seconds": 8.82681504699091,
+      "min_seconds": 8.761380919720978,
+      "max_seconds": 8.905061739962548,
+      "realtime_factor": 0.14711358411651518,
+      "speed_vs_realtime": 6.797468812995486,
+      "transcript_word_count": 162,
+      "transcript_sha256": "c0acfdad796a48599048077c3d2c2adb4c8819ce42845564a281fd1bf8fca5b3",
+      "requested_device": "cpu"
+    },
+    {
+      "model": "medium.en",
+      "device": "CPU",
+      "backend": "CPU",
+      "verified": true,
+      "audio_seconds": 30,
+      "model_bytes": 1533774781,
+      "startup_seconds": 0.44490977516397834,
+      "first_request_at_length_seconds": 16.606272934004664,
+      "processing_seconds": [
+        16.668838603422046,
+        16.72116015199572,
+        16.70716902986169
+      ],
+      "mean_seconds": 16.699055928426485,
+      "min_seconds": 16.668838603422046,
+      "max_seconds": 16.72116015199572,
+      "realtime_factor": 0.5566351976142162,
+      "speed_vs_realtime": 1.7965087444812715,
+      "transcript_word_count": 84,
+      "transcript_sha256": "9f26d9a7d63c8a7a3c535acf13a1b1dee3d5f806f7967d94095ade8ae359407c",
+      "requested_device": "cpu"
+    },
+    {
+      "model": "medium.en",
+      "device": "CPU",
+      "backend": "CPU",
+      "verified": true,
+      "audio_seconds": 60,
+      "model_bytes": 1533774781,
+      "startup_seconds": 0.44490977516397834,
+      "first_request_at_length_seconds": 27.74279915401712,
+      "processing_seconds": [
+        27.767897471785545,
+        27.725063170306385,
+        28.328390781767666
+      ],
+      "mean_seconds": 27.940450474619865,
+      "min_seconds": 27.725063170306385,
+      "max_seconds": 28.328390781767666,
+      "realtime_factor": 0.4656741745769978,
+      "speed_vs_realtime": 2.147424217605293,
+      "transcript_word_count": 161,
+      "transcript_sha256": "fba91515a48ad8b378dce616cef116eb1553e1ac047cc797ad900ac0f899d060",
+      "requested_device": "cpu"
+    },
+    {
+      "model": "large-v3",
+      "device": "CPU",
+      "backend": "CPU",
+      "verified": true,
+      "audio_seconds": 30,
+      "model_bytes": 3095033483,
+      "startup_seconds": 0.8828592309728265,
+      "first_request_at_length_seconds": 31.513062376063317,
+      "processing_seconds": [
+        31.477096798829734,
+        31.192791393958032,
+        31.39120597112924
+      ],
+      "mean_seconds": 31.353698054639,
+      "min_seconds": 31.192791393958032,
+      "max_seconds": 31.477096798829734,
+      "realtime_factor": 1.0451232684879668,
+      "speed_vs_realtime": 0.956824931710449,
+      "transcript_word_count": 78,
+      "transcript_sha256": "c25fb36a1fe727da6ed27d7c4ea0c918bb1355bfd3ed6dbd0a777316acd398d4",
+      "requested_device": "cpu"
+    },
+    {
+      "model": "large-v3",
+      "device": "CPU",
+      "backend": "CPU",
+      "verified": true,
+      "audio_seconds": 60,
+      "model_bytes": 3095033483,
+      "startup_seconds": 0.8828592309728265,
+      "first_request_at_length_seconds": 65.3370139459148,
+      "processing_seconds": [
+        65.59834703803062,
+        65.49623790290207,
+        67.20129277324304
+      ],
+      "mean_seconds": 66.09862590472524,
+      "min_seconds": 65.49623790290207,
+      "max_seconds": 67.20129277324304,
+      "realtime_factor": 1.101643765078754,
+      "speed_vs_realtime": 0.9077344525510135,
+      "transcript_word_count": 161,
+      "transcript_sha256": "848dbdaf43cd6d8a89e9d08c0720f46b81025fc7ec7112dcab0e102d15638004",
+      "requested_device": "cpu"
+    }
+  ],
+  "engine_binary_sha256": "43f95fb31818c5abdf8329a15425b3d2cceb1281d056099af787949c5edd0f15",
+  "notes": [
+    "Different speech from the earlier 11-second JFK benchmark. These nested prefixes use distinct utterances rather than looped audio.",
+    "Model process remains alive across durations. Three timed requests follow an initial request at each length. Startup and initial requests are separate.",
+    "Results are processing measurements for this recording, not latency bounds or an accuracy comparison. Upload bandwidth, queue wait and competing hardware workloads affect user-visible latency.",
+    "Large-v3 took disproportionately longer at 60 seconds than at 30 seconds, consistently across repeats; no decoding settings were changed to optimize this case."
+  ]
+}

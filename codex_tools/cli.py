@@ -30,6 +30,7 @@ Commands:
   viewer      Run the local conversation viewer.
   manager     Manage isolated Codex profiles.
   relay       Manage resilient agent synchronization and its local cache.
+  voice       Configure optional Whisper transcription and durable voice jobs.
   alias       Install or remove the short ct alias.
   structured  Run structured tasks and manage their connections.
   config      Inspect or change per-user defaults.
@@ -47,6 +48,7 @@ Examples:
   codex-tools viewer
   codex-tools manager list
   codex-tools relay cache status
+  codex-tools voice doctor
   codex-tools alias install
   codex-tools structured connection status
   codex-tools structured connection usage
@@ -82,6 +84,10 @@ def main(argv: list[str] | None = None) -> int:
         return manager.main(rest, prog="codex-tools manager")
     if command == "relay":
         return relay.main(rest)
+    if command == "voice":
+        from codex_tools import voice
+
+        return voice.main(rest)
     if command == "app-server":
         print(
             "error: `codex-tools app-server` was renamed to "

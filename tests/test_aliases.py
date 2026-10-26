@@ -84,13 +84,14 @@ class AliasTests(unittest.TestCase):
 
     def test_completion_covers_current_command_groups(self) -> None:
         expected = {
-            "activity agents search summary viewer manager relay alias structured config diagnose",
+            "activity agents search summary viewer manager relay voice alias structured config diagnose",
             "list show send stop ui",
             "today yesterday day week model site clean",
             "serve start restart stop status open pick doctor",
             "new rename export import list run install uninstall remove rm delete path doctor repair",
             "init token pair peers sync connect serve outbox cache",
             "refresh status",
+            "init token configure install doctor models serve status benchmark",
             "login status usage list logout test",
             "install remove list",
             "run batch check connection",

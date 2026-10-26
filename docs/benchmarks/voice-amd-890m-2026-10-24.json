@@ -1,0 +1,151 @@
+{
+  "sample": "whisper.cpp/samples/jfk.wav",
+  "sample_seconds": 11.0,
+  "notes": "One clean public English sample; throughput sanity check, not an accuracy ranking. Three warm requests per device/model; no concurrent inference. Loading shown separately.",
+  "results": [
+    {
+      "model": "small.en",
+      "requested_device": "cpu",
+      "gpu_verified": false,
+      "gpu_device": null,
+      "threads": 4,
+      "model_bytes": 487614201,
+      "audio_seconds": 11.0,
+      "startup_seconds": 0.8416209062561393,
+      "first_transcription_seconds": 2.430128337815404,
+      "warm_transcription_seconds": [
+        2.3743243990466,
+        2.3839773000217974,
+        2.390745318029076
+      ],
+      "warm_mean_seconds": 2.3830156723658242,
+      "realtime_factor": 0.2166377883968931,
+      "speed_vs_realtime": 4.615999855795894,
+      "durable_queue_seconds": 2.4113432629965246,
+      "transcript": "And so, my fellow Americans, ask not what your country can\n do for you.\n Ask what you can do for your country.",
+      "queue_transcript": "And so, my fellow Americans, ask not what your country can\n do for you.\n Ask what you can do for your country.",
+      "words_match_reference": true
+    },
+    {
+      "model": "small.en",
+      "requested_device": "gpu",
+      "gpu_verified": true,
+      "gpu_device": "AMD Radeon 890M Graphics (RADV GFX1150) (radv)",
+      "threads": 4,
+      "model_bytes": 487614201,
+      "audio_seconds": 11.0,
+      "startup_seconds": 0.34002783289179206,
+      "first_transcription_seconds": 0.354461464099586,
+      "warm_transcription_seconds": [
+        0.3606903697364032,
+        0.3566912370733917,
+        0.35331847006455064
+      ],
+      "warm_mean_seconds": 0.35690002562478185,
+      "realtime_factor": 0.03244545687498017,
+      "speed_vs_realtime": 30.82095603872156,
+      "durable_queue_seconds": 0.4001359189860523,
+      "transcript": "And so, my fellow Americans, ask not what your country can\n do for you.\n Ask what you can do for your country.",
+      "queue_transcript": "And so, my fellow Americans, ask not what your country can\n do for you.\n Ask what you can do for your country.",
+      "words_match_reference": true
+    },
+    {
+      "model": "medium.en",
+      "requested_device": "cpu",
+      "gpu_verified": false,
+      "gpu_device": null,
+      "threads": 4,
+      "model_bytes": 1533774781,
+      "audio_seconds": 11.0,
+      "startup_seconds": 2.30384283978492,
+      "first_transcription_seconds": 7.672180321998894,
+      "warm_transcription_seconds": [
+        7.645713195204735,
+        7.666747358627617,
+        7.547480400186032
+      ],
+      "warm_mean_seconds": 7.619980318006128,
+      "realtime_factor": 0.6927254834551025,
+      "speed_vs_realtime": 1.4435732824672571,
+      "durable_queue_seconds": 7.730865097139031,
+      "transcript": "And so my fellow Americans, ask not what your country can\n do for you, ask what you can do for your country.",
+      "queue_transcript": "And so my fellow Americans, ask not what your country can\n do for you, ask what you can do for your country.",
+      "words_match_reference": true
+    },
+    {
+      "model": "medium.en",
+      "requested_device": "gpu",
+      "gpu_verified": true,
+      "gpu_device": "AMD Radeon 890M Graphics (RADV GFX1150) (radv)",
+      "threads": 4,
+      "model_bytes": 1533774781,
+      "audio_seconds": 11.0,
+      "startup_seconds": 0.5067479349672794,
+      "first_transcription_seconds": 0.9677213970571756,
+      "warm_transcription_seconds": [
+        0.9415289042517543,
+        0.94895950704813,
+        0.943136871792376
+      ],
+      "warm_mean_seconds": 0.9445417610307535,
+      "realtime_factor": 0.08586743282097759,
+      "speed_vs_realtime": 11.645858821526314,
+      "durable_queue_seconds": 0.9892295310273767,
+      "transcript": "And so my fellow Americans, ask not what your country can\n do for you, ask what you can do for your country.",
+      "queue_transcript": "And so my fellow Americans, ask not what your country can\n do for you, ask what you can do for your country.",
+      "words_match_reference": true
+    },
+    {
+      "model": "large-v3",
+      "requested_device": "cpu",
+      "gpu_verified": false,
+      "gpu_device": null,
+      "threads": 4,
+      "model_bytes": 3095033483,
+      "audio_seconds": 11.0,
+      "startup_seconds": 1.0331175341270864,
+      "first_transcription_seconds": 15.095002498012036,
+      "warm_transcription_seconds": [
+        15.048579799942672,
+        15.010860551148653,
+        15.019683525897563
+      ],
+      "warm_mean_seconds": 15.026374625662962,
+      "realtime_factor": 1.366034056878451,
+      "speed_vs_realtime": 0.732046170419146,
+      "durable_queue_seconds": 15.174571179319173,
+      "transcript": "And so my fellow Americans,\n ask not what your country can do for you,\n ask what you can do for your country.",
+      "queue_transcript": "And so my fellow Americans,\n ask not what your country can do for you,\n ask what you can do for your country.",
+      "words_match_reference": true
+    },
+    {
+      "model": "large-v3",
+      "requested_device": "gpu",
+      "gpu_verified": true,
+      "gpu_device": "AMD Radeon 890M Graphics (RADV GFX1150) (radv)",
+      "threads": 4,
+      "model_bytes": 3095033483,
+      "audio_seconds": 11.0,
+      "startup_seconds": 0.855991248972714,
+      "first_transcription_seconds": 1.7189834523014724,
+      "warm_transcription_seconds": [
+        1.6888713645748794,
+        1.7124693309888244,
+        1.7062379089184105
+      ],
+      "warm_mean_seconds": 1.702526201494038,
+      "realtime_factor": 0.15477510922673074,
+      "speed_vs_realtime": 6.460987202632793,
+      "durable_queue_seconds": 1.76911342702806,
+      "transcript": "And so my fellow Americans,\n ask not what your country can do for you,\n ask what you can do for your country.",
+      "queue_transcript": "And so my fellow Americans,\n ask not what your country can do for you,\n ask what you can do for your country.",
+      "words_match_reference": true
+    }
+  ],
+  "sample_sha256": "59dfb9a4acb36fe2a2affc14bacbee2920ff435cb13cc314a08c13f66ba7860e",
+  "date": "2026-10-24",
+  "platform": "Linux-7.0.0-31-generic-x86_64-with-glibc2.39",
+  "cpu": "AMD Ryzen AI 9 HX 370 w/ Radeon 890M",
+  "gpu": "AMD Radeon 890M Graphics (RADV GFX1150), Mesa 25.2.8",
+  "method": "Sequential per model/device: separate temporary ct voice service with model kept loaded; one warmup, three direct recognition requests, then one durable-queue request. Four CPU threads in both modes. English language hint."
+}

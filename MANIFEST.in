@@ -1,6 +1,9 @@
 include LICENSE
 include README.md
 include SECURITY.md
+include docs/voice.md
+recursive-include docs/benchmarks *.json
+include docs/relay-voice.md
 include scripts/relay-ssh-connect
 include scripts/relay-ssh-serve
 include scripts/ct-connect-macos

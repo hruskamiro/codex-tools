@@ -580,6 +580,31 @@ ct viewer --set-default-latex
 **Nothing breaks without LaTeX.** The viewer continues to use its Markdown
 renderer when the optional toolchain is unavailable.
 
+## Optional voice transcription
+
+`ct voice` provides durable transcription jobs for the mobile console using a
+separately installed whisper.cpp `whisper-server`. Voice and agent connections
+are independent. Normal installation adds no Whisper libraries or models, and
+the agent relay does not start voice workers.
+
+```bash
+ct voice doctor                       # find whisper-server and existing Iris/models
+ct voice models list
+ct voice install large                # explicit model install; large means large-v3
+ct voice configure                    # guided model/engine setup and identity
+ct voice serve                        # follows the saved engine choice
+# In another terminal:
+ct voice status
+ct voice token                        # key for the mobile voice connection
+```
+
+Accepted jobs survive SSH disconnects and service restarts; completed results
+can be retrieved later. The phone retains unuploaded audio and returns text to
+the original draft. `ct voice status` shows the verified accelerator and recent
+processing time; `ct voice benchmark recording.wav --model large --device both`
+compares CPU/GPU locally without changing setup. See [voice installation and recovery](docs/voice.md) for
+engine discovery, CPU/GPU settings, background service setup and migration.
+
 ## Profile manager
 
 Profiles give each account its own `CODEX_HOME`, login, and configuration.
