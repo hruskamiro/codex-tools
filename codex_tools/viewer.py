@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import curses
 import hashlib
 import html
@@ -1401,14 +1402,23 @@ def attachment_inline_filename(label: str, path: Path) -> str:
 
 
 def attachment_page_document(
-    label: str, raw_url: str, *, text_content: str | None = None
+    label: str,
+    raw_url: str,
+    *,
+    text_content: str | None = None,
+    preview_url: str | None = None,
 ) -> str:
     safe_label = html.escape(label)
     safe_url = html.escape(raw_url, quote=True)
     content = (
         f'<pre dir="auto">{html.escape(text_content)}</pre>'
         if text_content is not None
-        else f'<iframe src="{safe_url}" title="{safe_label}"></iframe>'
+        else (
+            f'<iframe sandbox="allow-same-origin" src="{html.escape(preview_url, quote=True)}" '
+            f'title="{safe_label}"></iframe>'
+            if preview_url is not None
+            else f'<iframe src="{safe_url}" title="{safe_label}"></iframe>'
+        )
     )
     return f"""<!doctype html>
 <html lang="en">
@@ -1457,8 +1467,13 @@ def attachment_page_response(
         if query.get(key, [""])[0]
     }
     text_content = None
+    preview_url = None
+    if attachment_path is not None and attachment_path.suffix.lower() in {".html", ".htm"}:
+        token = base64.urlsafe_b64encode(urlencode(selector).encode()).decode()
+        preview_url = f"/open/preview/{token}/{quote(attachment_path.name, safe='')}"
     if (
         attachment_path is not None
+        and preview_url is None
         and content_type.startswith("text/")
         and attachment_path.stat().st_size <= INLINE_TEXT_ATTACHMENT_MAX_BYTES
     ):
@@ -1470,6 +1485,7 @@ def attachment_page_response(
         label,
         "/open/file?" + urlencode(selector),
         text_content=text_content,
+        preview_url=preview_url,
     ).encode("utf-8")
     handler.send_response(HTTPStatus.OK)
     handler.send_header("Content-Type", "text/html; charset=utf-8")
@@ -1485,11 +1501,64 @@ def attachment_page_response(
     handler.wfile.write(document)
 
 
+def resolve_attachment_preview(
+    state: ViewerState,
+    reference: str,
+) -> tuple[Path, str, str]:
+    """Resolve a report or passive sibling asset, anchored to its linked directory."""
+    token, separator, relative = reference.partition("/")
+    if not separator or not re.fullmatch(r"[A-Za-z0-9_=-]+", token):
+        raise FileNotFoundError("attachment not found")
+    try:
+        query = parse_qs(base64.b64decode(token, altchars=b"-_", validate=True).decode())
+    except (ValueError, UnicodeError) as exc:
+        raise FileNotFoundError("attachment not found") from exc
+    report, _, label = resolve_linked_attachment(state, query)
+    if report.suffix.lower() not in {".html", ".htm"}:
+        raise FileNotFoundError("attachment not found")
+    relative_path = Path(unquote(relative))
+    if relative_path.is_absolute() or ".." in relative_path.parts or "\x00" in str(relative_path):
+        raise FileNotFoundError("attachment not found")
+    root = report.parent.resolve()
+    candidate = (root / relative_path).resolve()
+    if not candidate.is_relative_to(root):
+        raise FileNotFoundError("attachment not found")
+    # A remote cache contains unrelated attachments, not a report directory.
+    if query.get("source", [""])[0] == "relay" and candidate != report:
+        raise FileNotFoundError("attachment not found")
+    candidate, content_type, _ = validated_attachment(candidate)
+    if candidate.suffix.lower() in {".html", ".htm"}:
+        content_type = "text/html; charset=utf-8"
+    elif candidate.suffix.lower() == ".css":
+        content_type = "text/css; charset=utf-8"
+    return candidate, content_type, label if candidate == report else candidate.name
+
+
+def attachment_preview_response(
+    handler: BaseHTTPRequestHandler,
+    path: Path,
+    content_type: str,
+    label: str,
+) -> None:
+    # Keep scripts disabled even on direct navigation. Preserving the origin lets
+    # browsers load local screenshots without opaque-origin loopback restrictions.
+    policy = (
+        "sandbox allow-same-origin; default-src 'none'; img-src 'self' data:; "
+        "style-src 'self' 'unsafe-inline'; font-src 'none'; "
+        "base-uri 'none'; form-action 'none'; frame-ancestors 'self'"
+    )
+    attachment_file_response(
+        handler, path, content_type, label, content_security_policy=policy,
+    )
+
+
 def attachment_file_response(
     handler: BaseHTTPRequestHandler,
     path: Path,
     content_type: str,
     label: str,
+    *,
+    content_security_policy: str | None = None,
 ) -> None:
     size = path.stat().st_size
     encoded_name = quote(attachment_inline_filename(label, path), safe="")
@@ -1498,6 +1567,8 @@ def attachment_file_response(
     handler.send_header("Content-Disposition", f"inline; filename*=UTF-8''{encoded_name}")
     handler.send_header("Cache-Control", "private, no-store")
     handler.send_header("X-Content-Type-Options", "nosniff")
+    if content_security_policy is not None:
+        handler.send_header("Content-Security-Policy", content_security_policy)
     handler.send_header("Content-Length", str(size))
     handler.end_headers()
     with path.open("rb") as source:
@@ -1649,6 +1720,11 @@ def make_handler(state: ViewerState) -> type[BaseHTTPRequestHandler]:
                         attachment_path=attachment_path,
                         content_type=content_type,
                     )
+                elif parsed.path.startswith("/open/preview/"):
+                    attachment_path, content_type, label = resolve_attachment_preview(
+                        state, parsed.path.removeprefix("/open/preview/")
+                    )
+                    attachment_preview_response(self, attachment_path, content_type, label)
                 elif parsed.path == "/open/file":
                     attachment_path, content_type, label = resolve_linked_attachment(
                         state, query

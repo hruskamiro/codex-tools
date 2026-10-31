@@ -1263,6 +1263,71 @@ curl https://embedded.example/ignored
         self.assertNotIn("Forged", document)
         self.assertNotIn("passwd", document)
 
+    def test_html_report_preview_renders_and_bounds_local_assets(self) -> None:
+        class Handler:
+            def __init__(self) -> None:
+                self.headers = {}
+                self.wfile = io.BytesIO()
+
+            def send_response(self, status: int) -> None:
+                self.status = status
+
+            def send_header(self, name: str, value: str) -> None:
+                self.headers[name] = value
+
+            def end_headers(self) -> None:
+                pass
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            report = root / "report.html"
+            report.write_text('<h1>Report</h1><img src="screenshots/phone.png">')
+            (root / "screenshots").mkdir()
+            image = root / "screenshots" / "phone.png"
+            image.write_bytes(b"\x89PNG\r\n\x1a\nimage")
+            (root / "escape.png").symlink_to(root.parent / "outside.png")
+            handler = Handler()
+            viewer.attachment_page_response(
+                handler, "Audit report",
+                {"path": ["session"], "line": ["884"], "link": ["0"]},
+                attachment_path=report, content_type="text/plain; charset=utf-8",
+            )
+            document = handler.wfile.getvalue().decode()
+            self.assertIn('<iframe sandbox="allow-same-origin" src="/open/preview/', document)
+            self.assertNotIn("<pre", document)
+            self.assertNotIn("allow-scripts", document)
+            reference = document.split('/open/preview/', 1)[1].split('"', 1)[0]
+            token = reference.split('/')[0]
+            with patch.object(viewer, "resolve_linked_attachment", return_value=(
+                report, "text/plain; charset=utf-8", "Audit report",
+            )) as resolve:
+                resolved = viewer.resolve_attachment_preview(None, reference)
+                self.assertEqual(resolved, (report, "text/html; charset=utf-8", "Audit report"))
+                self.assertEqual(resolve.call_args.args[1]["line"], ["884"])
+                self.assertEqual(
+                    viewer.resolve_attachment_preview(None, token + "/screenshots/phone.png")[0], image,
+                )
+                for name in ("../outside.png", "%2e%2e/outside.png", "%2Fetc/passwd", "escape.png", "%00.png"):
+                    with self.subTest(name=name), self.assertRaises(FileNotFoundError):
+                        viewer.resolve_attachment_preview(None, token + "/" + name)
+                remote_token = viewer.base64.urlsafe_b64encode(b"source=relay").decode()
+                with self.assertRaises(FileNotFoundError):
+                    viewer.resolve_attachment_preview(None, remote_token + "/screenshots/phone.png")
+            preview_handler = Handler()
+            viewer.attachment_preview_response(preview_handler, *resolved)
+            self.assertEqual(preview_handler.wfile.getvalue(), report.read_bytes())
+            self.assertEqual(preview_handler.headers["Content-Type"], "text/html; charset=utf-8")
+            policy = preview_handler.headers["Content-Security-Policy"]
+            self.assertIn("sandbox allow-same-origin; default-src 'none'", policy)
+            self.assertIn("base-uri 'none'", policy)
+            self.assertNotIn("allow-scripts", policy)
+            self.assertNotIn("script-src", policy)
+
+    def test_html_preview_rejects_invalid_selectors(self) -> None:
+        for reference in ("bad", "!/report.html", "a/report.html", "====/report.html"):
+            with self.subTest(reference=reference), self.assertRaises(FileNotFoundError):
+                viewer.resolve_attachment_preview(None, reference)
+
     def test_attachment_validation_rejects_mismatched_or_active_content(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
