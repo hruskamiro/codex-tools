@@ -278,7 +278,11 @@ def make_handler(service, token):
                         raise VoiceError('Invalid query.')
                     self.reply(service.get(job_id))
                     return
-                query = parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True)
+                # Python 3.10 rejects an empty query under strict parsing.
+                query = (
+                    parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True)
+                    if parsed.query else {}
+                )
                 if set(query) - {'language'} or any(len(v) != 1 for v in query.values()):
                     raise VoiceError('Invalid voice options.')
                 length = int(self.headers.get('Content-Length', '0'))
