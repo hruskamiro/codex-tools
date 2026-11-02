@@ -712,6 +712,30 @@ def records_for_view(
     return records[start:]
 
 
+def conversation_update_state(records: list[Any]) -> dict[str, Any]:
+    digest = hashlib.sha256()
+    for record in records:
+        value = record if isinstance(record, dict) else asdict(record)
+        digest.update(json.dumps(
+            [value.get(key) for key in ("line_no", "role", "timestamp", "text")],
+            ensure_ascii=False,
+        ).encode("utf-8"))
+    return {"revision": digest.hexdigest(), "totalCount": len(records)}
+
+
+def handle_session_updates(state: ViewerState, query: dict[str, list[str]]) -> dict[str, Any]:
+    """Check content changes without attachments, typesetting, or browser rendering."""
+    warning = None
+    if query.get("source", [""])[0] == "relay":
+        _, records, warning = relay_session_snapshot(state, query)
+    else:
+        path = resolve_session_path(state, query)
+        records = read_session(
+            path, include_tools=query.get("tools", ["0"])[0] == "1", include_system=False,
+        ).records
+    return {**conversation_update_state(records), "refreshWarning": warning}
+
+
 def handle_session(state: ViewerState, query: dict[str, list[str]]) -> dict[str, Any]:
     if query.get("source", [""])[0] == "relay":
         return handle_relay_session(state, query)
@@ -731,6 +755,7 @@ def handle_session(state: ViewerState, query: dict[str, list[str]]) -> dict[str,
         "typesetDebug": state.typeset_debug,
         "shownCount": len(records),
         "totalCount": len(session.records),
+        "updateState": conversation_update_state(session.records),
         "records": [
             {
                 **asdict(record),
@@ -847,6 +872,7 @@ def handle_relay_session(
         "typesetDebug": False,
         "shownCount": len(shown),
         "totalCount": len(records),
+        "updateState": conversation_update_state(records),
         "records": [
             {
                 **record,
@@ -1026,6 +1052,7 @@ def handle_typeset(
         "typesetFresh": force,
         "shownCount": len(records),
         "totalCount": len(session_records),
+        "updateState": conversation_update_state(session_records),
         "records": payload_records,
         "refreshWarning": refresh_warning,
     }
@@ -1698,6 +1725,8 @@ def make_handler(state: ViewerState) -> type[BaseHTTPRequestHandler]:
                     json_response(self, handle_sessions(state, query))
                 elif parsed.path == "/api/session":
                     json_response(self, handle_session(state, query))
+                elif parsed.path == "/api/session/updates":
+                    json_response(self, handle_session_updates(state, query))
                 elif parsed.path == "/api/typeset":
                     json_response(self, handle_typeset(state, query))
                 elif parsed.path == "/api/typeset/answer":
@@ -2806,7 +2835,10 @@ VIEW_HTML = """<!doctype html>
     </article>
     <nav id="viewStatusbar" class="view-statusbar" aria-label="Conversation navigation">
       <button id="statusbarToggle" class="statusbar-toggle" type="button" title="Show navigation" aria-label="Show navigation" aria-expanded="false" aria-controls="statusbarActions">/</button>
+      <button id="syncToggle" class="statusbar-toggle sync-toggle" type="button" title="Manual updates; toggle auto sync (S)" aria-label="Manual updates; toggle auto sync with S" aria-pressed="false"><span class="refresh-icon" aria-hidden="true">↻</span><span id="syncBadge" class="sync-badge" hidden></span></button>
       <div id="statusbarActions" class="statusbar-actions">
+        <button id="syncMode" class="status-button" type="button" aria-pressed="false">Manual <kbd>S</kbd></button>
+        <span id="syncStatus" class="sync-status"></span>
         <button id="jumpPrevious" class="status-button icon-status-button" type="button" title="Previous block or page (Left Arrow)" aria-label="Previous block or page, Left Arrow shortcut">←</button>
         <button id="jumpNext" class="status-button icon-status-button" type="button" title="Next block or page (Right Arrow)" aria-label="Next block or page, Right Arrow shortcut">→</button>
         <button id="jumpTop" class="status-button" type="button">Up <kbd>U</kbd></button>
@@ -2859,7 +2891,10 @@ TYPESET_HTML = """<!doctype html>
     </article>
     <nav id="viewStatusbar" class="view-statusbar" aria-label="Typeset conversation navigation">
       <button id="statusbarToggle" class="statusbar-toggle" type="button" title="Show navigation" aria-label="Show navigation" aria-expanded="false" aria-controls="statusbarActions">/</button>
+      <button id="syncToggle" class="statusbar-toggle sync-toggle" type="button" title="Manual updates; toggle auto sync (S)" aria-label="Manual updates; toggle auto sync with S" aria-pressed="false"><span class="refresh-icon" aria-hidden="true">↻</span><span id="syncBadge" class="sync-badge" hidden></span></button>
       <div id="statusbarActions" class="statusbar-actions">
+        <button id="syncMode" class="status-button" type="button" aria-pressed="false">Manual <kbd>S</kbd></button>
+        <span id="syncStatus" class="sync-status"></span>
         <button id="jumpPrevious" class="status-button icon-status-button" type="button" title="Previous block or page (Left Arrow)" aria-label="Previous block or page, Left Arrow shortcut">←</button>
         <button id="jumpNext" class="status-button icon-status-button" type="button" title="Next block or page (Right Arrow)" aria-label="Next block or page, Right Arrow shortcut">→</button>
         <button id="jumpTop" class="status-button" type="button">Up <kbd>U</kbd></button>
@@ -3359,6 +3394,15 @@ h2 {
   padding: 5px;
   backdrop-filter: blur(12px);
 }
+
+.sync-toggle { position: relative; color: var(--muted); cursor: pointer; }
+.sync-toggle.is-auto { color: var(--accent-dark); background: var(--accent-soft); }
+.sync-toggle.is-offline { opacity: .65; }
+.sync-badge { position: absolute; top: -4px; right: -5px; min-width: 14px;
+  padding: 1px 3px; border-radius: 8px; background: var(--accent-dark); color: white;
+  font: 10px/1.2 var(--font-mono); }
+.sync-badge[hidden] { display: none; }
+.sync-status { font-size: 11px; color: var(--muted); max-width: 210px; }
 
 .statusbar-actions {
   display: none;
@@ -4652,7 +4696,144 @@ document.addEventListener("visibilitychange", () => {
 """
 
 
-VIEW_JS = _RESOURCE_LINKS_JS + r"""
+_CONVERSATION_SYNC_JS = r"""
+let autoSync = new URLSearchParams(location.search).get("sync") === "auto";
+let syncPending = 0;
+let syncChanged = false;
+let syncOffline = false;
+let syncLastChecked = "";
+let syncFailures = 0;
+let syncTimer = 0;
+let syncChecking = false;
+let syncFollowRequested = autoSync;
+
+function updateSyncControls() {
+  const button = document.getElementById("syncToggle");
+  const mode = document.getElementById("syncMode");
+  const badge = document.getElementById("syncBadge");
+  const status = document.getElementById("syncStatus");
+  const modeLabel = autoSync ? "Auto" : "Manual";
+  const detail = syncOffline ? "Offline · retrying" : syncLastChecked ? `Checked ${syncLastChecked}` : "";
+  if (button) {
+    button.classList.toggle("is-auto", autoSync);
+    button.classList.toggle("is-offline", syncOffline);
+    button.setAttribute("aria-pressed", String(autoSync));
+    button.title = `${modeLabel} updates${detail ? ` · ${detail}` : ""}; toggle with S`;
+    button.setAttribute("aria-label", `${button.title}${syncChanged ? `; ${syncPending || "updated"} new messages waiting` : ""}`);
+  }
+  if (mode) {
+    mode.innerHTML = `${modeLabel} <kbd>S</kbd>`;
+    mode.setAttribute("aria-pressed", String(autoSync));
+  }
+  if (badge) {
+    badge.hidden = autoSync || !syncChanged;
+    badge.textContent = syncPending > 99 ? "99+" : String(syncPending || "·");
+  }
+  if (status) status.textContent = detail;
+  for (const id of ["typesetViewLink", "normalViewLink"]) {
+    const link = document.getElementById(id);
+    if (!link) continue;
+    const url = new URL(link.href, location.href);
+    if (autoSync) url.searchParams.set("sync", "auto");
+    else url.searchParams.delete("sync");
+    link.href = url.href;
+  }
+}
+
+function scheduleSyncCheck(delay = 2000) {
+  window.clearTimeout(syncTimer);
+  if (!document.hidden) syncTimer = window.setTimeout(checkConversationUpdates, delay);
+}
+
+async function checkConversationUpdates() {
+  if (document.hidden || syncChecking || loadingConversation) {
+    scheduleSyncCheck();
+    return;
+  }
+  syncChecking = true;
+  const baseline = lastConversationData;
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 15000);
+  try {
+    if (!baseline) {
+      await loadConversation();
+      return;
+    }
+    const query = identityParams();
+    if (params.get("tools") === "1") query.set("tools", "1");
+    if (query.get("source") === "relay") query.set("refresh", "1");
+    const response = await fetch(`/api/session/updates?${query}`, {signal: controller.signal});
+    const update = await response.json();
+    if (!response.ok) throw new Error(update.error || "Update check failed");
+    if (update.refreshWarning) throw new Error(update.refreshWarning);
+    if (baseline !== lastConversationData || loadingConversation || document.hidden) return;
+    syncOffline = false;
+    syncLastChecked = new Date().toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"});
+    syncChanged = update.revision !== baseline.updateState?.revision;
+    syncPending = Math.max(0, update.totalCount - baseline.totalCount);
+    if (autoSync && (syncChanged || syncFollowRequested)) {
+      await refreshConversation({jumpToLatest: true, automatic: true, refreshRemote: false});
+      syncFollowRequested = false;
+      syncChanged = false;
+      syncPending = 0;
+    }
+    syncFailures = 0;
+  } catch (error) {
+    syncOffline = true;
+    syncFailures += 1;
+  } finally {
+    window.clearTimeout(timeout);
+    syncChecking = false;
+    updateSyncControls();
+    scheduleSyncCheck(Math.min(30000, 2000 * 2 ** Math.min(syncFailures, 4)));
+  }
+}
+
+async function toggleConversationSync() {
+  autoSync = !autoSync;
+  syncFollowRequested = autoSync;
+  const url = new URL(location.href);
+  if (autoSync) url.searchParams.set("sync", "auto");
+  else url.searchParams.delete("sync");
+  history.replaceState(null, "", url);
+  updateSyncControls();
+  if (autoSync) {
+    try {
+      if (!loadingConversation) {
+        await refreshConversation({jumpToLatest: true, automatic: true});
+        syncFollowRequested = false;
+      }
+    } catch (error) {
+      syncOffline = true;
+    }
+    updateSyncControls();
+  }
+  scheduleSyncCheck(0);
+}
+
+function followWholeConversation() {
+  if (typeof focusedRoute !== "function" || !focusedRoute().active) return;
+  const identity = identityParams();
+  const url = new URL(location.href);
+  url.pathname = identity.get("source") === "relay"
+    ? `/t/relay/${encodeURIComponent(identity.get("host"))}/${encodeURIComponent(identity.get("agent"))}`
+    : identity.has("id") ? `/t/local/${encodeURIComponent(identity.get("id"))}` : "/t/local";
+  url.searchParams.delete("line");
+  params.delete("line");
+  history.replaceState(null, "", url);
+}
+
+function startConversationSync() {
+  document.getElementById("syncToggle")?.addEventListener("click", toggleConversationSync);
+  document.getElementById("syncMode")?.addEventListener("click", toggleConversationSync);
+  document.addEventListener("visibilitychange", () => scheduleSyncCheck(0));
+  updateSyncControls();
+  scheduleSyncCheck();
+}
+"""
+
+
+VIEW_JS = _RESOURCE_LINKS_JS + _CONVERSATION_SYNC_JS + r"""
 const semanticHighlightConfig = {
   enabled: true,
   selectors: ".message-body, #sessionMeta",
@@ -4701,22 +4882,9 @@ const els = {
 };
 
 function setStatusbarRefreshState(refreshing) {
-  if (!els.statusbarToggle) return;
-  els.statusbarToggle.disabled = refreshing;
-  els.statusbarToggle.classList.toggle("is-refreshing", refreshing);
-  els.statusbarToggle.toggleAttribute("aria-busy", refreshing);
-  if (refreshing) {
-    els.statusbarToggle.innerHTML = '<span class="refresh-icon" aria-hidden="true">↻</span>';
-    els.statusbarToggle.title = "Refreshing conversation...";
-    els.statusbarToggle.setAttribute("aria-label", "Refreshing conversation");
-    return;
-  }
-  els.statusbarToggle.textContent = "/";
-  const expanded = els.statusbar?.classList.contains("is-expanded") || false;
-  const label = expanded ? "Hide navigation" : "Show navigation";
-  els.statusbarToggle.title = label;
-  els.statusbarToggle.setAttribute("aria-label", label);
+  document.getElementById("syncToggle")?.classList.toggle("is-refreshing", refreshing);
 }
+
 
 function setRefreshState(refreshing) {
   for (const button of [els.refreshConversation, els.statusRefresh]) {
@@ -5133,13 +5301,13 @@ function setNavigationCurrent(message) {
   message.setAttribute("aria-current", "true");
 }
 
-function scrollToLatestAssistant() {
-  const assistants = els.conversation.querySelectorAll(".message.assistant");
+function scrollToLatestMessage() {
   const messages = els.conversation.querySelectorAll(".message");
-  const target = assistants[assistants.length - 1] || messages[messages.length - 1];
+  const target = messages[messages.length - 1];
   if (!target) return;
   messageNavigationIndex = Array.from(messages).indexOf(target);
   setNavigationCurrent(target);
+  els.conversation.style.paddingBottom = `${Math.max(110, window.innerHeight - target.getBoundingClientRect().height)}px`;
   target.scrollIntoView({ block: "start" });
 }
 
@@ -5322,7 +5490,7 @@ function renderConversation(data, options = {}) {
       restoreScrollAnchor(options.scrollAnchor);
     });
   } else {
-    requestAnimationFrame(scrollToLatestAssistant);
+    requestAnimationFrame(scrollToLatestMessage);
   }
 }
 
@@ -5366,21 +5534,28 @@ async function loadConversation(options = {}) {
   } finally {
     loadingConversation = false;
     if (lastConversationData) updateLoadButtons(lastConversationData);
+    updateSyncControls();
   }
 }
 
 async function refreshConversation(options = {}) {
   if (loadingConversation) return;
   const jumpToLatest = Boolean(options.jumpToLatest);
+  if (jumpToLatest) followWholeConversation();
   const previousTotal = Number(lastConversationData?.totalCount || 0);
   setRefreshState(true);
   try {
     await loadConversation({
-      preserveScroll: !jumpToLatest,
+      preserveScroll: true,
       avoidUnchangedRender: true,
-      refreshRemote: true,
+      refreshRemote: options.refreshRemote !== false,
     });
-    if (jumpToLatest) scrollToLatestAssistant();
+    await new Promise(requestAnimationFrame);
+    if (jumpToLatest && (!options.automatic || autoSync)) scrollToLatestMessage();
+    syncChanged = false;
+    syncPending = 0;
+    syncOffline = Boolean(lastConversationData?.refreshWarning);
+    updateSyncControls();
     showRefreshResult(previousTotal);
   } catch (error) {
     showRefreshResult(previousTotal, true);
@@ -5418,7 +5593,7 @@ els.statusRefresh?.addEventListener("click", () => {
 
 els.jumpTop?.addEventListener("click", scrollToConversationTop);
 els.statusbarToggle?.addEventListener("click", toggleStatusbar);
-els.jumpLatest?.addEventListener("click", scrollToLatestAssistant);
+els.jumpLatest?.addEventListener("click", scrollToLatestMessage);
 els.jumpPrevious?.addEventListener("click", () => jumpMessage(-1));
 els.jumpNext?.addEventListener("click", () => jumpMessage(1));
 els.loadEarlier?.addEventListener("click", () => {
@@ -5441,12 +5616,14 @@ window.addEventListener("keydown", (event) => {
   const isNextKey = event.code === "ArrowRight";
   const isStatusbarKey = event.key === "/";
   const isChooserKey = event.shiftKey && !event.altKey && (event.code === "KeyL" || key === "l");
-  const isActionKey = ["u", "l", "e", "a", "t", "c"].includes(key);
+  const isActionKey = ["u", "l", "e", "a", "t", "c", "s"].includes(key);
   if ((!isRefreshKey && !isPreviousKey && !isNextKey && !isStatusbarKey && !isActionKey && !isChooserKey) || event.metaKey || event.ctrlKey) return;
   if (isEditable && !event.altKey) return;
   event.preventDefault();
   if (isChooserKey) {
     if (!event.repeat) openConversationChooser();
+  } else if (key === "s") {
+    if (!event.repeat) toggleConversationSync();
   } else if (isStatusbarKey) {
     toggleStatusbar();
   } else if (isRefreshKey) {
@@ -5460,7 +5637,7 @@ window.addEventListener("keydown", (event) => {
   } else if (key === "u") {
     scrollToConversationTop();
   } else if (key === "l") {
-    scrollToLatestAssistant();
+    scrollToLatestMessage();
   } else if (key === "e" && !els.loadEarlier?.disabled) {
     loadEarlierConversation().catch((error) => setStatus(error.message, "error"));
   } else if (key === "a" && !els.loadAll?.disabled) {
@@ -5472,13 +5649,14 @@ window.addEventListener("keydown", (event) => {
   }
 }, true);
 
+startConversationSync();
 loadConversation().catch((error) => {
   setStatus(error.message, "error");
 });
 """
 
 
-TYPESET_JS = _RESOURCE_LINKS_JS + r"""
+TYPESET_JS = _RESOURCE_LINKS_JS + _CONVERSATION_SYNC_JS + r"""
 const params = new URLSearchParams(location.search);
 const TYPESET_PDF_RENDER_SCALE = 1.6;
 const CODE_COPY_ORIGIN = "https://codex-tools.invalid";
@@ -5517,22 +5695,9 @@ const els = {
 };
 
 function setStatusbarRefreshState(refreshing) {
-  if (!els.statusbarToggle) return;
-  els.statusbarToggle.disabled = refreshing;
-  els.statusbarToggle.classList.toggle("is-refreshing", refreshing);
-  els.statusbarToggle.toggleAttribute("aria-busy", refreshing);
-  if (refreshing) {
-    els.statusbarToggle.innerHTML = '<span class="refresh-icon" aria-hidden="true">↻</span>';
-    els.statusbarToggle.title = "Refreshing typeset view...";
-    els.statusbarToggle.setAttribute("aria-label", "Refreshing typeset view");
-    return;
-  }
-  els.statusbarToggle.textContent = "/";
-  const expanded = els.statusbar?.classList.contains("is-expanded") || false;
-  const label = expanded ? "Hide navigation" : "Show navigation";
-  els.statusbarToggle.title = label;
-  els.statusbarToggle.setAttribute("aria-label", label);
+  document.getElementById("syncToggle")?.classList.toggle("is-refreshing", refreshing);
 }
+
 
 function setRefreshState(refreshing) {
   for (const button of [els.refreshConversation, els.statusRefresh]) {
@@ -6140,13 +6305,13 @@ function jumpMessage(delta) {
   window.scrollBy({ top: movement, left: 0, behavior: "auto" });
 }
 
-function scrollToLatestAssistant() {
-  const assistants = els.conversation.querySelectorAll(".message.assistant");
+function scrollToLatestMessage() {
   const messages = els.conversation.querySelectorAll(".message");
-  const target = assistants[assistants.length - 1] || messages[messages.length - 1];
+  const target = messages[messages.length - 1];
   if (!target) return;
   messageNavigationIndex = Array.from(messages).indexOf(target);
   setNavigationCurrent(target);
+  els.conversation.style.paddingBottom = `${Math.max(110, window.innerHeight - target.getBoundingClientRect().height)}px`;
   target.scrollIntoView({ block: "start" });
 }
 
@@ -6346,7 +6511,7 @@ async function renderConversation(data, options = {}) {
   } else if (options.preserveScroll) {
     restoreScrollAnchor(options.scrollAnchor);
   } else {
-    scrollToLatestAssistant();
+    scrollToLatestMessage();
   }
 }
 
@@ -6412,21 +6577,28 @@ async function loadConversation(options = {}) {
   } finally {
     loadingConversation = false;
     if (lastConversationData) updateLoadButtons(lastConversationData);
+    updateSyncControls();
   }
 }
 
 async function refreshConversation(options = {}) {
   if (loadingConversation) return;
   const jumpToLatest = Boolean(options.jumpToLatest);
+  if (jumpToLatest) followWholeConversation();
   const previousTotal = Number(lastConversationData?.totalCount || 0);
   setRefreshState(true);
   try {
     await loadConversation({
-      preserveScroll: !jumpToLatest,
+      preserveScroll: true,
       avoidUnchangedRender: true,
-      refreshRemote: true,
+      refreshRemote: options.refreshRemote !== false,
     });
-    if (jumpToLatest) scrollToLatestAssistant();
+    await new Promise(requestAnimationFrame);
+    if (jumpToLatest && (!options.automatic || autoSync)) scrollToLatestMessage();
+    syncChanged = false;
+    syncPending = 0;
+    syncOffline = Boolean(lastConversationData?.refreshWarning);
+    updateSyncControls();
     showRefreshResult(previousTotal);
   } catch (error) {
     showRefreshResult(previousTotal, true);
@@ -6467,7 +6639,7 @@ els.conversation?.addEventListener("click", (event) => {
 });
 els.jumpTop?.addEventListener("click", scrollToConversationTop);
 els.statusbarToggle?.addEventListener("click", toggleStatusbar);
-els.jumpLatest?.addEventListener("click", scrollToLatestAssistant);
+els.jumpLatest?.addEventListener("click", scrollToLatestMessage);
 els.jumpPrevious?.addEventListener("click", () => jumpMessage(-1));
 els.jumpNext?.addEventListener("click", () => jumpMessage(1));
 els.loadEarlier?.addEventListener("click", () => {
@@ -6487,12 +6659,14 @@ window.addEventListener("keydown", (event) => {
   const isNextKey = event.code === "ArrowRight";
   const isStatusbarKey = event.key === "/";
   const isChooserKey = event.shiftKey && !event.altKey && (event.code === "KeyL" || key === "l");
-  const isActionKey = ["u", "l", "e", "a", "t", "c"].includes(key);
+  const isActionKey = ["u", "l", "e", "a", "t", "c", "s"].includes(key);
   if ((!isRefreshKey && !isPreviousKey && !isNextKey && !isStatusbarKey && !isActionKey && !isChooserKey) || event.metaKey || event.ctrlKey) return;
   if (isEditable && !event.altKey) return;
   event.preventDefault();
   if (isChooserKey) {
     if (!event.repeat) openConversationChooser();
+  } else if (key === "s") {
+    if (!event.repeat) toggleConversationSync();
   } else if (isStatusbarKey) {
     toggleStatusbar();
   } else if (isRefreshKey) {
@@ -6505,7 +6679,7 @@ window.addEventListener("keydown", (event) => {
   } else if (key === "u") {
     scrollToConversationTop();
   } else if (key === "l") {
-    scrollToLatestAssistant();
+    scrollToLatestMessage();
   } else if (key === "e" && !els.loadEarlier?.disabled) {
     loadEarlierConversation().catch((error) => setStatus(error.message, "error"));
   } else if (key === "a" && !els.loadAll?.disabled) {
@@ -6517,6 +6691,7 @@ window.addEventListener("keydown", (event) => {
   }
 }, true);
 
+startConversationSync();
 loadConversation().catch((error) => {
   setStatus(error.message, "error");
 });

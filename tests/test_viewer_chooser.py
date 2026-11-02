@@ -76,7 +76,7 @@ function conversationId(item) VIEW_HREF
 assert.equal(viewHref({id:'agent',hostId:'peer'}), '/t/relay/peer/agent?tail=24');
 assert.equal(viewHref({id:'agent'}), '/t/local/agent?tail=24');
 let jumped = 0;
-const scrollToLatestAssistant = () => jumped++;
+const scrollToLatestMessage = () => jumped++;
 for (const body of HANDLERS) {
   const handler = eval('(event) => {' + body + '}');
   const event = {key:'L',code:'KeyL',shiftKey:true,preventDefault(){}};

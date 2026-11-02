@@ -623,23 +623,15 @@ class ViewerCommandTests(unittest.TestCase):
             self.assertIn('els.refreshStatus.textContent = "Refreshing..."', script)
             self.assertIn('"Up to date"', script)
             self.assertIn("function setStatusbarRefreshState(refreshing)", script)
-            self.assertIn("els.statusbarToggle.disabled = refreshing", script)
-            self.assertIn(
-                "els.statusbarToggle.classList.toggle(\"is-refreshing\", refreshing)",
-                script,
-            )
-            self.assertIn(
-                "els.statusbarToggle.innerHTML = '<span class=\"refresh-icon\"",
-                script,
-            )
-            self.assertIn('els.statusbarToggle.textContent = "/"', script)
+            self.assertIn('document.getElementById("syncToggle")?.classList.toggle("is-refreshing", refreshing)', script)
+            self.assertNotIn('els.statusbarToggle.innerHTML =', script)
             self.assertIn("setStatusbarRefreshState(refreshing)", script)
             self.assertNotIn("showRefreshBubble", script)
             self.assertNotIn("data-refresh-bubble", script)
             self.assertIn("function sameConversationContent(previous, next)", script)
             self.assertIn("renderOptions.avoidUnchangedRender", script)
-            self.assertIn("preserveScroll: !jumpToLatest", script)
-            self.assertIn("if (jumpToLatest) scrollToLatestAssistant()", script)
+            self.assertIn("preserveScroll: true", script)
+            self.assertIn("if (jumpToLatest && (!options.automatic || autoSync)) scrollToLatestMessage()", script)
             self.assertIn(
                 "refreshConversation({ jumpToLatest: event.shiftKey })", script
             )
@@ -1492,7 +1484,7 @@ curl https://embedded.example/ignored
             self.assertIn("Right Arrow shortcut", html)
 
         for script in (viewer.VIEW_JS, viewer.TYPESET_JS):
-            self.assertIn('["u", "l", "e", "a", "t", "c"]', script)
+            self.assertIn('["u", "l", "e", "a", "t", "c", "s"]', script)
             self.assertIn('key === "u"', script)
             self.assertIn('key === "l"', script)
             self.assertIn('key === "e"', script)
