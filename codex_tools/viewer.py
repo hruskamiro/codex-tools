@@ -503,6 +503,27 @@ class ViewerState:
         self._titles_lock = threading.Lock()
         self._titles_signature = self._session_index_signature()
         self._titles = load_session_index_titles(self.session_index)
+        self._session_paths_lock = threading.Lock()
+        self._resolved_sessions: dict[str, tuple[float, Path]] = {}
+        self._updates_lock = threading.Lock()
+        self._updates_cache: dict[tuple[Path, bool], tuple[tuple[int, ...], dict[str, Any]]] = {}
+
+    def session_update_state(self, path: Path, include_tools: bool) -> dict[str, Any]:
+        # Serialize cache misses so several open tabs do not parse the same large
+        # transcript concurrently. A changed file is checked on the next poll.
+        with self._updates_lock:
+            stat = path.stat()
+            signature = (stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+            key = (path, include_tools)
+            cached = self._updates_cache.get(key)
+            if cached is not None and cached[0] == signature:
+                return dict(cached[1])
+            session = read_session(path, include_tools=include_tools, include_system=False)
+            result = conversation_update_state(session.records)
+            if len(self._updates_cache) >= 128:
+                self._updates_cache.pop(next(iter(self._updates_cache)))
+            self._updates_cache[key] = (signature, result)
+            return dict(result)
 
     def _session_index_signature(self) -> tuple[int, int] | None:
         try:
@@ -625,8 +646,40 @@ def resolve_session_path(state: ViewerState, query: dict[str, list[str]]) -> Pat
     if not raw_id:
         raise ValueError("session path or id is required")
 
+    with state._session_paths_lock:
+        cached = state._resolved_sessions.get(raw_id)
+        if cached is not None:
+            expires, path = cached
+            if time.monotonic() < expires and state.is_allowed_path(path) and path.is_file():
+                return path
+            state._resolved_sessions.pop(raw_id, None)
+
+    def remember(path: Path) -> Path:
+        resolved = path.expanduser().resolve()
+        with state._session_paths_lock:
+            if len(state._resolved_sessions) >= 256:
+                state._resolved_sessions.pop(next(iter(state._resolved_sessions)))
+            state._resolved_sessions[raw_id] = (time.monotonic() + 30, resolved)
+        return resolved
+
+    session_paths = state.session_paths()
+    # Canonical rollout IDs normally appear in the filename. Verify metadata
+    # only for matching filenames instead of sampling every conversation.
+    direct = []
+    for path in session_paths:
+        if path.stem == raw_id or path.stem.endswith(f"-{raw_id}"):
+            try:
+                item = session_summary(path, state.titles)
+            except OSError:
+                continue
+            if raw_id == str(item.get("rolloutId") or ""):
+                direct.append((path, item))
+    if direct:
+        direct.sort(key=lambda pair: session_sort_key(pair[1]), reverse=True)
+        return remember(direct[0][0])
+
     candidates: list[tuple[Path, dict[str, Any]]] = []
-    for path in state.session_paths():
+    for path in session_paths:
         try:
             item = session_summary(path, state.titles)
         except OSError:
@@ -637,7 +690,7 @@ def resolve_session_path(state: ViewerState, query: dict[str, list[str]]) -> Pat
         matches = [(path, item) for path, item in candidates if raw_id == str(item.get(key) or "")]
         if matches:
             matches.sort(key=lambda pair: session_sort_key(pair[1]), reverse=True)
-            return matches[0][0].expanduser().resolve()
+            return remember(matches[0][0])
 
     raise FileNotFoundError(f"no session found for id {raw_id}")
 
@@ -730,9 +783,10 @@ def handle_session_updates(state: ViewerState, query: dict[str, list[str]]) -> d
         _, records, warning = relay_session_snapshot(state, query)
     else:
         path = resolve_session_path(state, query)
-        records = read_session(
-            path, include_tools=query.get("tools", ["0"])[0] == "1", include_system=False,
-        ).records
+        return {
+            **state.session_update_state(path, query.get("tools", ["0"])[0] == "1"),
+            "refreshWarning": None,
+        }
     return {**conversation_update_state(records), "refreshWarning": warning}
 
 
@@ -1765,6 +1819,9 @@ def make_handler(state: ViewerState) -> type[BaseHTTPRequestHandler]:
                     handle_typeset_pdf(self, parsed.path.removeprefix("/typeset/pdf/"))
                 else:
                     json_response(self, {"error": "not found"}, HTTPStatus.NOT_FOUND)
+            except (BrokenPipeError, ConnectionResetError):
+                # A closed tab or cancelled poll is not a server failure.
+                return
             except PermissionError as exc:
                 json_response(self, {"error": str(exc)}, HTTPStatus.FORBIDDEN)
             except FileNotFoundError as exc:
@@ -5546,7 +5603,7 @@ async function refreshConversation(options = {}) {
   setRefreshState(true);
   try {
     await loadConversation({
-      preserveScroll: true,
+      preserveScroll: !jumpToLatest || Boolean(options.automatic),
       avoidUnchangedRender: true,
       refreshRemote: options.refreshRemote !== false,
     });
@@ -6589,7 +6646,7 @@ async function refreshConversation(options = {}) {
   setRefreshState(true);
   try {
     await loadConversation({
-      preserveScroll: true,
+      preserveScroll: !jumpToLatest || Boolean(options.automatic),
       avoidUnchangedRender: true,
       refreshRemote: options.refreshRemote !== false,
     });

@@ -630,7 +630,7 @@ class ViewerCommandTests(unittest.TestCase):
             self.assertNotIn("data-refresh-bubble", script)
             self.assertIn("function sameConversationContent(previous, next)", script)
             self.assertIn("renderOptions.avoidUnchangedRender", script)
-            self.assertIn("preserveScroll: true", script)
+            self.assertIn("preserveScroll: !jumpToLatest || Boolean(options.automatic)", script)
             self.assertIn("if (jumpToLatest && (!options.automatic || autoSync)) scrollToLatestMessage()", script)
             self.assertIn(
                 "refreshConversation({ jumpToLatest: event.shiftKey })", script
