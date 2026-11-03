@@ -3358,15 +3358,9 @@ h2 {
   font-weight: 700;
 }
 
-.is-refreshing .refresh-icon {
+.refresh-icon {
   display: inline-block;
-  animation: refresh-spin 800ms linear infinite;
-}
-
-@keyframes refresh-spin {
-  to {
-    transform: rotate(360deg);
-  }
+  transform-origin: center;
 }
 
 .view-body {
@@ -4753,6 +4747,84 @@ document.addEventListener("visibilitychange", () => {
 """
 
 
+_REFRESH_MOTION_JS = r"""
+const refreshMotion = {
+  angle: 0, paintedAngle: 0, fromSpeed: 0, toSpeed: 0, started: 0, duration: 0, frame: null,
+};
+
+function refreshMotionAt(now) {
+  const elapsed = Math.max(0, now - refreshMotion.started);
+  const duration = refreshMotion.duration;
+  const u = duration ? Math.min(1, elapsed / duration) : 1;
+  const difference = refreshMotion.toSpeed - refreshMotion.fromSpeed;
+  // Integrate smoothstep velocity so both angle and speed remain continuous.
+  const rampAngle = duration / 1000 * (
+    refreshMotion.fromSpeed * u + difference * (u ** 3 - u ** 4 / 2)
+  );
+  return {
+    angle: refreshMotion.angle + rampAngle
+      + Math.max(0, elapsed - duration) / 1000 * refreshMotion.toSpeed,
+    speed: refreshMotion.fromSpeed + difference * u * u * (3 - 2 * u),
+  };
+}
+
+function refreshMotionReduced() {
+  return Boolean(window.matchMedia?.("(prefers-reduced-motion: reduce)").matches);
+}
+
+function paintRefreshMotion(now) {
+  refreshMotion.frame = null;
+  const position = refreshMotionAt(now);
+  if (refreshMotionReduced()) {
+    refreshMotion.angle = refreshMotion.paintedAngle % 360;
+    refreshMotion.fromSpeed = refreshMotion.toSpeed = 0;
+    refreshMotion.duration = 0;
+    refreshMotion.started = now;
+    return;
+  }
+  for (const icon of document.querySelectorAll(".refresh-icon")) {
+    icon.style.transform = `rotate(${position.angle}deg)`;
+  }
+  refreshMotion.paintedAngle = position.angle;
+  if (refreshMotion.toSpeed || now < refreshMotion.started + refreshMotion.duration) {
+    refreshMotion.frame = window.requestAnimationFrame(paintRefreshMotion);
+  } else {
+    refreshMotion.angle = position.angle % 360;
+    refreshMotion.fromSpeed = 0;
+    refreshMotion.duration = 0;
+    refreshMotion.started = now;
+  }
+}
+
+function setRefreshMotion(refreshing) {
+  const now = performance.now();
+  if (refreshMotionReduced()) {
+    if (refreshMotion.frame !== null) window.cancelAnimationFrame(refreshMotion.frame);
+    Object.assign(refreshMotion, {
+      angle: refreshMotion.paintedAngle % 360, fromSpeed: 0, toSpeed: 0,
+      started: now, duration: 0, frame: null,
+    });
+    return;
+  }
+  const position = refreshMotionAt(now);
+  const target = refreshing ? 450 : 0;
+  if (refreshMotion.toSpeed === target) return;
+  if (refreshMotion.frame !== null) window.cancelAnimationFrame(refreshMotion.frame);
+  Object.assign(refreshMotion, {
+    angle: position.angle % 360,
+    fromSpeed: position.speed,
+    toSpeed: target,
+    started: now,
+    duration: target ? 150 : 200,
+    frame: null,
+  });
+  if (!refreshMotionReduced()) {
+    refreshMotion.frame = window.requestAnimationFrame(paintRefreshMotion);
+  }
+}
+"""
+
+
 _CONVERSATION_SYNC_JS = r"""
 let autoSync = new URLSearchParams(location.search).get("sync") === "auto";
 let syncPending = 0;
@@ -4890,7 +4962,7 @@ function startConversationSync() {
 """
 
 
-VIEW_JS = _RESOURCE_LINKS_JS + _CONVERSATION_SYNC_JS + r"""
+VIEW_JS = _RESOURCE_LINKS_JS + _REFRESH_MOTION_JS + _CONVERSATION_SYNC_JS + r"""
 const semanticHighlightConfig = {
   enabled: true,
   selectors: ".message-body, #sessionMeta",
@@ -4944,6 +5016,7 @@ function setStatusbarRefreshState(refreshing) {
 
 
 function setRefreshState(refreshing) {
+  setRefreshMotion(refreshing);
   for (const button of [els.refreshConversation, els.statusRefresh]) {
     if (!button) continue;
     if (!button.dataset.idleTitle) button.dataset.idleTitle = button.title;
@@ -5713,7 +5786,7 @@ loadConversation().catch((error) => {
 """
 
 
-TYPESET_JS = _RESOURCE_LINKS_JS + _CONVERSATION_SYNC_JS + r"""
+TYPESET_JS = _RESOURCE_LINKS_JS + _REFRESH_MOTION_JS + _CONVERSATION_SYNC_JS + r"""
 const params = new URLSearchParams(location.search);
 const TYPESET_PDF_RENDER_SCALE = 1.6;
 const CODE_COPY_ORIGIN = "https://codex-tools.invalid";
@@ -5757,6 +5830,7 @@ function setStatusbarRefreshState(refreshing) {
 
 
 function setRefreshState(refreshing) {
+  setRefreshMotion(refreshing);
   for (const button of [els.refreshConversation, els.statusRefresh]) {
     if (!button) continue;
     if (!button.dataset.idleTitle) button.dataset.idleTitle = button.title;

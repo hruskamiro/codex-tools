@@ -18,6 +18,9 @@ older messages if you do not want new content to move the view.
 Background checks are quiet: they never spin the sync icon or typeset PDFs.
 The icon spins only during an actual content refresh. Expand the navigation bar
 to see the named mode, the last successful check, or an offline/retrying status.
+During a refresh, the icons accelerate gently and settle at their current angle
+when it finishes. The next refresh continues from that angle. Reduced-motion
+preferences disable rotation; mode and refresh status remain available.
 
 Visible tabs normally check every two seconds. Hidden tabs stop checking, and
 failed checks back off up to thirty seconds while preserving displayed content.

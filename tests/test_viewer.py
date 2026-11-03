@@ -644,7 +644,8 @@ class ViewerCommandTests(unittest.TestCase):
 
         self.assertIn("const scrollAnchor = options.preserveScroll", viewer.VIEW_JS)
         self.assertNotIn("els.conversation.scrollTop = previousScrollTop", viewer.VIEW_JS)
-        self.assertIn("@keyframes refresh-spin", viewer.APP_CSS)
+        self.assertNotIn("animation: refresh-spin", viewer.APP_CSS)
+        self.assertIn("setRefreshMotion(refreshing)", viewer.VIEW_JS)
         conversation_rule = viewer.APP_CSS.split(".conversation {", 1)[1].split("}", 1)[0]
         self.assertIn("overflow-anchor: none", conversation_rule)
         self.assertIn(".statusbar-toggle.is-refreshing", viewer.APP_CSS)
