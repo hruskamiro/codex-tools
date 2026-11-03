@@ -4815,7 +4815,7 @@ function setRefreshMotion(refreshing) {
     fromSpeed: position.speed,
     toSpeed: target,
     started: now,
-    duration: target ? 150 : 200,
+    duration: target ? 300 : 400,
     frame: null,
   });
   if (!refreshMotionReduced()) {
