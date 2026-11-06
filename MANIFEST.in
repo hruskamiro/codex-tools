@@ -12,3 +12,15 @@ recursive-include codex_tools/vendor *
 recursive-exclude codex_tools/vendor __pycache__ *.py[cod]
 include docs/phone-pairing.md
 include docs/mobile-pdf.md
+include docs/installation.md
+include docs/viewer.md
+include docs/viewer-sync.md
+include docs/agent-console.md
+include docs/relay.md
+include docs/profiles.md
+include docs/search-and-summaries.md
+include docs/structured-tasks.md
+include docs/known-issues.md
+include docs/assets/codex-viewer-riemann-symmetry.png
+include docs/examples/riemann-symmetry.jsonl
+include docs/examples/session_index.jsonl
