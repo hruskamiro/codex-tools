@@ -10,6 +10,8 @@ htmlcov/
 .codex
 .codex/
 .dev-*
+# Checkout-local notes, reports, and scratch files.
+/.local/
 .venv/
 venv/
 build/
