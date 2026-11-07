@@ -169,8 +169,7 @@ for login, batching, usage snapshots, and pacing controls.
 The mobile Agent Console is a separate project, and its integration is still in
 development. Codex Tools provides optional support for it:
 
-- **Voice transcription:** a separate whisper.cpp service, with durable jobs
-  for interrupted connections. See [voice setup](docs/voice.md).
+- **Voice transcription:** an optional service for dictation ([setup](docs/voice.md)).
 - **Phone pairing:** temporary QR invitations and the phone's own SSH identity.
   See [pairing and authorization](docs/phone-pairing.md).
 - **Mobile PDFs:** portrait and wide blocks with offline caching.
