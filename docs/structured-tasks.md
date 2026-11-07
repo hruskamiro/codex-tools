@@ -2,117 +2,88 @@
 
 [Back to README](../README.md)
 
-The default backend runs an isolated `codex exec` under a codex-manager profile:
-
-Run a prompt under a strict JSON Schema and retain reproducibility artifacts:
+**Run focused prompts under a strict JSON Schema.** Prompts, settings, events,
+results, hashes, and token usage are saved for reproducibility. Runs are isolated
+and tool-free; unexpected tool events are rejected.
 
 ```bash
-ct structured run \
-  --prompt prompt.txt \
-  --schema response.schema.json \
-  --run-dir runs/example-001 \
-  --model MODEL
+ct structured run --prompt prompt.txt --schema response.schema.json \
+  --run-dir runs/example-001 --model MODEL
 ```
+
+The default backend uses `codex exec` under a managed profile. See below for
+the separately authenticated app-server backend.
 
 ## Batches and adaptive pacing
 
-Run a batch and verify its saved artifacts:
+**One job and adaptive pacing are the defaults**, for both backends:
 
 ```bash
 ct structured batch batch.json --batch-dir runs/batch-001
 ct structured check runs/batch-001
 ```
 
-**The default is one job with adaptive pacing**, for both execution backends.
-`--jobs N` sets a hard maximum. A provider rate limit pauses new requests for
-60 seconds, then resumes at half the previous concurrency (rounded down, at
-least one). Repeated affected requests double the cooldown up to ten minutes.
-Repeated error events within one request extend its cooldown without repeatedly
-cutting concurrency. Timeouts and HTTP 502/503/504 also pause new requests,
-without reducing concurrency on their own.
+`--jobs N` is a hard maximum. A rate limit pauses new requests for **60 seconds**,
+then resumes at half the previous concurrency, rounded down to at least one.
+Repeated affected tasks double the pause up to ten minutes; repeated events from
+one task extend the pause without repeatedly cutting concurrency. Timeouts and
+HTTP 502/503/504 pause admissions without reducing concurrency on their own.
 
-Recovery requires **30 healthy seconds and three successful tasks** at the
-current level. Each recovery step adds one slot, up to `--jobs`; subsequent
-steps require fresh work and a new healthy period. Requests that started before
-a limit or a recovery step do not count towards that next period. Idle time,
-including time between batches, cannot increase concurrency on its own.
+**Recovery needs 30 healthy seconds and three successful tasks at the current
+level.** Each step adds one slot, up to `--jobs`, then requires fresh work and a
+new observation period. Older requests and idle time alone do not prove recovery.
+Running requests finish normally; the scheduler never replays failed tasks.
+Codex may retry inside a running request.
 
 ```bash
 ct structured batch batch.json --batch-dir runs/parallel --jobs 8
 ct structured batch batch.json --batch-dir runs/fixed --jobs 8 --fixed
 ```
 
-**`--fixed` fixes concurrency, not cooldowns.** It retains provider pauses while
-keeping the requested number of slots. Running requests finish normally in
-both modes, and the scheduler never automatically replays failed tasks.
-Codex itself may perform retries inside a running request.
-
-Optional policy controls:
+**`--fixed` keeps concurrency constant while retaining cooldowns.** Tune the
+adaptive policy only when needed:
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--rate-limit-backoff SECONDS` | `60` | Initial cooldown; positive and at most 600 seconds |
-| `--backoff-decrease RULE` | `0.5x` | Multiply concurrency by a factor below one, or subtract an integer (`-1`) |
+| `--rate-limit-backoff SECONDS` | `60` | Initial cooldown; positive, at most 600 seconds |
+| `--backoff-decrease RULE` | `0.5x` | Multiply by a factor below one, or subtract an integer (`-1`) |
 | `--backoff-increase RULE` | `+1` | Add an integer, or multiply by a factor above one (`1.25x`, rounded up) |
-| `--backoff-recovery-period SECONDS` | `30` | Minimum healthy period before each recovery step |
+| `--backoff-recovery-period SECONDS` | `30` | Minimum healthy period before each increase |
 
-For example, use `--backoff-decrease=-1 --backoff-increase 1.25x` for an additive
-cut and multiplicative recovery. `--fixed` rejects the three concurrency tuning
-options rather than silently ignoring them. A single `structured run` has no
-batch scheduler, so these controls apply only to `structured batch`.
+Example: `--backoff-decrease=-1 --backoff-increase 1.25x`. Fixed mode rejects
+concurrency tuning options. These controls apply to batches, not single runs.
 
-The batch summary includes effective concurrency, cooldown, recovery progress,
-and recent policy events. State is saved in `backoff-state.json` in the batch
-directory when pacing state changes. Use `--backoff-state FILE` to share it
-across **sequential** batches. The file is not a coordinator for concurrent batch
-processes. Reusing it preserves the cooldown and reduced concurrency, capped at
-the new `--jobs` maximum. Recovery needs fresh successful tasks. When changing
-the saved policy (including switching to `--fixed`), choose a new state file.
-Older version-one cooldown files are also accepted.
+**State survives sequential batches.** The summary shows concurrency, cooldown,
+recovery progress, and recent events. `backoff-state.json` is saved in the batch
+directory; use `--backoff-state FILE` to share it across sequential runs, not
+concurrent processes. Reduced concurrency is capped at the new `--jobs` limit;
+recovery needs fresh successes. Use a new state file when changing policy,
+including switching to Fixed. Version-one state files are accepted.
 
-`--admission-deadline TIMESTAMP` stops launching tasks after an ISO timestamp
-with a UTC offset. Active tasks drain normally, and untouched tasks are recorded
-as `deferred-deadline`. The batch remains incomplete; no model call is made for
-those deferred tasks. It can be resumed later without the expired deadline.
+`--admission-deadline TIMESTAMP` stops new work after an ISO timestamp with a UTC
+offset. Active tasks finish; untouched tasks become `deferred-deadline` and the
+batch remains incomplete. Resume later without the expired deadline.
 
 ## App-server connection
 
-To use the lower-overhead app-server backend, authorize Codex Tools once and
-select the saved connection on each run or batch:
+**Compact instructions, no tools, and an empty workspace reduce prompt overhead.**
+Each task starts a fresh ephemeral thread with your prompt and schema; project
+files, dynamic tools, environments, and capability roots are not supplied.
+Reasoning summaries are disabled; recorded token usage lets you measure overhead.
 
 ```bash
 ct structured connection login --connection default
 ct structured connection status --connection default
 ct structured connection usage
-
-ct structured run \
-  --backend app-server \
-  --connection default \
-  --prompt prompt.txt \
-  --schema response.schema.json \
-  --run-dir runs/example-app-server \
-  --model MODEL
+ct structured run --backend app-server --connection default \
+  --prompt prompt.txt --schema response.schema.json \
+  --run-dir runs/example-app-server --model MODEL
 ```
 
-`--profile` belongs to the `exec` backend; `--connection` belongs to the
-`app-server` backend. App-server credentials are stored in a private file under
-`~/.config/codex-tools/app-server/`, independently of Codex homes and
-codex-manager profiles.
+`--connection` selects the app-server login; `--profile` selects the exec profile.
+App-server credentials stay under `~/.config/codex-tools/app-server/`, separate
+from Codex homes. The shell tool is disabled; workspace access is read-only.
 
-**App-server runs are designed for focused, low-overhead prompts.** Each task
-uses a fresh ephemeral thread with a short dedicated instruction, the supplied
-prompt and output schema, and an empty workspace. No project files, dynamic
-tools, environments, or capability roots are supplied; reasoning summaries are
-disabled. This reduces general coding-agent context around the actual task.
-Recorded token usage lets you measure the overhead for your prompts and model.
-
-**Structured runs are isolated and tool-free.** Codex Tools disables the shell
-tool, supplies no dynamic tools or environments, uses an empty read-only
-workspace, and rejects any unexpected tool event. Prompts, schemas, events,
-results, hashes, settings, and token usage are retained in the run directory.
-
-App-server batches also save account usage snapshots immediately before and
-after execution, including the integer percentage-point change for each usage
-window. These snapshots come from the authenticated `~/.codex` account by
-default and can be redirected with `--usage-codex-home`; they are independent
-of the app-server task connection.
+App-server batches also record account usage before/after execution, including
+integer percentage-point deltas. These snapshots use authenticated `~/.codex`
+by default (`--usage-codex-home` overrides it), independently of the task connection.

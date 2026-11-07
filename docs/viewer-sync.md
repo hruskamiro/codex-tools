@@ -1,33 +1,27 @@
 # Conversation updates
 
-The Markdown and PDF conversation viewers show two controls in the collapsed
-navigation bar: `/` expands navigation and `↻` toggles automatic updates. Press
-`S` to toggle the same mode. Typing in an editable field does not trigger it.
+[Back to viewer](viewer.md) · [Back to README](../README.md)
 
-Manual is the default. The muted sync icon can show a badge counting messages
-not yet displayed. An edit to existing content shows a dot instead. Press `R`
-to fetch changes while keeping your reading position, or `Shift+R` to fetch and
-move to the start of the last message.
+**Two icons keep the navigation bar compact:** `/` expands it; `↻` or **S**
+toggles automatic updates. Shortcuts do not activate while typing in a field.
 
-In Auto, the sync icon is highlighted. New or edited messages are fetched and
-displayed automatically, and the last message is aligned with the top of the
-view. “Latest” includes user messages, rather than only assistant answers. `L`
-also moves to the last displayed message. Switch back to Manual before reading
-older messages if you do not want new content to move the view.
+| Mode | Behavior |
+|---|---|
+| **Manual** (default) | Muted icon; a badge counts new messages, or a dot marks edits |
+| **Auto** | Highlighted icon; fetch changes and align the last message with the top |
 
-Background checks are quiet: they never spin the sync icon or typeset PDFs.
-The icon spins only during an actual content refresh. Expand the navigation bar
-to see the named mode, the last successful check, or an offline/retrying status.
-During a refresh, the icons accelerate gently and settle at their current angle
-when it finishes. The next refresh continues from that angle. Reduced-motion
-preferences disable rotation; mode and refresh status remain available.
+**R refreshes in place; Shift-R refreshes and follows the last message.** L jumps
+to the last displayed message, including a user message. Switch to Manual when
+reading earlier content if incoming messages should not move the view.
 
-Visible tabs normally check every two seconds. Hidden tabs stop checking, and
-failed checks back off up to thirty seconds while preserving displayed content.
-Manual mode still checks for changes, including contacting the peer for remote
-conversations. Auto is saved in that tab's URL and follows a switch between
-Markdown and PDF views; it does not change other tabs or global settings.
+**Background checks are quiet.** Only a content refresh spins the icons, easing
+in and settling at their current angle. Reduced-motion preferences disable
+rotation. Expand the bar for the named mode, last check, and offline/retry status.
 
-Enabling Auto or using `Shift+R` in a focused PDF-answer view opens the full
-conversation in place so it can follow subsequent messages. Existing PDF caches
-are reused when loading new content.
+Visible tabs check about every two seconds; hidden tabs stop. Failures back off
+up to thirty seconds while keeping displayed content. Manual still checks for
+changes, including contacting a remote peer, but does not fetch PDFs for them.
+Auto is saved in the tab's URL and follows Markdown/PDF switches, not other tabs.
+
+Auto or Shift-R in a focused PDF answer opens the full conversation in place.
+Existing PDF caches are reused when content is loaded.

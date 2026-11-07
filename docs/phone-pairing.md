@@ -1,79 +1,62 @@
 # Pair a phone with one invitation
 
-Pairing imports the relay profile and complete ordered SSH route, creates an
-Ed25519 key on the phone, and authorizes its public key on every host. No second
-QR is needed. Existing profiles and private keys are not overwritten.
+[Back to README](../README.md)
 
-On a computer with working SSH access to the destination and every jump host:
+**Import the relay connection and SSH route with one temporary QR invitation.**
+This supports the upcoming mobile Agent Console; mobile integration is still
+in development. The phone creates its own Ed25519 key; existing profiles and
+private keys are preserved.
+
+On a computer with trusted SSH access to the destination and every jump host:
 
 ```sh
-pipx inject codex-tools qrcode  # optional QR encoder, once
+pipx inject codex-tools qrcode  # optional QR encoder
 ct connect pair-phone destination-via-jump --address 192.0.2.10
 ```
 
-Use the computer's address reachable from the phone through Wi-Fi or a VPN.
-The command uses the named `ct-connect` profile from `ssh-launcher.json` when
-present, otherwise an SSH alias. It resolves `ProxyJump` from SSH configuration.
-Overrides: `--ssh`, `--remote-port`, `--remote-bin`. SSH authentication and host
-verification must already work in batch mode. The remote relay identity must
-already be initialized (`ct relay init`).
+The relay identity must already exist (`ct relay init`), and SSH authentication
+and host verification must work in batch mode. The route comes from a
+saved `ct-connect` profile or SSH alias, including `ProxyJump`. Overrides:
+`--ssh`, `--remote-port`, `--remote-bin`.
 
-In the native app, choose **Settings → Connections → Pair phone**, then:
+In **Settings → Connections → Pair phone**:
 
-1. Scan the QR, or paste the computer's `ct-pair:…` invitation.
-2. Review the destination and jump hosts, including host fingerprints.
-3. Tap **Pair and authorize SSH**.
-4. Compare the phone-key fingerprint on both devices. Type `y` on the computer
-   to authorize that key on every listed host.
-5. The phone saves the SSH hosts and relay profile. Tap **Connect** or **Done**.
+1. Scan the QR or paste its `ct-pair:…` invitation.
+2. Review the hosts and fingerprints; choose **Pair and authorize SSH**.
+3. Compare the phone-key fingerprint on both devices; authorize it with `y` on the computer.
+4. Save, then connect.
 
-Pairing defaults relay auto-start to off, unless the saved client connection
-explicitly opted in. Start the destination relay manually with `ct relay serve`,
-or first run `ct relay configure --allow-auto-start` on that destination and
-enable **Start relay automatically** in the phone's connection settings. The
-phone's switch alone cannot authorize a missing relay to start.
+**Auto-start is off unless explicitly opted in.** Start the relay manually,
+or grant [destination permission](relay.md#start-the-remote-relay-automatically-over-ssh)
+and enable the phone's auto-start switch. That switch alone cannot grant permission.
 
-`--output phone.svg` also saves the QR as an SVG. It contains the temporary
-invitation secret, so keep it private. Invitations expire after five minutes;
-the endpoint closes once the phone acknowledges saving. No daemon stays running.
-
-The QR contains a temporary address, secret, and certificate fingerprint; the
-full configuration is fetched over HTTPS pinned to that certificate. Neither a
-relay token nor an SSH private key is placed in the QR. The relay token is released
-only after authorization. The phone proves possession of its private key.
+Invitations expire after five minutes. `--output phone.svg` saves a copy containing
+the temporary secret; keep it private. The QR contains an address, secret, and
+certificate fingerprint, not a relay token or computer private key. Configuration
+travels over certificate-pinned HTTPS; the token is released after authorization.
+The temporary endpoint closes after the phone acknowledges saving.
 
 ## Networking
 
-Only the temporary pairing listener defaults to `0.0.0.0`, on a free port.
-`--bind ADDRESS` restricts its interface; `--port PORT` selects a port for firewall
-or tunnel configuration. `--address` is the address advertised to the phone.
-The relay's own listener stays unchanged and can remain localhost-only.
+**Use an address reachable from the phone**, through Wi-Fi, VPN, or a tunnel.
+Only the temporary pairing listener defaults to `0.0.0.0`; `--bind` and `--port`
+restrict it. `--address` sets the advertised address. The relay stays unchanged
+and can remain localhost-only. Pairing does not bypass isolation, firewalls, or NAT.
 
-Devices need network reachability, not necessarily the same subnet. Pairing does
-not bypass hotspot isolation, firewalls, or NAT. Use an existing VPN or tunnel
-when necessary. Network discovery and an internet pairing broker are not included.
-Browser preview cannot pin this temporary certificate and does not pair.
-Native Linux supports pasting invitations; camera scanning is supported on
-Android/iOS and supported macOS builds.
+Browser preview cannot pin the certificate and does not pair. Native Linux can
+paste invitations; camera scanning is supported on Android/iOS and supported macOS builds.
 
 ## Recovery and requirements
 
-The pending phone key is saved in OS secure storage before submission. Reopening
-the same invitation reuses it. Imported IDs are stable for that invitation, so
-retrying a partial local save does not duplicate entries. Existing connections
-remain intact. Pending keys remain in secure storage if setup is interrupted.
+**Interrupted setup can be retried.** The pending phone key stays in secure
+storage; reopening the invitation reuses it, and stable IDs avoid duplicate
+connections. Expired invitations need replacing.
 
-Authorization preserves `authorized_keys` and skips keys already present. It
-requires remote Python 3 and reads the server's Ed25519 host key through an
-already trusted SSH session. Custom `ProxyCommand` routes cannot be exported;
-use named `ProxyJump` hosts. SSH passwords and computer private keys stay separate.
+Authorization preserves `authorized_keys` and skips existing keys. Remote Python 3
+and the server's Ed25519 host key are required. Use named `ProxyJump` hosts;
+custom `ProxyCommand` routes cannot be exported. SSH passwords/private keys stay separate.
 
-If a host fails, the computer reports hosts already authorized; their keys are
-not automatically removed. The phone saves a complete profile only after all
-hosts succeed. A lost acknowledgement after saving does not erase the profile.
-Start another invitation if the current one expires.
-
-Tests cover native Dart/Python TLS interoperability, incorrect-certificate
-rejection, Ed25519 proof, invitation expiry, SSH routes, key preservation, and
-the review/save UI. Physical camera and phone permission behavior still require
-device testing.
+If a host fails, already-authorized keys remain and are reported. A complete
+phone profile is saved only after all hosts succeed; a lost final acknowledgement
+does not erase it. TLS, proof-of-key, expiry, routes, and save/review flows have
+automated tests; physical cameras and permission behavior still need device checks.

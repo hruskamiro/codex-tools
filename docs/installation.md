@@ -4,64 +4,51 @@
 
 ## Install from GitHub
 
-Use Linux or macOS with Python 3.10 or newer and pipx:
+**Linux or macOS, Python 3.10+, and pipx.** Codex Tools is installed from GitHub:
 
 ```bash
 pipx install git+https://github.com/hruskamiro/codex-tools.git
 ```
 
-The commands are `codex-tools`, `codex-viewer` and `codex-manager`. Codex Tools
-is not yet published on PyPI. Model-backed summaries and structured tasks also
-need an installed Codex CLI; ordinary viewing and search do not call a model.
-The Markdown viewer and Agent Console need no LaTeX or Homebrew.
+This provides `codex-tools`, `codex-viewer`, and `codex-manager`. Viewing and
+search need no model or LaTeX; model-backed summaries and tasks also need Codex CLI.
+The toolkit is not yet published on PyPI.
+
+## Install `ct` and completion
+
+**Use `ct` for shorter commands**, with Bash completion for all tools and subcommands:
+
+```bash
+codex-tools alias install
+source ~/.local/share/bash-completion/completions/codex-tools
+ct viewer
+```
+
+New shells load completion when `bash-completion` is available. Add `--force`
+to replace stale alias or completion files.
+
+## Update
+
+```bash
+pipx upgrade codex-tools
+codex-tools alias install --force  # refresh installed completion
+codex-viewer restart              # reload an already-running viewer
+```
+
+**Configuration and pairing keys are preserved.** Restart a running relay
+separately; upgrading does not start one or grant [auto-start permission](relay.md#start-the-remote-relay-automatically-over-ssh).
+Use `pipx reinstall codex-tools` to rebuild from the original installation source.
+For an editable installation, update its checkout before refreshing the install.
 
 ## Older macOS releases
 
-On older macOS releases, use prebuilt wheels for native Python dependencies
-to avoid compiling them and downloading build toolchains:
+**Monterey's bundled Python 3.9 is too old.** Select an installed Python 3.10+
+with `pipx install --python /path/to/python3 ...`. Prebuilt dependencies avoid
+compiling native extensions:
 
 ```bash
 pipx install --pip-args='--only-binary=cryptography,cffi,rpds-py' git+https://github.com/hruskamiro/codex-tools.git
 ```
 
-Monterey's bundled Python 3.9 is too old; select an installed Python 3.10 or
-newer with `pipx install --python /path/to/python3` when needed. The default browser opens through
-macOS's `open` command. Mouse-wheel-down support depends on the curses library
-provided by Python; Page Down remains available when that support is missing.
-
-## Update
-
-For a GitHub installation, fetch published updates with:
-
-```bash
-pipx upgrade codex-tools
-codex-tools alias install --force  # refresh installed alias/completion
-codex-viewer restart              # reload an already-running viewer
-```
-
-Restart an already-running relay separately to load new code. Upgrading preserves
-configuration and pairing keys; it does not start a relay or grant auto-start
-permission. See [relay setup](relay.md#start-the-remote-relay-automatically-over-ssh).
-
-If the installation needs rebuilding from its original GitHub source, use
-`pipx reinstall codex-tools`. An editable source-checkout installation instead
-uses its checked-out code; update that checkout before refreshing its installation.
-
-## Install `ct` and completion
-
-The shorter `ct` command is convenient for everyday use. Its installer also
-adds Bash completion for both `ct` and `codex-tools`:
-
-```bash
-codex-tools alias install
-source ~/.local/share/bash-completion/completions/codex-tools
-```
-
-**Completion covers every current top-level tool and its subcommands.** New
-shells load it automatically when the `bash-completion` package is available.
-
-If an earlier uninstall left stale alias or completion files, replace them with:
-
-```bash
-codex-tools alias install --force
-```
+No Homebrew is required. Browsers open through macOS `open`; if your Python's
+curses lacks wheel-down support, use Page Down.

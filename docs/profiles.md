@@ -2,142 +2,94 @@
 
 [Back to README](../README.md)
 
-Profiles give each account its own `CODEX_HOME`, login, and configuration.
-Conversations are shared with the normal `~/.codex` profile by default.
-New profiles link both transcript files and the modern `state_5.sqlite` and
-`thread_history_1.sqlite` databases into their conversation store, so thread
-indexes and history stay shared too. SQLite keeps its WAL/SHM files beside the
-canonical databases. Authentication and configuration remain profile-local.
-`--isolated` uses a private conversation store, including private databases.
-This applies to newly created/imported profiles; existing profiles are not
-automatically migrated, and `update` (or `import --force`) preserves their layout.
+**Separate logins and configuration; share conversations when useful.** Each
+profile has its own `CODEX_HOME`. New profiles share `~/.codex` history by default:
 
 ```bash
 codex-manager new work
 codex-manager run work
-```
-
-Use a private conversation store when needed:
-
-```bash
 codex-manager new private --isolated
 ```
 
+New shared profiles link transcripts, `state_5.sqlite`, and `thread_history_1.sqlite`
+to their conversation store. SQLite keeps WAL/SHM beside the canonical databases.
+`--isolated` gives a private store and databases. Existing profiles are not
+migrated automatically; updates preserve their layout.
+
 ## Wrapper commands
 
-Install a convenient command for a profile:
+**The command is the profile name, with no added prefix.**
 
 ```bash
 codex-manager install work
 work
+codex-manager install private --wrapper cpvt  # optional custom name
 ```
 
-**The default wrapper is the profile name, with no added prefix.** Choose another name with:
-
-```bash
-codex-manager install work --wrapper cw
-```
-
-Each profile has at most one registered wrapper. Rename and uninstall stay
-coordinated with it:
+Each profile has one registered wrapper. A default wrapper follows a rename;
+a custom name stays unchanged:
 
 ```bash
 codex-manager rename work company
 codex-manager uninstall company
 ```
 
-A default wrapper follows the renamed profile (`work` becomes
-`company`). A custom wrapper such as `cw` keeps its name.
-
-Existing registered wrappers are preserved when upgrading. To replace an old
-automatically prefixed command with the plain profile name:
-
-```bash
-codex-manager uninstall work
-codex-manager install work
-```
+Upgrades retain existing wrappers. To replace an old automatically prefixed
+wrapper with the plain name, run `codex-manager uninstall work`, then
+`codex-manager install work`.
 
 ## Encrypted login transfer
 
-Export file-backed credentials and profile configuration:
+**Exports are encrypted by default**, covering file-backed credentials,
+configuration, and any selected conversations:
 
 ```bash
 codex-manager export work
-codex-manager import work.codex-profile
-```
-
-**The complete bundle is encrypted with your passphrase by default.** Credentials,
-configuration, and—when selected—conversations are protected together.
-
-```bash
-codex-manager export work --include-conversations
-codex-manager import work.codex-profile \
-  --name laptop-work --isolated --install
-```
-
-Import uses the embedded profile name unless `--name` is supplied. Without
-`--isolated`, an auth-only import shares the destination machine's default
-conversations. A bundle that includes conversations restores them privately.
-To refresh a login when the destination profile already exists:
-
-```bash
 codex-manager update work.codex-profile
 ```
 
-`update` imports the bundle if the profile is missing, or refreshes an existing
-profile without requiring `--force`, and installs or restores its wrapper by
-default. It updates credentials and bundled configuration, preserving the
-existing conversation store and sharing settings. If the bundle has no config,
-existing settings are retained with file-backed authentication enabled. To
-restore bundled conversations or change isolation, import under a new `--name`.
+**`update` makes the profile ready to use.** It imports a missing profile or
+refreshes an existing login/configuration, installing or restoring its wrapper.
+It preserves existing conversations, sharing, and registered wrapper settings.
+If no config was bundled, local settings are retained with file-backed auth enabled.
 
-Existing wrapper settings are retained. `update` reinstalls an unmodified
-registered wrapper at its saved path, including a custom
-name and Codex executable. Locally modified or unrelated commands are refused
-before the login is changed. A new profile uses its name as the command; use
-`--bin-dir` for a nondefault installation directory.
+| Option | Use |
+|---|---|
+| `update BUNDLE --no-install` | Login/configuration only; leave commands untouched |
+| `--name laptop-work` | Override the embedded profile name |
+| `--bin-dir PATH` | Choose a new profile's wrapper directory |
+| `import BUNDLE --install` | Import conservatively, with an optional wrapper |
+
+Modified or unrelated commands are refused before credentials change. Existing
+wrapper names, paths, and Codex executables are retained; missing wrappers are
+restored. Explicit `update --install` and older `import --force` remain supported.
+
+To transfer conversations, create a bundle and import under a new name:
 
 ```bash
-codex-manager update work.codex-profile --no-install
+codex-manager export work --include-conversations
+codex-manager import work.codex-profile --name laptop-work --install
 ```
 
-`--no-install` updates only the login and configuration, leaving commands
-untouched. Ordinary `import` still installs a wrapper only with `--install`.
-Explicit `update --install` remains accepted for compatibility.
+Bundled conversations restore privately. Auth-only imports share the destination's
+default history unless `--isolated` is selected. Existing profiles reject bundled
+conversations or isolation changes; use a new name instead.
 
 ### Transfer without a passphrase
-
-For an explicitly unencrypted export:
 
 ```bash
 codex-manager export work --no-passphrase
 codex-manager update work.codex-profile
 ```
 
-**An unencrypted bundle contains plaintext credentials.** It is created with
-owner-only permissions (`0600`); keep it private during and after transfer.
-`import` and `update` detect the format automatically, so unencrypted bundles
-do not prompt for a passphrase. Encrypted bundles still require their passphrase;
-`--no-passphrase` does not disable authentication on an existing encrypted file.
+**This file contains plaintext credentials.** Permissions are `0600`; keep it
+private during and after transfer. Import/update detect the format automatically;
+encrypted bundles still require their passphrase. Both formats validate the same
+archive and generate destination-local homes, stores, and wrappers. Review any
+machine-specific paths in your supplied configuration.
 
-Both formats contain the same validated profile archive. They use the embedded
-profile name unless overridden with `--name`, and never reuse source-machine
-home/store paths for a new destination profile. Installed wrappers are generated
-for the destination. Portable configuration is copied as supplied, so review any
-machine-specific paths in your own `config.toml`.
+Exports support file-backed `auth.json`, not keyring-only logins. Existing bundles
+are never overwritten; select another `--output` for a fresh export.
 
-`import` remains conservative when a profile exists. The older
-`import BUNDLE --force` refresh behavior is still supported. Exports never
-overwrite an existing bundle; choose another `--output` path for a fresh export.
-
-Export currently supports file-backed `auth.json` credentials, not credentials
-stored only in an OS keyring.
-
-Useful profile commands:
-
-```bash
-codex-manager list
-codex-manager doctor work
-codex-manager path work
-codex-manager remove work
-```
+**Inspect or clean up:** use `codex-manager list`, `codex-manager doctor work`,
+`codex-manager path work`, or `codex-manager remove work`.
