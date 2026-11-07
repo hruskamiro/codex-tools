@@ -75,21 +75,22 @@ conversations, the default `auto` backend uses local XeLaTeX when available,
 otherwise the peer's renderer. PDFs are cached for later offline reading.
 See [LaTeX setup and remote rendering](docs/viewer.md#optional-latex-view).
 
-## Agent Console and remote connections
+## Remote access over unreliable connections
 
-**Read, message, and control live agents** from the terminal, including agents
-on other machines:
+**Keep agents running on a server** with the Codex Tools relay, and use the
+**Agent Console** to read, message, and control them over SSH. Work from a train
+or a slow, intermittent connection while the agents continue on the server.
+
+After setting up the relay and pairing your client:
 
 ```bash
-ct agents
-ct agents show SESSION
-ct agents send SESSION "Check the tests and report back."
-ct agents ui
+ct relay connect desktop  # open the console through reconnecting SSH
 ```
 
-The **Agent Console** keeps drafts, delivery receipts, and cached conversations.
-SSH connections recover after interruptions; accepted messages use durable
-queues. **Relay auto-start requires explicit destination permission and client
+**Read cached conversations and compose while offline.** Drafts and queued
+messages survive interruptions; delivery retries after reconnection. Incremental
+sync keeps routine updates lightweight on low-bandwidth links.
+**Relay auto-start requires explicit destination permission and client
 opt-in.** See [console controls](docs/agent-console.md) and
 [relay/SSH setup](docs/relay.md).
 
