@@ -9,7 +9,8 @@ OpenAI.
 
 ## What can I use it for?
 
-- **Read old conversations comfortably** in a private local browser viewer.
+- **Read agent responses in real time** with polished typesetting in a private
+  local browser viewer.
 - **Typeset technical answers** with polished math, tables, and code blocks.
 - **Find something you discussed before** across local Codex JSONL history.
 - **Create daily and weekly work summaries** and browse them as a static site.
