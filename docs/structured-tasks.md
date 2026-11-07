@@ -14,27 +14,68 @@ ct structured run \
   --model MODEL
 ```
 
-Run an independent batch in parallel, then verify its saved artifacts:
+## Batches and adaptive pacing
+
+Run a batch and verify its saved artifacts:
 
 ```bash
-ct structured batch batch.json --batch-dir runs/batch-001 --jobs 4
+ct structured batch batch.json --batch-dir runs/batch-001
 ct structured check runs/batch-001
 ```
 
-App-server batches can opt into provider backoff:
+**The default is one job with adaptive pacing**, for both execution backends.
+`--jobs N` sets a hard maximum. A provider rate limit pauses new requests for
+60 seconds, then resumes at half the previous concurrency (rounded down, at
+least one). Repeated affected requests double the cooldown up to ten minutes.
+Repeated error events within one request extend its cooldown without repeatedly
+cutting concurrency. Timeouts and HTTP 502/503/504 also pause new requests,
+without reducing concurrency on their own.
+
+Recovery requires **30 healthy seconds and three successful tasks** at the
+current level. Each recovery step adds one slot, up to `--jobs`; subsequent
+steps require fresh work and a new healthy period. Requests that started before
+a limit or a recovery step do not count towards that next period. Idle time,
+including time between batches, cannot increase concurrency on its own.
 
 ```bash
-ct structured batch batch.json --batch-dir runs/book --backend app-server \
-  --jobs 2 --rate-limit-backoff 60 --backoff-state runs/book-backoff.json
+ct structured batch batch.json --batch-dir runs/parallel --jobs 8
+ct structured batch batch.json --batch-dir runs/fixed --jobs 8 --fixed
 ```
 
-HTTP 429, transient server errors and request timeouts pause new admissions and
-reduce concurrency to one. The initial pause doubles for subsequent affected
-requests, up to ten minutes; repeated signals within one request extend its quiet
-period without increasing the incident count. Active requests finish normally,
-and failed tasks are not automatically replayed. Sharing `--backoff-state` carries
-the cooldown and reduced concurrency across sequential batches. Live state is
-included in the batch summary. Backoff is disabled unless requested.
+**`--fixed` fixes concurrency, not cooldowns.** It retains provider pauses while
+keeping the requested number of slots. Running requests finish normally in
+both modes, and the scheduler never automatically replays failed tasks.
+Codex itself may perform retries inside a running request.
+
+Optional policy controls:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--rate-limit-backoff SECONDS` | `60` | Initial cooldown; positive and at most 600 seconds |
+| `--backoff-decrease RULE` | `0.5x` | Multiply concurrency by a factor below one, or subtract an integer (`-1`) |
+| `--backoff-increase RULE` | `+1` | Add an integer, or multiply by a factor above one (`1.25x`, rounded up) |
+| `--backoff-recovery-period SECONDS` | `30` | Minimum healthy period before each recovery step |
+
+For example, use `--backoff-decrease=-1 --backoff-increase 1.25x` for an additive
+cut and multiplicative recovery. `--fixed` rejects the three concurrency tuning
+options rather than silently ignoring them. A single `structured run` has no
+batch scheduler, so these controls apply only to `structured batch`.
+
+The batch summary includes effective concurrency, cooldown, recovery progress,
+and recent policy events. State is saved in `backoff-state.json` in the batch
+directory when pacing state changes. Use `--backoff-state FILE` to share it
+across **sequential** batches. The file is not a coordinator for concurrent batch
+processes. Reusing it preserves the cooldown and reduced concurrency, capped at
+the new `--jobs` maximum. Recovery needs fresh successful tasks. When changing
+the saved policy (including switching to `--fixed`), choose a new state file.
+Older version-one cooldown files are also accepted.
+
+`--admission-deadline TIMESTAMP` stops launching tasks after an ISO timestamp
+with a UTC offset. Active tasks drain normally, and untouched tasks are recorded
+as `deferred-deadline`. The batch remains incomplete; no model call is made for
+those deferred tasks. It can be resumed later without the expired deadline.
+
+## App-server connection
 
 To use the lower-overhead app-server backend, authorize Codex Tools once and
 select the saved connection on each run or batch:

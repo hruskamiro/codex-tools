@@ -8,14 +8,17 @@ import json
 import re
 import subprocess
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+from urllib.error import HTTPError
 
 from jsonschema import SchemaError, ValidationError, validators
 
 from codex_tools import app_server, codex_exec, manager
+from codex_tools.batch_backoff import RateLimitBackoff, rate_limit_reason
 
 
 BACKENDS = ("exec", "app-server")
@@ -80,6 +83,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Override the timeout in seconds for all selected tasks.",
     )
     batch.add_argument("--codex-bin", default="codex", help="Codex executable.")
+    batch.add_argument("--admission-deadline", help="UTC-offset ISO timestamp: stop new requests, let active calls finish.")
+    batch.add_argument("--rate-limit-backoff", type=float, nargs="?", const=60.0, default=60.0,
+                       help="Initial cooldown after provider limits/errors, in seconds. Default: 60; adaptive pacing is enabled by default.")
+    batch.add_argument("--fixed", action="store_true",
+                       help="Keep --jobs concurrency fixed; provider cooldowns still apply.")
+    batch.add_argument("--backoff-decrease", metavar="RULE",
+                       help="Concurrency decrease: factor (0.5x) or integer step (-1). Default: 0.5x.")
+    batch.add_argument("--backoff-increase", metavar="RULE",
+                       help="Recovery increase: integer step (+1) or factor (1.25x). Default: +1.")
+    batch.add_argument("--backoff-recovery-period", type=float, metavar="SECONDS",
+                       help="Healthy period before each increase, also requiring three successful tasks. Default: 30.")
+    batch.add_argument("--backoff-state", type=Path, help="Share backoff state across sequential batches.")
     add_backend_arguments(batch)
     batch.add_argument(
         "--usage-codex-home", type=Path,
@@ -201,6 +216,7 @@ def run_task(
     default_home: Path = manager.DEFAULT_CODEX_HOME,
     connection_root: Path = app_server.DEFAULT_ROOT,
     app_server_home: Path = app_server.DEFAULT_CODEX_HOME,
+    on_event: Callable[[dict], None] | None = None,
 ) -> dict:
     validator_class = validators.validator_for(schema)
     validator_class.check_schema(schema)
@@ -251,6 +267,7 @@ def run_task(
                 prompt=prompt, command=command, cwd=run_dir,
                 events_path=events_path, stderr_path=stderr_path, timeout=timeout,
                 env=manager.profile_environment(profile, manager_root, default_home),
+                **({"event_callback": on_event} if on_event is not None else {}),
             )
             usage = codex_exec.event_usage(execution.events)
             thread_id = codex_exec.event_thread_id(execution.events)
@@ -267,6 +284,7 @@ def run_task(
                 reasoning_effort=reasoning_effort, timeout=timeout,
                 access_token_value=token, codex_bin=codex_bin,
                 codex_home=app_server_home,
+                **({"on_event": on_event} if on_event is not None else {}),
             )
             atomic_write_text(
                 events_path,
@@ -290,6 +308,10 @@ def run_task(
             }
         )
         if execution.returncode != 0:
+            if on_event is not None:
+                reason = rate_limit_reason({"error": execution.stderr[-8192:]})
+                if reason:
+                    on_event({"error": reason})
             raise RuntimeError(f"codex exec exited with status {execution.returncode}")
         if event_parse_errors:
             raise RuntimeError("Codex emitted non-JSON event output")
@@ -462,7 +484,7 @@ def run_batch(
     manifest: dict,
     manifest_path: Path,
     batch_dir: Path,
-    jobs: int,
+    jobs: int = 1,
     idxs: tuple[int, int] | None = None,
     model_override: str | None = None,
     reasoning_effort_override: str | None = None,
@@ -476,9 +498,40 @@ def run_batch(
     connection_root: Path = app_server.DEFAULT_ROOT,
     app_server_home: Path = app_server.DEFAULT_CODEX_HOME,
     usage_codex_home: Path = app_server.DEFAULT_USAGE_CODEX_HOME,
+    rate_limit_backoff: float = 60.0,
+    backoff_state: Path | None = None,
+    admission_deadline: str | None = None,
+    fixed: bool = False,
+    backoff_decrease: str | None = None,
+    backoff_increase: str | None = None,
+    backoff_recovery_period: float | None = None,
 ) -> dict:
+    deadline = None
+    if admission_deadline is not None:
+        parsed = datetime.fromisoformat(admission_deadline.replace("Z", "+00:00"))
+        if parsed.utcoffset() is None:
+            raise ValueError("--admission-deadline must include a UTC offset")
+        deadline = parsed.timestamp()
     if jobs <= 0:
         raise ValueError("--jobs must be a positive integer")
+    if fixed and any(value is not None for value in (
+        backoff_decrease, backoff_increase, backoff_recovery_period,
+    )):
+        raise ValueError("--fixed cannot be combined with adaptive concurrency tuning")
+    state_path = (backoff_state or batch_dir / "backoff-state.json").expanduser().resolve()
+    if (state_path in {(batch_dir / "manifest.json").expanduser().resolve(),
+                       (batch_dir / "summary.json").expanduser().resolve()}
+            or state_path.is_relative_to((batch_dir / "tasks").expanduser().resolve())):
+        raise ValueError("--backoff-state must not replace batch artifacts")
+    initial = load_json(state_path) if state_path.exists() else None
+    # Validate policy and persisted state before creating batch artifacts.
+    backoff = RateLimitBackoff(
+        jobs, rate_limit_backoff, fixed=fixed,
+        decrease=backoff_decrease if backoff_decrease is not None else "0.5x",
+        increase=backoff_increase if backoff_increase is not None else "+1",
+        recovery_period=backoff_recovery_period if backoff_recovery_period is not None else 30.0,
+        initial=initial, save=lambda value: atomic_write_json(state_path, value),
+    )
     manifest_path = manifest_path.expanduser().resolve()
     if model_override is not None and not model_override:
         raise ValueError("--model cannot be empty")
@@ -539,6 +592,8 @@ def run_batch(
     else:
         atomic_write_json(stored_manifest_path, manifest)
     tasks_dir.mkdir(exist_ok=True)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(state_path, backoff.snapshot())
 
     started_at = utc_now()
     records: dict[str, dict] = {}
@@ -576,6 +631,7 @@ def run_batch(
         task_id = task["id"]
         task_dir = tasks_dir / task_id
         try:
+            admission = backoff.begin()
             run_task(
                 prompt=task["prompt"],
                 schema=task["schema"],
@@ -591,8 +647,10 @@ def run_batch(
                 default_home=default_home,
                 connection_root=connection_root,
                 app_server_home=app_server_home,
+                on_event=lambda event: backoff.event(task_id, event),
             )
             run_metadata = load_json(task_dir / "run.json")
+            backoff.success(task_id, admission)
             return task_id, {
                 "status": "success",
                 "executed": True,
@@ -601,12 +659,22 @@ def run_batch(
             }
         except Exception as exc:
             usage = None
+            failure_metadata = {}
             run_metadata_path = task_dir / "run.json"
             if run_metadata_path.exists():
                 try:
-                    usage = load_json(run_metadata_path).get("usage")
+                    failure_metadata = load_json(run_metadata_path)
+                    usage = failure_metadata.get("usage")
                 except (json.JSONDecodeError, OSError):
                     pass
+            # Validation errors may quote model output containing "HTTP 429";
+            # only execution errors and actual HTTP failures are provider signals.
+            reason = rate_limit_reason({"error": str(exc)}) if isinstance(exc, RuntimeError) else None
+            if isinstance(exc, HTTPError) and exc.code in {429, 502, 503, 504}:
+                reason = f"HTTP {exc.code}"
+            if (reason or isinstance(exc, (TimeoutError, subprocess.TimeoutExpired))
+                    or failure_metadata.get("status") == "timeout"):
+                backoff.signal(task_id, reason or "request-timeout")
             return task_id, {
                 "status": "failed",
                 "executed": True,
@@ -654,6 +722,7 @@ def run_batch(
             "started_at": started_at,
             "finished_at": utc_now() if status != "running" else None,
             "jobs": jobs,
+            "admission_deadline": admission_deadline,
             "task_count": len(tasks),
             "backend": backend,
             **({"profile": profile} if profile is not None else {"connection": connection}),
@@ -681,6 +750,7 @@ def run_batch(
                     "not-selected",
                     "failed",
                     "incomplete",
+                    "deferred-deadline",
                 )
             },
             "usage": summed_usage(ordered_records),
@@ -691,14 +761,41 @@ def run_batch(
         }
         if backend == "app-server":
             summary["subscription_usage"] = subscription_usage()
+        summary["backoff"] = backoff.snapshot()
         return summary
 
     atomic_write_json(summary_path, build_summary("running"))
     with ThreadPoolExecutor(max_workers=jobs) as executor:
-        futures = {executor.submit(execute, task): task for task in pending}
-        for future in as_completed(futures):
-            task_id, update = future.result()
-            records[task_id].update(update)
+        queue = iter(pending)
+        next_task = next(queue, None)
+        futures = {}
+        while futures or next_task is not None:
+            if deadline is not None and time.time() >= deadline:
+                active_ids = {task["id"] for task in futures.values()}
+                for task in pending:
+                    record = records[task["id"]]
+                    if task["id"] not in active_ids and record["status"] == "queued":
+                        record.update(status="deferred-deadline", executed=False,
+                                      error="Admission deadline reached; no model call started.")
+                next_task = None
+                queue = iter(())
+            state = backoff.snapshot()
+            while (next_task is not None and len(futures) < state["effective_jobs"]
+                   and not state["pause_remaining_seconds"]
+                   and (deadline is None or time.time() < deadline)):
+                futures[executor.submit(execute, next_task)] = next_task
+                next_task = next(queue, None)
+                state = backoff.snapshot()
+            if not futures:
+                if next_task is None:
+                    break
+                time.sleep(min(1.0, state["pause_remaining_seconds"]))
+            else:
+                finished, _ = wait(futures, timeout=1.0, return_when=FIRST_COMPLETED)
+                for future in finished:
+                    task_id, update = future.result()
+                    records[task_id].update(update)
+                    del futures[future]
             atomic_write_json(summary_path, build_summary("running"))
 
     if backend == "app-server" and pending:
@@ -893,6 +990,13 @@ def main(argv: list[str] | None = None) -> int:
                 manifest_path=args.manifest,
                 batch_dir=args.batch_dir,
                 jobs=args.jobs,
+                rate_limit_backoff=args.rate_limit_backoff,
+                backoff_state=args.backoff_state,
+                admission_deadline=args.admission_deadline,
+                fixed=args.fixed,
+                backoff_decrease=args.backoff_decrease,
+                backoff_increase=args.backoff_increase,
+                backoff_recovery_period=args.backoff_recovery_period,
                 idxs=tuple(args.idxs) if args.idxs is not None else None,
                 model_override=args.model,
                 reasoning_effort_override=args.reasoning_effort,

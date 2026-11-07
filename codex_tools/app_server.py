@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from queue import Empty, Queue
-from typing import Any
+from typing import Any, Callable
 
 from codex_tools import __version__, paths
 
@@ -730,6 +730,7 @@ def run_structured_task(
     *, prompt: str, schema: dict[str, Any], model: str, reasoning_effort: str,
     timeout: int, access_token_value: str, codex_bin: str = "codex",
     codex_home: Path = DEFAULT_CODEX_HOME,
+    on_event: Callable[[dict], None] | None = None,
 ) -> AppServerResult:
     started = time.monotonic()
     codex_home = codex_home.expanduser().resolve()
@@ -786,6 +787,8 @@ def run_structured_task(
             parse_errors.append({"error": str(exc), "text": line.rstrip()})
             return receive()
         events.append(message)
+        if on_event is not None:
+            on_event(message)
         return message
 
     def request(method: str, params: dict[str, Any]) -> dict[str, Any]:

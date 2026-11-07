@@ -178,13 +178,17 @@ results, events, and usage for reproducibility:
 ```bash
 ct structured run --prompt prompt.txt --schema response.schema.json \
   --run-dir runs/example-001 --model MODEL
-ct structured batch batch.json --batch-dir runs/batch-001 --jobs 4
+ct structured batch batch.json --batch-dir runs/batch-001
 ct structured check runs/batch-001
 ```
 
+**Batches default to one job and adaptive pacing.** Rate limits trigger a cooldown;
+parallel batches reduce concurrency and recover gradually, up to `--jobs`.
+Use `--fixed` to keep concurrency constant while retaining cooldowns.
+
 The default backend uses `codex exec`; the optional **app-server backend uses a
 separate authenticated connection**. See [structured tasks](docs/structured-tasks.md)
-for login, batching, usage snapshots, and optional rate-limit backoff.
+for login, batching, usage snapshots, and pacing controls.
 
 ## Configuration and diagnostics
 
