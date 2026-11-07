@@ -68,7 +68,7 @@ print(json.dumps({'home':str(home), 'args':sys.argv[1:], 'fixture':json.loads((h
         self.assertIn('Encryption: none', self.output.getvalue())
         with patch.object(manager, 'prompt_import_passphrase', side_effect=AssertionError('Unexpected passphrase prompt')):
             self.assertEqual(self.run_manager(self.destination_args+[
-                'update', str(bundle), '--install', '--bin-dir', str(self.bin), '--codex-binary', str(binary)]), 0)
+                'update', str(bundle), '--bin-dir', str(self.bin), '--codex-binary', str(binary)]), 0)
         home = self.destination/'profiles/work/home'
         wrapper = self.bin/'work'
         self.assertTrue(wrapper.is_file())
@@ -85,7 +85,7 @@ print(json.dumps({'home':str(home), 'args':sys.argv[1:], 'fixture':json.loads((h
             self.assertEqual(self.run_manager(self.destination_args+['update', str(second)]), 0)
             self.assertEqual(self.run_manager(self.destination_args+['update', str(second), '--install']), 0)
             wrapper.unlink()
-            self.assertEqual(self.run_manager(self.destination_args+['update', str(second), '--install']), 0)
+            self.assertEqual(self.run_manager(self.destination_args+['update', str(second)]), 0)
         self.assertEqual((home.parent/'profile.json').read_bytes(), metadata)
         self.assertEqual(wrapper.read_bytes(), wrapper_bytes)
         self.assertEqual((home/'sessions').resolve(), sessions)
@@ -106,10 +106,10 @@ print(json.dumps({'home':str(home), 'args':sys.argv[1:], 'fixture':json.loads((h
         home = self.destination/'profiles/work/home'
         (home/'auth.json').write_text('{"fixture":"old"}')
         with patch.object(manager, 'prompt_import_passphrase', return_value='wrong-password'):
-            self.assertEqual(self.run_manager(self.destination_args+['update', str(bundle)]), 2)
+            self.assertEqual(self.run_manager(self.destination_args+['update', str(bundle), '--bin-dir', str(self.bin)]), 2)
         self.assertEqual((home/'auth.json').read_text(), '{"fixture":"old"}')
         with patch.object(manager, 'prompt_import_passphrase', return_value='fixture-password'):
-            self.assertEqual(self.run_manager(self.destination_args+['update', str(bundle)]), 0)
+            self.assertEqual(self.run_manager(self.destination_args+['update', str(bundle), '--bin-dir', str(self.bin)]), 0)
         self.assertEqual(json.loads((home/'auth.json').read_text()), {'fixture':'first'})
         self.assertEqual((home/'sessions').resolve(), self.destination/'stores/work-conversations/sessions')
 
@@ -138,7 +138,7 @@ print(json.dumps({'home':str(home), 'args':sys.argv[1:], 'fixture':json.loads((h
                     self.assertEqual(self.run_manager(args+['install', 'work', '--bin-dir', str(directory)]), 0)
                     if mode == 'modified':
                         (directory/'work').write_text('locally modified command')
-                command = args+['update', str(bundle), '--install']
+                command = args+['update', str(bundle)]
                 if mode == 'unrelated':
                     command += ['--bin-dir', str(directory)]
                 elif mode == 'different-name':
@@ -182,17 +182,36 @@ print(json.dumps({'home':str(home), 'args':sys.argv[1:], 'fixture':json.loads((h
             'install', 'work', '--wrapper', 'cw', '--bin-dir', str(self.bin)]), 0)
         wrapper = self.bin/'cw'
         before = wrapper.read_bytes()
-        self.assertEqual(self.run_manager(self.destination_args+['update', str(bundle), '--install']), 0)
+        self.assertEqual(self.run_manager(self.destination_args+['update', str(bundle)]), 0)
         self.assertEqual(wrapper.read_bytes(), before)
         profile = manager.load_profile(self.destination, 'work', self.destination_default)
         self.assertEqual(profile['wrapper']['naming'], 'custom')
         self.assertIn('model = "local-model"', (home/'config.toml').read_text())
 
+    def test_update_no_install_skips_new_wrappers_and_preserves_modified_ones(self):
+        bundle = self.export()
+        self.assertEqual(self.run_manager(self.destination_args+[
+            'update', str(bundle), '--no-install', '--bin-dir', str(self.bin)]), 0)
+        self.assertFalse(self.bin.exists())
+        home = self.destination/'profiles/work/home'
+        self.assertEqual(json.loads((home/'auth.json').read_text()), {'fixture':'first'})
+        self.assertEqual(self.run_manager(self.destination_args+[
+            'install', 'work', '--bin-dir', str(self.bin)]), 0)
+        wrapper = self.bin/'work'
+        wrapper.write_text('locally modified wrapper')
+        (self.home/'auth.json').write_text('{"fixture":"second"}\n')
+        second = self.export(filename='second.codex-profile')
+        self.assertEqual(self.run_manager(self.destination_args+['update', str(second)]), 2)
+        self.assertEqual(json.loads((home/'auth.json').read_text()), {'fixture':'first'})
+        self.assertEqual(self.run_manager(self.destination_args+['update', str(second), '--no-install']), 0)
+        self.assertEqual(json.loads((home/'auth.json').read_text()), {'fixture':'second'})
+        self.assertEqual(wrapper.read_text(), 'locally modified wrapper')
+
     def test_update_can_relocate_bundled_conversations_only_for_a_new_profile(self):
         (self.source_default/'sessions/source.jsonl').write_text('portable fixture\n')
         bundle = self.export(conversations=True)
         self.assertEqual(self.run_manager(self.destination_args+['update', str(bundle), '--name', 'codex-mom',
-                                                                  '--install', '--bin-dir', str(self.bin)]), 0)
+                                                                  '--bin-dir', str(self.bin)]), 0)
         home = self.destination/'profiles/codex-mom/home'
         store = (home/'sessions').resolve()
         self.assertEqual((store/'source.jsonl').read_text(), 'portable fixture\n')

@@ -1356,10 +1356,16 @@ def build_parser(prog: str = "codex-manager") -> argparse.ArgumentParser:
             "--isolated", action="store_true",
             help="For a new profile, use a private store instead of sharing with default.",
         )
-        import_cmd.add_argument(
-            "--install", action="store_true",
-            help="Install the profile wrapper; update can reinstall its registered wrapper.",
+        install_options = import_cmd.add_mutually_exclusive_group()
+        install_options.add_argument(
+            "--install", action="store_true", default=updating,
+            help="Install the profile wrapper (already the default for update).",
         )
+        if updating:
+            install_options.add_argument(
+                "--no-install", dest="install", action="store_false",
+                help="Update login/configuration only; leave wrapper commands untouched.",
+            )
         import_cmd.add_argument(
             "--wrapper", "--command-name", dest="wrapper_name", type=valid_command_name,
             help="Wrapper name. Default: PROFILE (no prefix); update preserves an existing wrapper.",

@@ -85,20 +85,25 @@ codex-manager update work.codex-profile
 ```
 
 `update` imports the bundle if the profile is missing, or refreshes an existing
-profile without requiring `--force`. It updates credentials and bundled configuration, preserving the
+profile without requiring `--force`, and installs or restores its wrapper by
+default. It updates credentials and bundled configuration, preserving the
 existing conversation store and sharing settings. If the bundle has no config,
 existing settings are retained with file-backed authentication enabled. To
 restore bundled conversations or change isolation, import under a new `--name`.
 
-Existing wrapper commands are retained. With `update --install`, an unmodified
-registered wrapper can be reinstalled at its saved path, including a custom
+Existing wrapper settings are retained. `update` reinstalls an unmodified
+registered wrapper at its saved path, including a custom
 name and Codex executable. Locally modified or unrelated commands are refused
 before the login is changed. A new profile uses its name as the command; use
 `--bin-dir` for a nondefault installation directory.
 
 ```bash
-codex-manager update work.codex-profile --install
+codex-manager update work.codex-profile --no-install
 ```
+
+`--no-install` updates only the login and configuration, leaving commands
+untouched. Ordinary `import` still installs a wrapper only with `--install`.
+Explicit `update --install` remains accepted for compatibility.
 
 ### Transfer without a passphrase
 
@@ -106,7 +111,7 @@ For an explicitly unencrypted export:
 
 ```bash
 codex-manager export work --no-passphrase
-codex-manager update work.codex-profile --install
+codex-manager update work.codex-profile
 ```
 
 **An unencrypted bundle contains plaintext credentials.** It is created with

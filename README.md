@@ -114,12 +114,13 @@ codex-manager import work.codex-profile --install
 codex-manager update work.codex-profile
 ```
 
-`update` imports or refreshes a profile without `--force`, preserving existing
-conversations. Export with `--no-passphrase` only for an explicitly unencrypted
+`update` imports or refreshes a profile and installs its wrapper by default,
+preserving existing conversations. Use `--no-install` for login/configuration only.
+Export with `--no-passphrase` only for an explicitly unencrypted
 transfer: the resulting file contains plaintext credentials.
 
 See [profiles and encrypted transfer](docs/profiles.md) for sharing, custom
-wrapper names, renaming, and wrapper reinstallation with `update --install`.
+wrapper names, renaming, and wrapper reinstallation with `update`.
 
 ## Search and activity
 
