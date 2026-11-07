@@ -92,33 +92,6 @@ queues. **Relay auto-start requires explicit destination permission and client
 opt-in.** See [console controls](docs/agent-console.md) and
 [relay/SSH setup](docs/relay.md).
 
-## Optional voice transcription
-
-**Voice is optional and independent of agents.** Normal installation includes
-no Whisper libraries or models. Use a separately installed whisper.cpp server:
-
-```bash
-ct voice doctor
-ct voice install large  # explicitly download large-v3
-ct voice configure
-ct voice serve
-```
-
-Accepted jobs survive disconnects and restarts. See [voice setup](docs/voice.md)
-for models, GPU support, benchmarks, mobile connections, and recovery.
-
-## Phone pairing and mobile PDFs
-
-Pair a phone using a temporary QR invitation and its own SSH identity:
-
-```bash
-ct connect pair-phone PROFILE --address COMPUTER_IP
-```
-
-The QR encoder is optional: `pipx inject codex-tools qrcode`. See
-[phone pairing](docs/phone-pairing.md) for authorization and networking, and
-[mobile PDF reading](docs/mobile-pdf.md) for portrait/wide blocks and offline caching.
-
 ## Profile manager
 
 **Keep logins and configuration separate**, with shared conversations by
@@ -189,6 +162,22 @@ Use `--fixed` to keep concurrency constant while retaining cooldowns.
 The default backend uses `codex exec`; the optional **app-server backend uses a
 separate authenticated connection**. See [structured tasks](docs/structured-tasks.md)
 for login, batching, usage snapshots, and pacing controls.
+
+## Upcoming mobile Agent Console
+
+**A companion mobile app for working with agents is being prepared for release.**
+The mobile Agent Console is a separate project, and its integration is still in
+development. Codex Tools provides optional support for it:
+
+- **Voice transcription:** a separate whisper.cpp service, with durable jobs
+  for interrupted connections. See [voice setup](docs/voice.md).
+- **Phone pairing:** temporary QR invitations and the phone's own SSH identity.
+  See [pairing and authorization](docs/phone-pairing.md).
+- **Mobile PDFs:** portrait and wide blocks with offline caching.
+  See [mobile PDF reading](docs/mobile-pdf.md).
+
+**These integrations are optional.** Normal installation adds no Whisper
+libraries or models; voice and agent connections are configured independently.
 
 ## Configuration and diagnostics
 
