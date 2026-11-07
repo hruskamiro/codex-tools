@@ -32,6 +32,10 @@ SHARED_PATHS = {
     "shell_snapshots": "dir",
     "thread-writer-locks": "dir",
     "session_index.jsonl": "file",
+    # SQLite resolves database symlinks before opening WAL/SHM sidecars. Keep
+    # these beside the canonical database; do not link sidecars individually.
+    "state_5.sqlite": "file",
+    "thread_history_1.sqlite": "file",
 }
 SEEDED_STATE_FILES = ("state_5.sqlite",)
 EXPORTED_CONVERSATION_PATHS = (
@@ -256,7 +260,7 @@ def ensure_default_shared_paths(path: Path) -> None:
             target.mkdir(parents=True, exist_ok=True)
         else:
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.touch()
+            target.touch(mode=0o600)
 
 
 def link_shared_paths(home: Path, store: Path) -> None:
@@ -330,6 +334,9 @@ def seed_state_files(
     for rel in SEEDED_STATE_FILES:
         source = source_home / rel
         target = home / rel
+        # Never replace a live shared database, including during repair --force.
+        if target.is_symlink():
+            continue
         if target.exists() and not force:
             continue
         result = sqlite_backup(source, target, preserve_existing=force)
@@ -784,8 +791,6 @@ def command_import(args: argparse.Namespace) -> int:
                     "share": "isolated" if private_store else "default",
                     "created_at": utc_now(),
                 }
-                if not private_store:
-                    seed_state_files(home, default)
                 save_profile(root, payload)
             except Exception:
                 if target_profile.exists():
@@ -836,14 +841,12 @@ def command_new(args: argparse.Namespace) -> int:
     if share:
         shared_profile = load_profile(root, share, default)
         store = store_from_profile(shared_profile)
-        source_home = home_from_profile(shared_profile)
         if share == "default":
             ensure_default_shared_paths(store)
         else:
             ensure_store(store)
     else:
         store = store_dir(root, name)
-        source_home = None
         ensure_store(store)
 
     try:
@@ -859,7 +862,6 @@ def command_new(args: argparse.Namespace) -> int:
         "share": share or "isolated",
         "created_at": utc_now(),
     }
-    seeded, _backups = seed_state_files(home, source_home) if source_home else ([], [])
     save_profile(root, payload)
     print(f"Created profile {name}")
     print("Auth/config: isolated")
@@ -867,8 +869,6 @@ def command_new(args: argparse.Namespace) -> int:
         print(f"Conversations: shared with {share}")
     else:
         print("Conversations: isolated")
-    if seeded:
-        print(f"Seeded state: {', '.join(seeded)}")
     print(f"Run: codex-manager run {name}")
     return 0
 
@@ -927,7 +927,7 @@ def command_doctor(args: argparse.Namespace) -> int:
         elif path.exists():
             status = "local"
         print(f"{rel}: {status}")
-    for rel in ("auth.json", "config.toml", "thread_history_1.sqlite", "state_5.sqlite"):
+    for rel in ("auth.json", "config.toml"):
         path = home / rel
         print(f"{rel}: {'present' if path.exists() else 'missing'}")
     return 0

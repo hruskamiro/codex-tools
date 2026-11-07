@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
 from io import StringIO
@@ -12,6 +13,60 @@ from codex_tools import manager
 
 
 class ManagerCommandTests(unittest.TestCase):
+    def test_new_profiles_share_live_sqlite_stores_in_wal_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            default, managed = root / "default", root / "manager"
+            default.mkdir()
+            common = ["--manager-root", str(managed), "--default-home", str(default)]
+            with patch("sys.stdout", new_callable=StringIO):
+                self.assertEqual(manager.main([*common, "new", "work"]), 0)
+                self.assertEqual(manager.main([*common, "new", "client", "--share", "work"]), 0)
+                self.assertEqual(manager.main([*common, "new", "private", "--isolated"]), 0)
+            work = managed / "profiles/work/home"
+            client = managed / "profiles/client/home"
+            private = managed / "profiles/private/home"
+            for name in ("state_5.sqlite", "thread_history_1.sqlite"):
+                with self.subTest(database=name):
+                    self.assertEqual((work / name).resolve(), default / name)
+                    self.assertEqual((client / name).resolve(), default / name)
+                    self.assertEqual((private / name).resolve(), managed / "stores/private-conversations" / name)
+                    self.assertEqual((default / name).stat().st_size, 0)
+                    # Multiple live connections through different home paths must
+                    # see commits and share WAL locks, including the first open.
+                    first = sqlite3.connect(work / name, timeout=0)
+                    second = sqlite3.connect(client / name, timeout=0)
+                    base = sqlite3.connect(default / name, timeout=0)
+                    try:
+                        self.assertEqual(first.execute("pragma journal_mode=wal").fetchone()[0], "wal")
+                        first.execute("create table messages (id integer)")
+                        first.execute("insert into messages values (1)")
+                        first.commit()
+                        self.assertEqual(second.execute("select * from messages").fetchall(), [(1,)])
+                        second.execute("insert into messages values (2)")
+                        with self.assertRaises(sqlite3.OperationalError):
+                            first.execute("begin immediate")
+                        second.commit()
+                        self.assertEqual(base.execute("select count(*) from messages").fetchone()[0], 2)
+                        self.assertTrue((default / (name + "-wal")).exists())
+                        self.assertTrue((default / (name + "-shm")).exists())
+                        for profile_home in (work, client):
+                            self.assertFalse((profile_home / (name + "-wal")).exists())
+                            self.assertFalse((profile_home / (name + "-shm")).exists())
+                        isolated = sqlite3.connect(private / name)
+                        try:
+                            self.assertEqual(isolated.execute("select name from sqlite_master where name='messages'").fetchall(), [])
+                        finally:
+                            isolated.close()
+                        with patch("sys.stdout", new_callable=StringIO):
+                            self.assertEqual(manager.main([*common, "repair", "work", "--force"]), 0)
+                        self.assertTrue((work / name).is_symlink())
+                        self.assertEqual(base.execute("select count(*) from messages").fetchone()[0], 2)
+                    finally:
+                        first.close()
+                        second.close()
+                        base.close()
+
     def test_legacy_prefixed_wrapper_remains_manageable(self) -> None:
         for action in ('rename', 'uninstall'):
             with self.subTest(action=action), tempfile.TemporaryDirectory() as temporary:
@@ -205,6 +260,10 @@ class ManagerCommandTests(unittest.TestCase):
                 (target_default / "sessions").resolve(),
             )
             self.assertTrue((bin_dir / "laptop-work").is_file())
+            for name in ("state_5.sqlite", "thread_history_1.sqlite"):
+                self.assertTrue((imported_home / name).is_symlink())
+                self.assertEqual((imported_home / name).resolve(), target_default / name)
+                self.assertEqual((target_default / name).stat().st_mode & 0o777, 0o600)
             metadata = json.loads(
                 (imported / "profile.json").read_text(encoding="utf-8")
             )
@@ -470,6 +529,16 @@ class ManagerCommandTests(unittest.TestCase):
                 before_config = (home / "config.toml").read_bytes()
                 metadata = target_root / "profiles/work/profile.json"
                 before_metadata = metadata.read_bytes()
+                # Simulate a legacy profile with private database copies. A
+                # forced login refresh must not convert or replace its stores.
+                database_contents = {}
+                for name in ("state_5.sqlite", "thread_history_1.sqlite"):
+                    database = home / name
+                    database.unlink()
+                    with sqlite3.connect(database) as connection:
+                        connection.execute("create table preserved (value integer)")
+                        connection.execute("insert into preserved values (42)")
+                    database_contents[name] = database.read_bytes()
                 sessions = (home / "sessions").resolve()
                 conversation = sessions / "keep.jsonl"
                 conversation.write_text("existing conversation\n")
@@ -500,6 +569,9 @@ class ManagerCommandTests(unittest.TestCase):
                 success = case in {"auth-only", "with-config", "private-store"}
                 self.assertEqual(result, 0 if success else 2)
                 self.assertEqual(metadata.read_bytes(), before_metadata)
+                for name, contents in database_contents.items():
+                    self.assertFalse((home / name).is_symlink())
+                    self.assertEqual((home / name).read_bytes(), contents)
                 self.assertEqual((home / "sessions").resolve(), sessions)
                 self.assertEqual(conversation.read_text(), "existing conversation\n")
                 if success:
