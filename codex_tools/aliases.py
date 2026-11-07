@@ -24,7 +24,7 @@ _codex_tools_completion() {
   local agents_commands="list show send stop ui"
   local summary_commands="today yesterday day week model site clean"
   local viewer_commands="serve start restart stop status open pick doctor"
-  local manager_commands="new rename export import list run install uninstall remove rm delete path doctor repair"
+  local manager_commands="new rename export import update list run install uninstall remove rm delete path doctor repair"
   local relay_commands="init token pair peers configure sync connect ensure serve outbox cache"
   local relay_cache_commands="refresh status"
   local voice_commands="init token configure install doctor models serve status benchmark"

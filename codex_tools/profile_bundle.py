@@ -1,8 +1,9 @@
-"""Passphrase encryption for portable codex-manager profile bundles."""
+"""Portable profile bundles with default encryption and explicit plaintext copies."""
 
 from __future__ import annotations
 
 import os
+import shutil
 import struct
 from pathlib import Path
 
@@ -25,6 +26,25 @@ HEADER = struct.Struct(f">{len(MAGIC)}sBIII{SALT_SIZE}s{NONCE_SIZE}s")
 
 class BundleError(ValueError):
     """Raised when an encrypted profile bundle is invalid."""
+
+
+def copy_private_file(source: Path, target: Path) -> None:
+    """Copy an explicitly unencrypted bundle without exposing it via umask."""
+    descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with source.open("rb") as incoming, os.fdopen(descriptor, "wb") as outgoing:
+            descriptor = -1
+            shutil.copyfileobj(incoming, outgoing, CHUNK_SIZE)
+    except Exception:
+        if descriptor >= 0:
+            os.close(descriptor)
+        target.unlink(missing_ok=True)
+        raise
+
+
+def is_encrypted_file(source: Path) -> bool:
+    with source.open("rb") as handle:
+        return handle.read(len(MAGIC)) == MAGIC
 
 
 def _derive_key(passphrase: str, salt: bytes, n: int, r: int, p: int) -> bytes:

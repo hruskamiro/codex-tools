@@ -7,11 +7,15 @@ viewer state, and managed conversation stores private to your user account.
 ## Profile exports
 
 `codex-manager export` bundles file-backed Codex credentials and profile setup.
-Exports are encrypted with a passphrase and created with owner-only permissions,
+Exports are encrypted with a passphrase by default and created with owner-only permissions,
 but they still grant access to the exported account when decrypted. Use a strong
 passphrase, transfer bundles only through trusted channels, and remove copies
 that are no longer needed. Passphrases are read from the terminal and should
 never be supplied in command arguments.
+
+`export --no-passphrase` explicitly creates an unencrypted bundle containing
+plaintext credentials. File permissions remain `0600`, but anyone who obtains
+the file can read its credentials without a passphrase.
 
 ## Viewer exposure
 

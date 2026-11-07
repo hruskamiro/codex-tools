@@ -584,7 +584,7 @@ def command_export(args: argparse.Namespace) -> int:
         raise ValueError(f"export parent is not a directory: {output.parent}")
     if not output.parent.exists():
         ensure_private_dir(output.parent)
-    passphrase = prompt_export_passphrase()
+    passphrase = None if args.no_passphrase else prompt_export_passphrase()
     with tempfile.TemporaryDirectory(prefix="codex-profile-export-") as temporary:
         archive_path = Path(temporary) / "profile.zip"
         encrypted_path = output.with_name(f".{output.name}.tmp-{secrets.token_hex(4)}")
@@ -592,7 +592,10 @@ def command_export(args: argparse.Namespace) -> int:
             create_profile_archive(
                 archive_path, profile, include_conversations=args.include_conversations
             )
-            profile_bundle.encrypt_file(archive_path, encrypted_path, passphrase)
+            if passphrase is None:
+                profile_bundle.copy_private_file(archive_path, encrypted_path)
+            else:
+                profile_bundle.encrypt_file(archive_path, encrypted_path, passphrase)
             try:
                 os.link(encrypted_path, output)
             except FileExistsError:
@@ -606,6 +609,7 @@ def command_export(args: argparse.Namespace) -> int:
         finally:
             encrypted_path.unlink(missing_ok=True)
     print(f"Exported profile {args.name}: {output}")
+    print("Encryption: none (contains plaintext credentials)" if passphrase is None else "Encryption: passphrase")
     print(
         "Conversations: included"
         if args.include_conversations
@@ -619,11 +623,47 @@ def args_for_install(args: argparse.Namespace, name: str) -> argparse.Namespace:
         manager_root=args.manager_root,
         default_home=args.default_home,
         name=name,
-        bin_dir=args.bin_dir,
+        bin_dir=args.bin_dir or Path("~/.local/bin"),
         wrapper_name=args.wrapper_name,
-        codex_binary=args.codex_binary,
+        codex_binary=args.codex_binary or "codex",
         force=False,
     )
+
+
+def prepare_bundle_install(args: argparse.Namespace, name: str, existing: bool) -> argparse.Namespace:
+    """Preflight wrapper ownership before any imported credentials are changed."""
+    install_args = args_for_install(args, name)
+    if getattr(args, "updating", False) and existing:
+        profile = load_profile(manager_root(args), name, default_home(args))
+        wrapper = wrapper_from_profile(profile)
+        if wrapper:
+            validate_wrapper_record(wrapper)
+            target = Path(wrapper["path"])
+            if args.wrapper_name is not None and args.wrapper_name != wrapper["command"]:
+                raise ValueError("update preserves the registered wrapper name; use manager install to change it")
+            if args.bin_dir is not None and args.bin_dir.expanduser().resolve() != target.parent.resolve():
+                raise ValueError("update preserves the registered wrapper directory")
+            if args.codex_binary is not None and args.codex_binary != wrapper.get("codex_binary", "codex"):
+                raise ValueError("update preserves the registered Codex executable")
+            if (target.exists() or target.is_symlink()) and not wrapper_matches_record(target, wrapper):
+                raise ValueError(f"refusing to replace modified wrapper: {target}")
+            install_args.bin_dir = target.parent
+            install_args.wrapper_name = wrapper["command"]
+            install_args.wrapper_naming = wrapper["naming"]
+            install_args.codex_binary = wrapper.get("codex_binary", "codex")
+            if not isinstance(install_args.codex_binary, str) or not install_args.codex_binary:
+                raise ValueError("invalid registered Codex executable")
+            install_args.force = True
+            validate_wrapper_target(wrapper["command"], install_args.codex_binary, target)
+            return install_args
+    wrapper_name = install_args.wrapper_name or default_wrapper_name(name)
+    target = install_args.bin_dir.expanduser().resolve() / wrapper_name
+    validate_wrapper_target(wrapper_name, install_args.codex_binary, target)
+    if target.exists() or target.is_symlink():
+        raise FileExistsError(f"command already exists: {target}")
+    if existing and wrapper_from_profile(load_profile(manager_root(args), name, default_home(args))):
+        raise ValueError("profile already has a registered wrapper")
+    return install_args
 
 
 def update_profile_login(archive: zipfile.ZipFile, home: Path) -> None:
@@ -662,17 +702,21 @@ def command_import(args: argparse.Namespace) -> int:
     if not source.is_file():
         print(f"error: profile bundle does not exist: {source}", file=sys.stderr)
         return 2
-    passphrase = prompt_import_passphrase()
     root = manager_root(args)
     default = default_home(args)
 
     with tempfile.TemporaryDirectory(prefix="codex-profile-import-") as temporary:
         archive_path = Path(temporary) / "profile.zip"
-        profile_bundle.decrypt_file(source, archive_path, passphrase)
+        if profile_bundle.is_encrypted_file(source):
+            profile_bundle.decrypt_file(source, archive_path, prompt_import_passphrase())
+        elif zipfile.is_zipfile(source):
+            profile_bundle.copy_private_file(source, archive_path)
+        else:
+            raise ValueError("not a codex-manager profile bundle")
         try:
             archive = zipfile.ZipFile(archive_path, "r")
         except zipfile.BadZipFile as exc:
-            raise ValueError("decrypted profile archive is invalid") from exc
+            raise ValueError("profile archive is invalid") from exc
         with archive:
             manifest = read_bundle_manifest(archive)
             name = args.name or str(manifest["name"])
@@ -686,14 +730,10 @@ def command_import(args: argparse.Namespace) -> int:
             existing = target_profile.exists()
             if existing and not args.force:
                 raise ValueError(
-                    f"profile already exists: {name}; use --force to update its login "
-                    "and configuration, or --name to import a separate profile"
+                    f"profile already exists: {name}; use `manager update BUNDLE` "
+                    "(or import --force) to refresh its login, or --name for a separate profile"
                 )
-            if args.install:
-                wrapper_name = args.wrapper_name or default_wrapper_name(name)
-                wrapper = args.bin_dir.expanduser().resolve() / wrapper_name
-                if wrapper.exists() or wrapper.is_symlink():
-                    raise FileExistsError(f"command already exists: {wrapper}")
+            install_args = prepare_bundle_install(args, name, existing) if args.install else None
 
             includes = manifest["includes"]
             has_conversations = bool(includes.get("conversations"))
@@ -709,7 +749,7 @@ def command_import(args: argparse.Namespace) -> int:
                 print(f"Updated profile {name}")
                 print("Conversations: existing store preserved")
                 if args.install:
-                    return command_install(args_for_install(args, name))
+                    return command_install(install_args)
                 return 0
 
             private_store = has_conversations or args.isolated
@@ -763,7 +803,7 @@ def command_import(args: argparse.Namespace) -> int:
         print("Conversations: shared with default")
 
     if args.install:
-        return command_install(args_for_install(args, name))
+        return command_install(install_args)
     return 0
 
 
@@ -1037,7 +1077,7 @@ def command_install(args: argparse.Namespace) -> int:
             "command": wrapper_name,
             "path": str(target),
             "codex_binary": args.codex_binary,
-            "naming": "default" if args.wrapper_name is None else "custom",
+            "naming": getattr(args, "wrapper_naming", None) or ("default" if args.wrapper_name is None else "custom"),
             "sha256": wrapper_digest(content),
         }
         save_profile(root, profile)
@@ -1290,38 +1330,43 @@ def build_parser(prog: str = "codex-manager") -> argparse.ArgumentParser:
         action="store_true",
         help="Also include portable conversation content.",
     )
+    export.add_argument(
+        "--no-passphrase", action="store_true",
+        help="Export without encryption; the bundle contains plaintext credentials.",
+    )
     export.set_defaults(func=command_export)
 
-    import_cmd = sub.add_parser("import", help="Import an encrypted profile bundle.")
-    import_cmd.add_argument("bundle", type=Path)
-    import_cmd.add_argument(
-        "--force",
-        action="store_true",
-        help="Update an existing profile's login and bundled config; preserve conversations.",
-    )
-    import_cmd.add_argument(
-        "--name", type=valid_name, help="Rename the imported profile."
-    )
-    import_cmd.add_argument(
-        "--isolated",
-        action="store_true",
-        help="Use an empty private conversation store instead of sharing with default.",
-    )
-    import_cmd.add_argument(
-        "--install",
-        action="store_true",
-        help="Install the profile's wrapper command.",
-    )
-    import_cmd.add_argument(
-        "--wrapper",
-        "--command-name",
-        dest="wrapper_name",
-        type=valid_command_name,
-        help="Wrapper name. Default: PROFILE (no prefix).",
-    )
-    import_cmd.add_argument("--bin-dir", type=Path, default=Path("~/.local/bin"))
-    import_cmd.add_argument("--codex-binary", default="codex")
-    import_cmd.set_defaults(func=command_import)
+    for import_name in ("import", "update"):
+        updating = import_name == "update"
+        import_cmd = sub.add_parser(
+            import_name,
+            help="Import or refresh a profile bundle without --force." if updating
+            else "Import a profile bundle (encrypted or unencrypted).",
+        )
+        import_cmd.add_argument("bundle", type=Path)
+        if not updating:
+            import_cmd.add_argument(
+                "--force", action="store_true",
+                help="Update an existing profile's login and bundled config; preserve conversations.",
+            )
+        else:
+            import_cmd.set_defaults(force=True)
+        import_cmd.add_argument("--name", type=valid_name, help="Override the bundle's profile name.")
+        import_cmd.add_argument(
+            "--isolated", action="store_true",
+            help="For a new profile, use a private store instead of sharing with default.",
+        )
+        import_cmd.add_argument(
+            "--install", action="store_true",
+            help="Install the profile wrapper; update can reinstall its registered wrapper.",
+        )
+        import_cmd.add_argument(
+            "--wrapper", "--command-name", dest="wrapper_name", type=valid_command_name,
+            help="Wrapper name. Default: PROFILE (no prefix); update preserves an existing wrapper.",
+        )
+        import_cmd.add_argument("--bin-dir", type=Path, default=None if updating else Path("~/.local/bin"))
+        import_cmd.add_argument("--codex-binary", default=None if updating else "codex")
+        import_cmd.set_defaults(func=command_import, updating=updating)
 
     list_cmd = sub.add_parser("list", help="List profiles.")
     list_cmd.set_defaults(func=command_list)
@@ -1419,6 +1464,9 @@ def main(argv: list[str] | None = None, *, prog: str = "codex-manager") -> int:
         return 2
     except json.JSONDecodeError as exc:
         print(f"error: invalid profile metadata: {exc}", file=sys.stderr)
+        return 2
+    except zipfile.BadZipFile:
+        print("error: profile archive is corrupted", file=sys.stderr)
         return 2
     except (ValueError, argparse.ArgumentTypeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
