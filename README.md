@@ -160,8 +160,9 @@ parallel batches reduce concurrency and recover gradually, up to `--jobs`.
 Use `--fixed` to keep concurrency constant while retaining cooldowns.
 
 The default backend uses `codex exec`; the optional **app-server backend uses a
-separate authenticated connection**. See [structured tasks](docs/structured-tasks.md)
-for login, batching, usage snapshots, and pacing controls.
+separate authenticated connection** with **compact task instructions, no tools,
+and an empty workspace** to reduce prompt overhead. See
+[structured tasks](docs/structured-tasks.md) for login, usage snapshots, and pacing controls.
 
 ## Upcoming mobile Agent Console
 

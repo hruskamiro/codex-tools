@@ -99,6 +99,13 @@ ct structured run \
 `~/.config/codex-tools/app-server/`, independently of Codex homes and
 codex-manager profiles.
 
+**App-server runs are designed for focused, low-overhead prompts.** Each task
+uses a fresh ephemeral thread with a short dedicated instruction, the supplied
+prompt and output schema, and an empty workspace. No project files, dynamic
+tools, environments, or capability roots are supplied; reasoning summaries are
+disabled. This reduces general coding-agent context around the actual task.
+Recorded token usage lets you measure the overhead for your prompts and model.
+
 **Structured runs are isolated and tool-free.** Codex Tools disables the shell
 tool, supplies no dynamic tools or environments, uses an empty read-only
 workspace, and rejects any unexpected tool event. Prompts, schemas, events,
